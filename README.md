@@ -152,6 +152,15 @@ Scheduler giữ tối thiểu một slot cho task con. Các task root vì vậy 
 - Khi daemon restart, task RUNNING chuyển BLOCKED; kiểm tra worker cũ tránh duplicate changes.
 - Dữ liệu SQLite và prompt có thể chứa thông tin dự án; không commit thư mục dữ liệu vào Git.
 
+## Kết quả dài hơn terminal screen
+
+Herdr đọc các dòng đã render; màn hình alternate-screen của Claude Code có thể chỉ hiển thị một phần nội dung. `agent read --lines N` không phải giao thức truyền kết quả đầy đủ. `herdr-task-mcp` không phụ thuộc vào việc đọc lại toàn bộ màn hình worker.
+
+Từ phiên bản này, adapter **gửi prompt một lần** (không dùng `agent prompt --wait`) rồi chờ **file JSON report hợp lệ** tại `.herdr-task-mcp/reports/<task-id>.json`. Mỗi 2 giây, adapter kiểm tra `agent get` để phát hiện trạng thái `blocked`. `idle` và `done` không chứng minh task thành công. Nếu quá `timeout_ms` mà không có report hợp lệ, task chuyển `BLOCKED` để kiểm tra thủ công; adapter không tự động gửi lại prompt.
+
+Worker được hướng dẫn giữ terminal response dưới một dòng ngắn, JSON `summary` dưới 600 ký tự và ghi nội dung dài (test log, phân tích, review) vào `<task-id>.md`, đặt đường dẫn đó trong `artifacts` của JSON report. Report được viết atomic và cuối cùng, sau khi hoàn tất code/test/commit.
+
+Chỉ đọc terminal qua `agent read` để chẩn đoán khi không có report; kết quả chính lấy từ report. Cần xác minh end-to-end trên phiên bản Herdr và Codex/Claude đang dùng.
 ## Chẩn đoán lỗi khởi chạy Codex worker
 
 Nếu backend Claude hoàn thành nhưng frontend Codex thất bại trước khi chạy task, kiểm tra `task_status` hoặc `task_result` của task F1. Khi `agent start` lỗi, task giữ `pane_id` và màn hình terminal cuối cùng để hỗ trợ chẩn đoán.
