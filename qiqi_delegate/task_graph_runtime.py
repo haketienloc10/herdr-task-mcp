@@ -880,11 +880,12 @@ class GraphRuntime:
                     "state": "failed",
                     "agent_response": None,
                     "failure_type": "executor_exception",
+                    "failure_detail": str(exc)[-2400:],
                 },
                 session_id=exc.session_id,
             )
             raise
-        except Exception:
+        except Exception as exc:
             self.store.finish_attempt(
                 wave_attempt.attempt_id,
                 runtime_state="failed",
@@ -892,6 +893,7 @@ class GraphRuntime:
                     "state": "failed",
                     "agent_response": None,
                     "failure_type": "executor_exception",
+                    "failure_detail": str(exc)[-2400:],
                 },
             )
             raise
