@@ -1155,6 +1155,176 @@ class GraphRuntimeStore:
                 (now, attempt["graph_run_id"]),
             )
 
+    def recover_interrupted_attempt(
+        self,
+        *,
+        graph_run_id: str,
+        wave_id: str,
+        node_id: str,
+        attempt_id: str,
+        repository: str,
+        worker_termination_confirmed: bool,
+    ) -> dict[str, Any]:
+        """Operator-only audited terminalization of one exact interrupted attempt.
+
+        Never infer termination from process restart. No automatic replay, wave
+        reset, or wildcard. A still-held repository write claim must first be
+        released through the separate guarded maintenance operation.
+        """
+        if worker_termination_confirmed is not True:
+            raise ValueError("verify worker termination before attempt recovery")
+        run_id = _required_id(graph_run_id, "graph_run_id")
+        wave = _required_id(wave_id, "wave_id")
+        node_key = _required_id(node_id, "node_id")
+        attempt_key = _required_id(attempt_id, "attempt_id")
+        repo = _required_id(repository, "repository")
+        now = time.time_ns()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT current_wave_id, graph_json FROM graph_runs "
+                "WHERE graph_run_id = ?", (run_id,),
+            ).fetchone()
+            if run is None or run["current_wave_id"] != wave:
+                raise RuntimeError("graph run does not have the exact active wave")
+            if not run["graph_json"]:
+                raise RuntimeError("authored graph unavailable for safe recovery")
+            authored = _graph_from_json(run["graph_json"])
+            if _graph_fingerprint(authored) != conn.execute(
+                "SELECT graph_fingerprint FROM graph_runs WHERE graph_run_id = ?",
+                (run_id,),
+            ).fetchone()[0]:
+                raise RuntimeError("persisted graph fingerprint mismatch")
+            matching = [
+                node for node in authored.nodes
+                if node.node_id == node_key and node.repository == repo
+            ]
+            if len(matching) != 1:
+                raise RuntimeError("node/repository does not match authored graph")
+            attempt = conn.execute(
+                "SELECT graph_run_id, node_id, wave_id, runtime_state, "
+                "dispatch_state, retry_plan_json FROM graph_attempts "
+                "WHERE attempt_id = ?", (attempt_key,),
+            ).fetchone()
+            if (
+                attempt is None
+                or attempt["graph_run_id"] != run_id
+                or attempt["node_id"] != node_key
+                or attempt["wave_id"] != wave
+                or attempt["runtime_state"] != "running"
+            ):
+                raise RuntimeError("attempt is not the exact running wave attempt")
+            node_state = conn.execute(
+                "SELECT current_attempt_id, semantic_state, runtime_state, active "
+                "FROM graph_node_states WHERE graph_run_id = ? AND node_id = ?",
+                (run_id, node_key),
+            ).fetchone()
+            if (
+                node_state is None or not node_state["active"]
+                or node_state["current_attempt_id"] != attempt_key
+                or node_state["semantic_state"] != "pending"
+                or node_state["runtime_state"] != "running"
+            ):
+                raise RuntimeError("attempt no longer owns the active node")
+            # The CLI's DB is the workspace DB; treat missing claim registry
+            # as an invalid maintenance target, never assume no live writer.
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='write_claims'"
+            ).fetchone() is None:
+                raise RuntimeError("workspace write-claim registry is unavailable")
+            if conn.execute(
+                "SELECT 1 FROM write_claims WHERE repository = ?", (repo,),
+            ).fetchone() is not None:
+                raise RuntimeError(
+                    "repository still has a write claim; confirm worker termination "
+                    "and release the exact claim before recovering the attempt"
+                )
+
+            pending = conn.execute(
+                "SELECT plan_json FROM graph_retry_plans "
+                "WHERE graph_run_id = ? AND node_id = ?", (run_id, node_key),
+            ).fetchone()
+            if pending is not None:
+                if pending["plan_json"] != attempt["retry_plan_json"]:
+                    raise RuntimeError("pending retry plan changed; cannot recover safely")
+                conn.execute(
+                    "DELETE FROM graph_retry_plans WHERE graph_run_id = ? AND node_id = ? "
+                    "AND plan_json = ?",
+                    (run_id, node_key, pending["plan_json"]),
+                )
+
+            result = _result_json({
+                "state": "failed",
+                "agent_response": None,
+                "failure_type": "operator_recovered_interrupted_attempt",
+                "failure_detail": (
+                    "Operator confirmed Herdr worker termination; no task was "
+                    "replayed. Review the attempt and decide whether to retry."
+                ),
+                "dispatch_state_at_recovery": attempt["dispatch_state"],
+            })
+            updated = conn.execute(
+                "UPDATE graph_attempts SET runtime_state='failed', result_json=?, "
+                "updated_at_ns=? WHERE attempt_id=? AND runtime_state='running'",
+                (result, now, attempt_key),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("attempt changed while recovering")
+            conn.execute(
+                "UPDATE graph_node_states SET runtime_state='failed', updated_at_ns=? "
+                "WHERE graph_run_id=? AND node_id=? AND current_attempt_id=?",
+                (now, run_id, node_key, attempt_key),
+            )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS graph_attempt_recovery_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    graph_run_id TEXT NOT NULL,
+                    wave_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    attempt_id TEXT NOT NULL UNIQUE,
+                    repository TEXT NOT NULL,
+                    dispatch_state TEXT NOT NULL,
+                    worker_termination_confirmed INTEGER NOT NULL
+                        CHECK(worker_termination_confirmed = 1),
+                    recovered_at_ns INTEGER NOT NULL
+                )
+            """)
+            conn.execute(
+                "INSERT INTO graph_attempt_recovery_audit "
+                "(graph_run_id, wave_id, node_id, attempt_id, repository, "
+                "dispatch_state, worker_termination_confirmed, recovered_at_ns) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                (run_id, wave, node_key, attempt_key, repo,
+                 attempt["dispatch_state"], now),
+            )
+            active = conn.execute(
+                "SELECT COUNT(*) FROM graph_attempts WHERE graph_run_id = ? "
+                "AND wave_id = ? AND runtime_state = 'running'",
+                (run_id, wave),
+            ).fetchone()[0]
+            if active == 0:
+                conn.execute(
+                    "UPDATE graph_runs SET current_wave_id=NULL, "
+                    "updated_at_ns=?, revision=revision+1 "
+                    "WHERE graph_run_id=? AND current_wave_id=?",
+                    (now, run_id, wave),
+                )
+            else:
+                conn.execute(
+                    "UPDATE graph_runs SET updated_at_ns=?, revision=revision+1 "
+                    "WHERE graph_run_id=?", (now, run_id),
+                )
+        return {
+            "graph_run_id": run_id,
+            "wave_id": wave,
+            "node_id": node_key,
+            "attempt_id": attempt_key,
+            "repository": repo,
+            "recovered": True,
+            "wave_closed": active == 0,
+        }
+
     def recover_quiescent_wave(self, graph_run_id: str) -> bool:
         """Close a wave with no running attempts after an interrupted coordinator.
 
