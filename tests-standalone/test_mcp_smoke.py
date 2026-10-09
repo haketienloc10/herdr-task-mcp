@@ -291,7 +291,7 @@ def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, mon
     assert "workspace_id=w-blocked" in error
     assert "write_claim_id=turn:" in error
     assert "agent explain" in error and "agent read" in error
-    assert "release_write_claim" in error
+    assert "operator-side claim cleanup" in error
     assert not any(x[:2] == ("workspace", "close") for x in calls)
     with rt._connect() as db:
         claim = db.execute("SELECT claim_id FROM write_claims WHERE repository='backend'").fetchone()
@@ -317,11 +317,21 @@ def test_graph_review_keeps_startup_failure_details(tmp_path):
     after = gr.get_graph(current["graph_run_id"])
     assert len(after["review_required"]) == 1
     item = after["review_required"][0]
-    review = gr.get_node_review(
-        current["graph_run_id"], item["node_id"], item["attempt_id"]
+    review = gr.get_node_reviews(
+        current["graph_run_id"], [(item["node_id"], item["attempt_id"])],
+        expected_revision=after["revision"],
     )
-    result = review["result"]
+    result = review["reviews"][0]["result"]
     assert result["failure_type"] == "executor_exception"
     assert result["agent_response"] is None
     assert "write_claim_id=turn:abc" in result["failure_detail"]
 
+
+
+def test_removed_mcp_tools_are_not_public(tmp_path):
+    """Review batching is the only public review entry point; recovery is not MCP."""
+    from qiqi_delegate import server
+    assert not hasattr(server, "get_node_review")
+    assert not hasattr(server, "release_write_claim")
+    assert hasattr(server, "get_node_reviews")
+    assert hasattr(server, "submit_decisions")
