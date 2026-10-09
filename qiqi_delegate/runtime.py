@@ -329,6 +329,27 @@ class DelegateRuntime:
                                 pass
                         await server.wait()
 
+    @staticmethod
+    async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
+        """Do not abandon a Herdr child when the requesting task is cancelled.
+
+        Cleanup runs in its own task. Shielding prevents a second cancellation
+        of the MCP request from cancelling the child reaper too.
+        """
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass  # The child exited between checking returncode and kill.
+        reaper = asyncio.create_task(proc.communicate())
+        while not reaper.done():
+            try:
+                await asyncio.shield(reaper)
+            except asyncio.CancelledError:
+                # Continue reaping even if the parent receives more cancellations.
+                pass
+        await reaper
+
     async def _run(self, *args: str, timeout=60, check=True):
         argv = self._herdr_argv(*args)
         proc = await asyncio.create_subprocess_exec(
@@ -338,9 +359,11 @@ class DelegateRuntime:
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout)
         except (TimeoutError, asyncio.TimeoutError):
-            proc.kill()
-            await proc.communicate()
+            await self._kill_and_reap(proc)
             raise RuntimeError(f"Herdr command timeout: {args[:2]}")
+        except asyncio.CancelledError:
+            await self._kill_and_reap(proc)
+            raise
         stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
         if proc.returncode and check:
             detail = (stderr or stdout)[-1800:]
