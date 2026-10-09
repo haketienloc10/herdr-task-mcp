@@ -10,7 +10,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from qiqi_delegate.install import START, END, managed_rules, install_workspace
+from qiqi_delegate.install import START, END, RULES, managed_rules, install_workspace
 from qiqi_delegate.runtime import DelegateRuntime
 
 def setup_git(path: Path):
@@ -27,6 +27,28 @@ def test_agent_markers_are_byte_for_byte_bounded():
     modified = updated.replace(b"Lead", b"Coordinator")
     assert managed_rules(modified).startswith(before)
     assert managed_rules(modified).endswith(after)
+
+def test_managed_rules_are_generic_and_forbid_lead_direct_repo_access():
+    # The installer must not prescribe a particular repository layout or demo name.
+    for demo_specific in ("frontend", "backend", "../", "herdr-delegate-lab"):
+        assert demo_specific not in RULES
+    assert "Lead không tự đọc, sửa, chạy lệnh, kiểm thử hoặc commit" in RULES
+    assert "Giao mọi công việc repository-scoped cho Peer" in RULES
+    assert "Không tự suy đoán đường dẫn, tạo, clone" in RULES
+    assert "Không tự cài MCP, thêm rule hoặc sửa `AGENTS.md` trong repository đích" in RULES
+    assert "không đồng nghĩa với ACCEPT" in RULES
+
+    # Updating an existing managed block must preserve both surrounding regions.
+    prefix = b"# Global workspace rules\r\n\r\nDo not touch.  \r\n"
+    suffix = b"\r\n# Other agent policies\r\nUnchanged trailing policy.  \r\n"
+    previous = prefix + START.encode() + b"\r\nOld managed content\r\n" + END.encode() + suffix
+    new = managed_rules(previous)
+    assert new.startswith(prefix)
+    assert new.endswith(suffix)
+    assert b"Old managed content" not in new
+    assert b"Lead kh" in new
+    assert managed_rules(new) == new
+
 
 @pytest.mark.parametrize("broken", [
     b"<!-- BEGIN HERDR-TASK-MCP RULES -->\n",
