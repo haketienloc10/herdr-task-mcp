@@ -244,3 +244,84 @@ asyncio.run(main())
                           capture_output=True, text=True, timeout=20)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
+
+
+def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, monkeypatch):
+    """Startup approval must not lose its pane before the user can inspect it."""
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    repo = tmp_path / "backend"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n  - name: backend\n    path: backend\n"
+    )
+    (tmp_path / "agent-routing.yaml").write_text(
+        "routes:\n  codex-balanced:\n    agent: codex\n    args: []\n"
+    )
+    rt = DelegateRuntime(tmp_path)
+    monkeypatch.setattr("qiqi_delegate.runtime.shutil.which", lambda _: "/bin/true")
+    async def ready():
+        return None
+    async def create(*args, **kwargs):
+        assert args[:2] == ("workspace", "create")
+        return {"workspace": {"workspace_id": "w-blocked"}, "root_pane": {"pane_id": "p-blocked"}}
+    calls = []
+    async def commands(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ("agent", "start"):
+            return 1, "", json.dumps({"error": {
+                "code": "agent_not_ready", "message": "blocked during startup"
+            }})
+        if args[:2] == ("agent", "explain"):
+            return 0, '{"status":"blocked","matcher":"approval"}', ""
+        if args[:2] == ("workspace", "close"):
+            raise AssertionError("must not destroy blocked startup pane")
+        raise AssertionError(args)
+    monkeypatch.setattr(rt, "_ensure_herdr_server", ready)
+    monkeypatch.setattr(rt, "_json", create)
+    monkeypatch.setattr(rt, "_run", commands)
+    packet = build_task_packet(
+        objective="Inspect module", scope=["src"],
+        acceptance_criteria=["Explain entrypoint"]
+    )
+    with pytest.raises(AgentStartupBlocked) as exc:
+        asyncio.run(rt.delegate(repository="backend", route="codex-balanced", packet=packet))
+    error = str(exc.value)
+    assert "agent_not_ready" in error
+    assert "workspace_id=w-blocked" in error
+    assert "write_claim_id=turn:" in error
+    assert "agent explain" in error and "agent read" in error
+    assert "release_write_claim" in error
+    assert not any(x[:2] == ("workspace", "close") for x in calls)
+    with rt._connect() as db:
+        claim = db.execute("SELECT claim_id FROM write_claims WHERE repository='backend'").fetchone()
+    assert claim is not None and claim[0] in error
+
+
+def test_graph_review_keeps_startup_failure_details(tmp_path):
+    """Lead review needs the exact worker exception, not executor_exception alone."""
+    from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
+    from qiqi_delegate.task_graph_store import GraphRuntimeStore
+    rt = DelegateRuntime(tmp_path)
+    graph = task_graph_from_payload({"nodes": [{
+        "node_id": "backend", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {"objective": "Inspect", "scope": ["src"],
+                        "acceptance_criteria": ["Describe API"]}
+    }]})
+    gr = GraphRuntime(GraphRuntimeStore(rt.db))
+    current = gr.start_graph(graph, repository_names=["backend"])
+    async def fail(_node):
+        raise RuntimeError("agent_not_ready; workspace_id=w-blocked; write_claim_id=turn:abc")
+    with pytest.raises(RuntimeError, match="agent_not_ready"):
+        asyncio.run(gr.delegate_next(current["graph_run_id"], executor=fail))
+    after = gr.get_graph(current["graph_run_id"])
+    assert len(after["review_required"]) == 1
+    item = after["review_required"][0]
+    review = gr.get_node_review(
+        current["graph_run_id"], item["node_id"], item["attempt_id"]
+    )
+    result = review["result"]
+    assert result["failure_type"] == "executor_exception"
+    assert result["agent_response"] is None
+    assert "write_claim_id=turn:abc" in result["failure_detail"]
+
