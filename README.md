@@ -162,6 +162,7 @@ Human → Lead QiQi → TaskPacket / TaskGraph → qiqi_delegate → Herdr
 
 - Authored DAG (bao gồm TaskPacket, route và dependency), node state, revision, attempts và pending retry plan được lưu vào SQLite. Sau khi server restart, `get_graph(graph_run_id)`, `get_node_reviews`, `submit_decisions`, `reconcile_graph` và `delegate_next` đọc lại dữ liệu này; không tự reset ACCEPT hoặc dispatch lại node.
 - `submit_decisions(action="retry")` lưu TaskPacket kèm feedback và lựa chọn START/RESUME trong cùng transaction với semantic transition. `delegate_next` chỉ tiêu thụ retry plan khi tạo attempt trong SQLite, không replay retry đã bắt đầu trước khi crash.
+- Nếu server chết sau khi mọi attempt đã terminal nhưng trước `close_wave()`, lần load kế tiếp tự đóng quiescent wave bằng transaction. Không tạo thêm attempt hoặc giả định Peer tạo kết quả mới.
 - Nếu restart lúc wave đang chạy, attempt vẫn `running` và graph không `ready`. Không tự coi worker đã dừng, không xóa claim, không retry. Người vận hành phải kiểm tra và xử lý worker/claim theo quy trình an toàn trước khi mở lại graph. Không có MCP recovery tool.
 - Graph run được tạo trước phiên bản lưu `graph_json` không thể khôi phục chỉ từ fingerprint. Runtime từ chối mở graph legacy thay vì tự suy đoán authored DAG. Nên tạo graph run mới hoặc di chuyển authored definition qua migration được kiểm chứng; không sửa SQLite bằng phỏng đoán.
 
