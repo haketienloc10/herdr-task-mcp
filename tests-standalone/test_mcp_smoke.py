@@ -94,3 +94,44 @@ def test_direct_native_capture_creates_and_releases_repo_claim(tmp_path, monkeyp
         assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 0
     assert not (repo / ".qiqi").exists()
     assert not (repo / ".herdr-task-mcp").exists()
+
+def test_tool_errors_include_registry_reason_and_repair_action(tmp_path):
+    """No generic 'Error executing tool' when a sibling/registry path is invalid."""
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n  - name: frontend\n    path: ../../forbidden\n"
+    )
+    script = """
+import asyncio
+from mcp.server.mcpserver.exceptions import ToolError
+from qiqi_delegate.server import start_graph, delegate_repo_task, Graph, Node, Packet
+
+packet = Packet(objective='Read frontend', scope=['src'],
+                acceptance_criteria=['Describe entry point'])
+graph = Graph(nodes=[Node(node_id='front', repository='frontend',
+                          route='codex-balanced', task_packet=packet)])
+async def verify():
+    for label, invocation in (
+        ('graph', lambda: start_graph(graph)),
+        ('direct', lambda: delegate_repo_task(
+            repository='frontend', route='codex-balanced',
+            objective='Read frontend', scope=['src'],
+            acceptance_criteria=['Describe entry point'])),
+    ):
+        try:
+            await invocation()
+        except ToolError as exc:
+            message = str(exc)
+            assert 'code=repository_registry_invalid' in message, message
+            assert 'escapes the workspace parent boundary' in message, message
+            assert 'action=' in message, message
+        else:
+            raise AssertionError(label + ': invalid path unexpectedly accepted')
+asyncio.run(verify())
+"""
+    env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env,
+        capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
