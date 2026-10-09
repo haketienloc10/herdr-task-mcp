@@ -1,6 +1,7 @@
 """Standalone QiQi MCP tools: delegation and TaskGraph; no SLP/Supervisor."""
 from __future__ import annotations
 
+import os
 from functools import wraps
 from typing import Any, Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,6 +81,7 @@ mcp = MCPServer(
         "Pass the exact repository name from workspace repos.yaml. "
         "Lead owns technical acceptance. Native result hooks are the only answer source. "
         "No terminal scraping, Supervisor, or sibling repository reads. "
+        "Call workspace_info first for registered repositories and route names. "
         "For multiple nodes: start_graph, delegate_next, get_node_review(s), submit_decisions. "
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
         "If a Peer cannot start because Herdr is unavailable, review the runtime error "
@@ -125,6 +127,38 @@ def _public_tool_errors(func):
 def _to_packet(value: Packet):
     return build_task_packet(**value.model_dump(exclude_none=True))
 
+
+def _check_graph_routes(authored) -> None:
+    """Fail before writing any TaskGraph snapshot if a route does not exist."""
+    for node in authored.nodes:
+        if not node.route:
+            raise ValueError(f"node {node.node_id!r} has no route")
+        runtime.route(node.route)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def workspace_info() -> dict[str, Any]:
+    """List registered repository names, agent route names and selected Herdr session.
+
+    Call this before start_graph or delegate_repo_task. Do not guess route names.
+    """
+    repositories = runtime.repos()
+    cfg = runtime._load_yaml("agent-routing.yaml")
+    routes = cfg.get("routes", {})
+    if not isinstance(routes, dict):
+        raise ValueError("agent-routing.yaml routes must be an object")
+    summary = {}
+    for name in routes:
+        agent, _ = runtime.route(name)
+        summary[name] = agent
+    return {
+        "repositories": sorted(repositories),
+        "routes": summary,
+        "herdr_session": runtime.herdr_session or "inherited/default",
+        "herdr_socket_env_present": bool(os.environ.get("HERDR_SOCKET_PATH")),
+    }
+
 @mcp.tool()
 @_public_tool_errors
 async def delegate_repo_task(
@@ -153,6 +187,7 @@ async def delegate_repo_task(
 async def start_graph(graph: Graph) -> dict[str, Any]:
     """Validate and persist a dependency DAG. Does not launch any Peer."""
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
+    _check_graph_routes(authored)
     return graph_runtime.start_graph(authored, repository_names=runtime.repos().keys())
 
 @mcp.tool()
@@ -240,6 +275,7 @@ async def reconcile_graph(graph_run_id: str, graph: Graph,
                           expected_revision: int) -> dict[str, Any]:
     """Apply a new explicit authored DAG with revision protection."""
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
+    _check_graph_routes(authored)
     return graph_runtime.reconcile_graph(
         graph_run_id, authored, repository_names=runtime.repos().keys(),
         expected_revision=expected_revision,
