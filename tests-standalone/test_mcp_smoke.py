@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -291,11 +292,20 @@ def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, mon
     assert "workspace_id=w-blocked" in error
     assert "write_claim_id=turn:" in error
     assert "agent explain" in error and "agent read" in error
-    assert "qiqi-delegate-admin release-claim" in error
+    # Recovery must use the MCP process interpreter, not an unqualified CLI
+    # which is absent from PATH under the documented non-activated venv setup.
+    assert (
+        f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+        "release-claim" in error
+    )
+    assert f"--workspace {shlex.quote(str(tmp_path.resolve()))}" in error
+    assert "--worker-termination-confirmed" in error
+    assert "qiqi-delegate-admin" not in error
     assert not any(x[:2] == ("workspace", "close") for x in calls)
     with rt._connect() as db:
         claim = db.execute("SELECT claim_id FROM write_claims WHERE repository='backend'").fetchone()
     assert claim is not None and claim[0] in error
+    assert f"--claim-id {shlex.quote(claim[0])}" in error
 
 
 def test_graph_review_keeps_startup_failure_details(tmp_path):
