@@ -281,16 +281,21 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
                 turn = db.execute("SELECT state FROM turns WHERE turn_id=?", (turn_id,)).fetchone()
             if not turn or turn["state"] != "settled":
                 raise ValueError("ACCEPT requires an exact successful captured Peer response")
-        if turn_id:
-            reason = f"Lead decision: {decision.action}"
-            if decision.feedback:
-                reason += "; feedback=" + " | ".join(decision.feedback)
-            if decision.action in {"replan", "block"}:
-                reason += f"; owner={decision.owner}; return_checkpoint={decision.return_checkpoint}"
-            dispositions.append({
-                "turn_id": turn_id, "action": decision.action, "reason": reason,
-                "node_id": decision.node_id, "attempt_id": persisted.get("current_attempt_id"),
-            })
+        reason = f"Lead decision: {decision.action}"
+        if decision.feedback:
+            reason += "; feedback=" + " | ".join(decision.feedback)
+        if decision.action in {"replan", "block"}:
+            reason += f"; owner={decision.owner}; return_checkpoint={decision.return_checkpoint}"
+        dispositions.append({
+            "turn_id": turn_id, "action": decision.action, "reason": reason,
+            "node_id": decision.node_id,
+            "attempt_id": persisted.get("current_attempt_id"),
+            "owner": decision.owner if decision.action in {"replan", "block"} else None,
+            "return_checkpoint": (
+                decision.return_checkpoint
+                if decision.action in {"replan", "block"} else None
+            ),
+        })
     return graph_runtime.submit_decisions(
         graph_run_id, parsed, expected_revision=expected_revision,
         lead_dispositions=tuple(dispositions),
