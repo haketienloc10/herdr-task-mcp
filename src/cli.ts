@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { loadConfig } from './config.ts';
 
 const command = process.argv[2] ?? 'mcp';
@@ -26,7 +27,7 @@ if (command === 'daemon' || command === 'workspace') {
   ]);
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   const store = new TaskStore(config.dbPath);
-  const orchestrator = new Orchestrator(store, new HerdrRuntime(config.herdrBin), config);
+  const orchestrator = new Orchestrator(store, new HerdrRuntime(config.herdrBin, 30000, join(config.dataDir, 'settings.json')), config);
   const server = await serveSocket(config.socketPath, orchestrator);
   orchestrator.start();
   console.error(`herdr-task-mcp daemon listening: ${config.socketPath}`);

@@ -1,6 +1,7 @@
 import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_WORKER_SETTINGS, loadWorkerSettings } from './worker-settings.ts';
 
 const START = '# >>> herdr-task-mcp workspace (managed)';
 const END = '# <<< herdr-task-mcp workspace (managed)';
@@ -169,18 +170,26 @@ async function rejectSymlink(path: string): Promise<void> {
 export async function initWorkspace(paths: WorkspacePaths): Promise<void> {
   const codexPath = join(paths.root, '.codex', 'config.toml');
   const claudePath = join(paths.root, '.mcp.json');
+  const workerSettingsPath = join(paths.dataDir, 'settings.json');
   await Promise.all([
     rejectSymlink(join(paths.root, '.codex')), rejectSymlink(codexPath),
-    rejectSymlink(claudePath), rejectSymlink(paths.dataDir)
+    rejectSymlink(claudePath), rejectSymlink(paths.dataDir), rejectSymlink(workerSettingsPath)
   ]);
   // Validate both before performing any writes to avoid partially applied configuration on normal errors.
   const [codexOld, claudeOld] = await Promise.all([readOptional(codexPath), readOptional(claudePath)]);
+  // Validate existing settings before writing any workspace configuration.
+  await loadWorkerSettings(workerSettingsPath);
   const codexNew = codexConfig(codexOld, paths);
   const claudeNew = claudeConfig(claudeOld, paths);
   await mkdir(join(paths.root, '.codex'), { recursive: true });
   await mkdir(paths.dataDir, { recursive: true, mode: 0o700 });
   // Git ignores every state file even if the containing project has no .gitignore entry.
   await writeFile(join(paths.dataDir, '.gitignore'), '*\n!.gitignore\n');
+  await writeFile(workerSettingsPath, JSON.stringify(DEFAULT_WORKER_SETTINGS, null, 2) + '\n', {
+    flag: 'wx', mode: 0o600
+  }).catch(error => {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  });
   await writeFile(codexPath, codexNew);
   await writeFile(claudePath, claudeNew);
 }

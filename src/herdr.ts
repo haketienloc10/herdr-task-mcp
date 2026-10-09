@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import type { AgentKind, Task, WorkerReport } from './types.ts';
+import { buildAgentStartArgs, loadWorkerSettings } from './worker-settings.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -54,8 +55,11 @@ export class WorkerStartupError extends Error {
 export class HerdrRuntime implements AgentRuntime {
   private readonly binary: string;
   private readonly cliTimeoutMs: number;
-  constructor(binary: string, cliTimeoutMs = 30000) {
-    this.binary = binary; this.cliTimeoutMs = cliTimeoutMs;
+  private readonly workerSettingsPath?: string;
+  constructor(binary: string, cliTimeoutMs = 30000, workerSettingsPath?: string) {
+    this.binary = binary;
+    this.cliTimeoutMs = cliTimeoutMs;
+    this.workerSettingsPath = workerSettingsPath;
   }
   private async call(args: string[], timeout = this.cliTimeoutMs, signal?: AbortSignal): Promise<string> {
     try {
@@ -67,6 +71,8 @@ export class HerdrRuntime implements AgentRuntime {
     }
   }
   async start(task: Task): Promise<{ agentName: string; paneId: string }> {
+    // Read before allocating a pane; each new task uses the latest workspace settings.
+    const settings = await loadWorkerSettings(this.workerSettingsPath);
     const agentName = `ht${randomBytes(8).toString('hex')}`;
     const env = [`--env`, `HERDR_TASK_PARENT_ID=${task.id}`];
     const paneArgs = task.source_pane_id
@@ -76,7 +82,9 @@ export class HerdrRuntime implements AgentRuntime {
     const paneId = created.pane?.pane_id ?? created.root_pane?.pane_id;
     if (!paneId) throw new Error('Herdr did not return a pane_id');
     try {
-      parseHerdrResult(await this.call(['agent', 'start', agentName, '--kind', task.target, '--pane', paneId, '--timeout', '30000'], 35000));
+      parseHerdrResult(await this.call(buildAgentStartArgs(
+        agentName, task.target, paneId, settings.agents[task.target].args
+      ), 35000));
     } catch (error) {
       // The agent might not exist yet, so use pane read rather than agent read.
       const paneOutput = await this.call(
