@@ -842,6 +842,10 @@ class GraphRuntime:
     ) -> dict[str, Any]:
         retry_plan = wave_attempt.retry_plan
         try:
+            # Persist this dispatch boundary before calling the executor.
+            # Prepared attempts retain their retry plans if the coordinator
+            # crashes before scheduling or starting a coroutine.
+            self.store.mark_attempt_dispatched(wave_attempt.attempt_id)
             if retry_plan is not None and retry_plan.resume_session:
                 assert retry_plan.session_id is not None
                 assert resume_executor is not None
@@ -934,7 +938,7 @@ class GraphRuntime:
         wave is closed only after every claimed attempt reaches a terminal runtime state.
         """
 
-        _, snapshot, _ = self._snapshot(graph_run_id)
+        _, snapshot, revision = self._snapshot(graph_run_id)
         graph_state = derive_graph_state(snapshot)
         if graph_state != "ready":
             raise RuntimeError(
@@ -964,37 +968,33 @@ class GraphRuntime:
                 )
 
         wave_id = new_wave_id()
-        claimed: list[WaveAttempt] = []
-        try:
-            for execution_node, retry_plan in selected:
-                attempt_id = self.store.start_attempt(
-                    graph_run_id,
-                    execution_node.node_id,
-                    wave_id,
-                    resume_session=(
+        # One SQLite transaction validates the authored revision and claims the
+        # entire wave. If a later node cannot be claimed, the whole wave rolls
+        # back: no artificial failed attempts, lost feedback, or dispatched Peer.
+        attempt_ids = self.store.start_wave(
+            graph_run_id,
+            wave_id,
+            expected_revision=revision,
+            attempts=tuple(
+                {
+                    "node_id": node.node_id,
+                    "resume_session": (
                         retry_plan.resume_session if retry_plan is not None else False
                     ),
-                    session_id=(retry_plan.session_id if retry_plan is not None else None),
-                    retry_plan=(retry_plan.as_dict() if retry_plan is not None else None),
-                )
-                claimed.append(
-                    WaveAttempt(
-                        node=execution_node,
-                        retry_plan=retry_plan,
-                        attempt_id=attempt_id,
-                    )
-                )
-        except Exception:
-            if claimed:
-                self._terminalize_running_wave_attempts(
-                    claimed,
-                    failure_type="wave_start_failed",
-                )
-                self.store.close_wave(graph_run_id, wave_id)
-            raise
+                    "session_id": retry_plan.session_id if retry_plan else None,
+                    "retry_plan": retry_plan.as_dict() if retry_plan else None,
+                }
+                for node, retry_plan in selected
+            ),
+        )
+        claimed = [
+            WaveAttempt(node=node, retry_plan=plan, attempt_id=attempt_id)
+            for (node, plan), attempt_id in zip(selected, attempt_ids, strict=True)
+        ]
 
-        # Retry intent is consumed atomically with each attempt claim in SQLite.
-        # A restarted runtime must not replay a plan already claimed by a worker.
+        # Until each coroutine enters the dispatch boundary, retry intent
+        # remains durable. A crash with prepared attempts is fail-closed:
+        # never automatically assume an external worker is absent.
 
         tasks = [
             asyncio.create_task(
