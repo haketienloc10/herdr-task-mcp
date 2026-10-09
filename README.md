@@ -1,3 +1,91 @@
+# herdr-task-mcp — QiQi Delegate standalone
+
+Python MCP độc lập để delegate Codex/Claude qua Herdr. Không cần agent-knowledge-harness, không cài gì vào Git repo con, không chạy Supervisor Broker.
+
+## Cài theo workspace, không cài global
+
+Yêu cầu: Python >=3.10, Git, Herdr CLI có Codex/Claude integration.
+
+Chạy tại workspace cha chứa frontend/ và backend/:
+
+```bash
+mkdir -p .tools
+git clone -b feat/standalone-qiqi-delegate \
+  https://github.com/haketienloc10/herdr-task-mcp.git .tools/herdr-task-mcp
+python3 -m venv .tools/herdr-task-mcp/.venv
+.tools/herdr-task-mcp/.venv/bin/python -m pip install -e './.tools/herdr-task-mcp'
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.install --workspace "$PWD"
+```
+
+Installer chỉ cấu hình workspace: AGENTS.md, .codex/config.toml, .mcp.json, repos.yaml, agent-routing.yaml và .herdr-task-mcp/ (SQLite). Không sửa frontend/, backend/ hoặc cài MCP vào home/global.
+
+## AGENTS.md — chỉ sửa nội dung nằm trong marker
+
+```markdown
+<!-- BEGIN HERDR-TASK-MCP RULES -->
+... rules của QiQi Delegate ...
+<!-- END HERDR-TASK-MCP RULES -->
+```
+
+Installer giữ nguyên mọi byte trước/sau marker, kể cả CRLF và khoảng trắng. Chạy lại không tạo block trùng. Nếu marker thiếu một bên, sai thứ tự hoặc bị nhân đôi, installer từ chối ghi. AGENTS.md trong repo con không được sửa.
+
+## Repo registry ở workspace cha
+
+Chỉnh `repos.yaml`:
+
+```yaml
+repositories:
+  - name: frontend
+    path: frontend
+  - name: backend
+    path: backend
+```
+
+`repository` là name trong registry. `path` tương đối với workspace root và phải trỏ tới Git root; không cần có file QiQi nào trong repo con.
+
+## Route và tham số agent
+
+Chỉnh `agent-routing.yaml`: 
+
+```yaml
+routes:
+  codex-balanced:
+    agent: codex
+    args: ['--yolo']
+  claude-balanced:
+    agent: claude
+    args: ['--permission-mode', 'auto']
+```
+
+Đây là ví dụ opt-in. Installer mặc định để `args: []`. `--yolo` bỏ qua approval/sandbox của Codex; chỉ bật nếu workspace đã được cô lập. Runtime tự cấu hình native Stop hook nên không cho sửa hook bằng route args.
+
+## Workflow
+
+```text
+Human → Lead QiQi → TaskPacket / TaskGraph → qiqi_delegate → Herdr
+  → Codex/Claude Peer → Native Stop hook → captured result → Lead decision
+```
+
+**Direct Delegation:** `delegate_repo_task` nhận `repository`, `route`, `objective`, `scope`, `acceptance_criteria` và các field tùy chọn. Không có `session_id` thì START; có exact `session_id` được sở hữu hợp lệ thì RESUME.
+
+**TaskGraph:** `start_graph` → `delegate_next` → `get_node_review` (hoặc `get_node_reviews`) → `submit_decisions`. Có thể dùng `get_graph` hoặc `reconcile_graph` khi cần. Downstream chỉ chạy sau khi upstream được Lead ACCEPT. Tối đa một writer cùng repo trong một wave.
+
+**Native result:** mỗi delegated turn có sink/nonce riêng, lấy final response từ Stop/StopFailure hook thay vì Herdr screen. SQLite tại `.herdr-task-mcp/qiqi_delegate.sqlite3` giữ session, turn và write claim. Khi cleanup không xác nhận, claim còn hiệu lực và phải được giải phóng thủ công sau khi worker cũ đã dừng.
+
+**Không có Supervisor:** không chạy broker, supervisor agent hoặc case audit. SLP R1–R5 không nằm trong runtime độc lập. Lead chịu trách nhiệm technical review.
+
+## Test và giới hạn
+
+```bash
+.tools/herdr-task-mcp/.venv/bin/python -m pytest -q .tools/herdr-task-mcp/tests-standalone
+```
+
+CI kiểm thử Python 3.10/3.13. Chưa kiểm tra end-to-end với Herdr thực. Authored TaskGraph và retry plan vẫn giữ trong process memory; chưa phục hồi đầy đủ sau restart.
+
+---
+
+## Node task MCP trước đây
+
 # herdr-task-mcp
 
 MCP server dùng chung để **Codex ↔ Codex/Claude** và **Claude ↔ Codex/Claude** giao task thông qua [Herdr](https://herdr.dev/). Đây là MVP; chưa tự động merge worktree hay xác minh chất lượng code của worker.
