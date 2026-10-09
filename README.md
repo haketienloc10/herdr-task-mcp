@@ -77,6 +77,28 @@ Lưu ý: ignore không áp dụng cho file đã được Git track. Các path ab
 
 Nếu trước đó đã đăng ký MCP ở user/global config, hãy kiểm tra và gỡ bản đăng ký cũ riêng. `workspace init` không tự sửa cấu hình cá nhân của Codex hoặc Claude.
 
+## Tham số khởi động agent theo workspace
+
+`workspace init` tạo `.herdr-task-mcp/settings.json` trong workspace và không ghi đè khi chạy lại. Mặc định `args` rỗng, để quyền phê duyệt và sandbox do Codex/Claude quản lý. Nếu muốn worker tự thực hiện chỉnh sửa file, sửa file như sau:
+
+```json
+{
+  "agents": {
+    "codex": { "args": ["--yolo"] },
+    "claude": { "args": ["--permission-mode=auto"] }
+  }
+}
+```
+
+Herdr khởi chạy worker qua `herdr agent start <name> --kind codex --pane <pane-id> --timeout 30000 -- --yolo` hoặc cùng lệnh với `--kind claude` và `-- --permission-mode=auto`. Dấu `--` phân tách tham số Herdr và tham số của agent. Có thể truyền các cặp tham số dưới dạng từng phần tử riêng, ví dụ `"args": ["--model", "model-name"]`.
+
+- **Phạm vi:** settings chỉ áp dụng cho worker thuộc daemon workspace này, không thay đổi cài đặt Codex/Claude toàn cục hay MCP client.
+- **Thời điểm áp dụng:** daemon đọc lại file khi bắt đầu mỗi worker mới. Có thể sửa file trong lúc daemon chạy; task đã chạy không thay đổi.
+- **Xác thực:** JSON lỗi, key không biết hoặc `args` không phải string array sẽ khiến task mới thất bại trước khi tạo pane. Xem `task_result.error` để biết nguyên nhân.
+- **Git:** `.herdr-task-mcp/settings.json` nằm trong thư mục dữ liệu bị `.gitignore` nội bộ bỏ qua. Nếu muốn chia sẻ cấu hình, copy riêng sau khi xem xét quyền và môi trường.
+- **Bảo mật:** `--yolo` bỏ qua cơ chế phê duyệt/sandbox của Codex, chỉ dùng trong môi trường tin cậy hoặc đã cô lập. `--permission-mode=auto` của Claude phụ thuộc phiên bản và quyền sử dụng; kiểm tra `claude --help` trước. Không lưu token hoặc secret vào `args`.
+
+Không cần chạy lại `workspace init` sau mỗi lần chỉnh sửa. Nếu mới cập nhật mã nguồn của MCP, chạy lại `npm run build`, dừng daemon cũ và khởi động daemon mới để nạp implementation.
 ## Workflow
 
 Từ Codex hoặc Claude, gọi `task_submit`:
