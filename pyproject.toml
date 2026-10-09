@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "herdr-qiqi-delegate"
+version = "1.0.0"
+description = "Standalone workspace-scoped QiQi delegation MCP (without Supervisor)"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp==2.1.1",
+  "pydantic>=2,<3",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+qiqi-delegate-init = "qiqi_delegate.install:main"
+qiqi-delegate-mcp = "qiqi_delegate.server:main"
+
+[tool.setuptools]
+packages = ["qiqi_delegate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests-standalone"]
