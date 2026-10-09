@@ -442,6 +442,7 @@ class GraphRuntime:
 
         graph_nodes = {node.node_id: node for node in graph.nodes}
         retry_plans = self._pending_retry_plans(graph_run_id)
+        lead_decisions = self.store.get_latest_node_decisions(graph_run_id)
         execution_nodes: list[dict[str, Any]] = []
         review_required: list[dict[str, Any]] = []
         for state in snapshot.node_states:
@@ -478,6 +479,7 @@ class GraphRuntime:
                     "semantic_state": state.semantic_state,
                     "runtime_state": public_runtime_state,
                     "current_attempt_id": current_attempt_id,
+                    "last_lead_decision": lead_decisions.get(state.node_id),
                     **(
                         {
                             "candidate_count": candidate_count,
@@ -616,6 +618,9 @@ class GraphRuntime:
             "runtime_state": public_runtime_state,
             "acceptance_criteria": list(authored.task_packet.acceptance_criteria),
             "result": result,
+            "last_lead_decision": self.store.get_latest_node_decisions(
+                graph_run_id
+            ).get(clean_node_id),
         }
 
     def get_node_reviews(
@@ -1151,11 +1156,41 @@ class GraphRuntime:
                 feedback=decision.feedback,
             )
 
+        # Store a record for every semantic decision, even if the caller is
+        # the Python API rather than the public MCP wrapper and no Peer turn
+        # was captured. The caller may supply a validated captured turn ID.
+        provided = {d["node_id"]: d for d in lead_dispositions}
+        if len(provided) != len(lead_dispositions):
+            raise ValueError("duplicate Lead decision disposition for node")
+        if set(provided) - {d.node_id for d in decisions}:
+            raise ValueError("Lead dispositions include nodes without decisions")
+        complete_dispositions = []
+        for decision in decisions:
+            current_node = self.store.get_node(graph_run_id, decision.node_id)
+            if current_node is None:
+                raise RuntimeError("reviewed node state disappeared")
+            supplied = provided.get(decision.node_id, {})
+            reason = supplied.get("reason") or f"Lead decision: {decision.action}"
+            complete_dispositions.append({
+                "node_id": decision.node_id,
+                "attempt_id": current_node.get("current_attempt_id"),
+                "turn_id": current_node.get("turn_id"),
+                "action": decision.action,
+                "reason": reason,
+                "owner": (
+                    decision.owner if decision.action in {"replan", "block"} else None
+                ),
+                "return_checkpoint": (
+                    decision.return_checkpoint
+                    if decision.action in {"replan", "block"} else None
+                ),
+            })
+
         self.store.save_snapshot_with_dispositions(
             graph_run_id,
             updated,
             expected_revision=expected_revision,
-            dispositions=lead_dispositions,
+            dispositions=tuple(complete_dispositions),
             decision_node_ids=tuple(decision.node_id for decision in decisions),
             retry_plans={
                 node_id: plan.as_dict()
