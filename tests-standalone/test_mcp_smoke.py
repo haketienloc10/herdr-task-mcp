@@ -335,3 +335,76 @@ def test_removed_mcp_tools_are_not_public(tmp_path):
     assert not hasattr(server, "release_write_claim")
     assert hasattr(server, "get_node_reviews")
     assert hasattr(server, "submit_decisions")
+
+
+def test_native_ambiguous_capture_flows_into_graph(tmp_path, monkeypatch):
+    """DelegateRuntime and GraphRuntime must agree on the ambiguous result shape."""
+    from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
+    from qiqi_delegate.task_graph_store import GraphRuntimeStore
+
+    repo = tmp_path / "backend"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\\n  - name: backend\\n    path: backend\\n"
+    )
+    (tmp_path / "agent-routing.yaml").write_text(
+        "routes:\\n  codex-balanced:\\n    agent: codex\\n    args: []\\n"
+    )
+    rt = DelegateRuntime(tmp_path)
+    monkeypatch.setattr("qiqi_delegate.runtime.shutil.which", lambda _: "/bin/true")
+
+    async def ready():
+        return None
+
+    async def create(*args, **kwargs):
+        assert args[:2] == ("workspace", "create")
+        return {"workspace": {"workspace_id": "w1"}, "root_pane": {"pane_id": "p1"}}
+
+    async def start(*args, **kwargs):
+        return "agent1", {"agent_status": "idle"}
+
+    async def prompt(*args, **kwargs):
+        return "done", {
+            "agent_status": "done",
+            "agent_session": {"kind": "id", "agent": "codex", "value": "native-1"},
+        }
+
+    async def capture(*args, **kwargs):
+        return {
+            "state": "capture_ambiguous",
+            "agent_response": None,
+            "candidate_count": 2,
+        }
+
+    async def run(*args, **kwargs):
+        assert args[:3] == ("workspace", "close", "w1")
+        return 0, "", ""
+
+    monkeypatch.setattr(rt, "_ensure_herdr_server", ready)
+    monkeypatch.setattr(rt, "_json", create)
+    monkeypatch.setattr(rt, "_start_agent", start)
+    monkeypatch.setattr(rt, "_prompt", prompt)
+    monkeypatch.setattr(rt, "_capture", capture)
+    monkeypatch.setattr(rt, "_run", run)
+
+    graph = task_graph_from_payload({"nodes": [{
+        "node_id": "B1", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {"objective": "Inspect", "scope": ["src"],
+                        "acceptance_criteria": ["Describe API"]},
+    }]})
+    gr = GraphRuntime(GraphRuntimeStore(rt.db))
+    started = gr.start_graph(graph, repository_names=["backend"])
+
+    async def execute(node):
+        return await rt.delegate(
+            repository=node.repository, route=node.route, packet=node.task_packet
+        )
+
+    output = asyncio.run(gr.delegate_next(started["graph_run_id"], executor=execute))
+    assert output["graph_state"] == "awaiting_review"
+    assert output["results"][0]["runtime_state"] == "capture_ambiguous"
+    assert output["review_required"][0]["candidate_count"] == 2
+    with rt._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 0
