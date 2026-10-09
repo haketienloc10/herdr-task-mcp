@@ -25,6 +25,7 @@ test('workspace init writes project-scoped Codex and Claude configs with isolate
   const claude = JSON.parse(await readFile(join(paths.root, '.mcp.json'), 'utf8'));
   assert.match(codex, /model = "gpt-6"/);
   assert.match(codex, /\[mcp_servers\.herdr-task\]/);
+  assert.match(codex, /\[features\.code_mode\]\ndirect_only_tool_namespaces = \["mcp__herdr_task"\]/);
   assert.match(codex, /HERDR_TASK_WORKSPACE_ROOT/);
   assert.equal(claude.otherSetting, true);
   assert.equal(claude.mcpServers.existing.command, 'true');
@@ -34,6 +35,62 @@ test('workspace init writes project-scoped Codex and Claude configs with isolate
   await initWorkspace(paths);
   const again = await readFile(join(paths.root, '.codex', 'config.toml'), 'utf8');
   assert.equal(again.split('[mcp_servers.herdr-task]').length - 1, 1);
+  assert.equal(again.split('[features.code_mode]').length - 1, 1);
+  assert.equal(again, codex);
+});
+
+test('workspace init merges direct namespace into an existing code_mode array and keeps other values', async () => {
+  const paths = await tempWorkspace();
+  await mkdir(join(paths.root, '.codex'));
+  const codexPath = join(paths.root, '.codex', 'config.toml');
+  const old = [
+    'model = "gpt-6"',
+    '[features.code_mode]',
+    'enabled = true',
+    'direct_only_tool_namespaces = [',
+    '  "mcp__keep", # existing namespace',
+    "  'mcp__other'",
+    ']',
+    'excluded_tool_namespaces = ["mcp__excluded"]',
+    '[mcp_servers.other]',
+    'command = "other"',
+    ''
+  ].join('\n');
+  await writeFile(codexPath, old);
+  await initWorkspace(paths);
+  const output = await readFile(codexPath, 'utf8');
+  assert.equal(output.split('[features.code_mode]').length - 1, 1);
+  assert.match(output, /direct_only_tool_namespaces = \["mcp__herdr_task",\s*"mcp__keep",/);
+  assert.match(output, /'mcp__other'/);
+  assert.match(output, /excluded_tool_namespaces = \["mcp__excluded"\]/);
+  assert.match(output, /\[mcp_servers.other\]\ncommand = "other"/);
+  await initWorkspace(paths);
+  assert.equal(await readFile(codexPath, 'utf8'), output);
+});
+
+test('workspace init preserves existing code_mode enabled and handles invalid namespace config', async () => {
+  const paths = await tempWorkspace();
+  await mkdir(join(paths.root, '.codex'));
+  const codexPath = join(paths.root, '.codex', 'config.toml');
+  await writeFile(codexPath, '[features.code_mode]\nenabled = false\n');
+  await initWorkspace(paths);
+  const output = await readFile(codexPath, 'utf8');
+  assert.match(output, /\[features.code_mode\]\ndirect_only_tool_namespaces = \["mcp__herdr_task"\]/);
+  assert.match(output, /enabled = false/);
+  assert.equal(output.split('[features.code_mode]').length - 1, 1);
+  await writeFile(codexPath, '[features.code_mode]\ndirect_only_tool_namespaces = "invalid"\n');
+  await assert.rejects(() => initWorkspace(paths), /must be a TOML array/);
+  assert.equal(await readFile(codexPath, 'utf8'), '[features.code_mode]\ndirect_only_tool_namespaces = "invalid"\n');
+});
+
+test('workspace init does not duplicate an already configured direct namespace', async () => {
+  const paths = await tempWorkspace();
+  await mkdir(join(paths.root, '.codex'));
+  const codexPath = join(paths.root, '.codex', 'config.toml');
+  await writeFile(codexPath, '[features.code_mode]\ndirect_only_tool_namespaces = ["mcp__other", "mcp__herdr_task"]\n');
+  await initWorkspace(paths);
+  const output = await readFile(codexPath, 'utf8');
+  assert.equal(output.split('mcp__herdr_task').length - 1, 1);
 });
 
 test('workspace init refuses conflicting configuration without modifying Codex config', async () => {
