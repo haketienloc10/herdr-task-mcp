@@ -23,7 +23,7 @@ RULES = """## QiQi Delegate — managed rules
 - Khi cần giao việc, dùng MCP qiqi_delegate tại workspace này.
 - Lead giữ quyền chọn repository, route, dependency và quyết định ACCEPT/RETRY/REPLAN/BLOCK.
 - Mỗi TaskPacket phải có objective, scope và acceptance_criteria đủ nghĩa.
-- Repository là name trong repos.yaml. Không yêu cầu Peer đọc repository anh em.
+- Repository là name trong repos.yaml. Repo có thể nằm trong workspace hoặc cùng cấp (../frontend). Không yêu cầu Peer đọc repo khác.
 - Không suy đoán kết quả từ Herdr terminal. Dùng native captured agent_response.
 - Một Peer settled chưa đồng nghĩa được ACCEPT. Downstream chỉ chạy sau ACCEPT.
 - Không sửa file bên ngoài Git root của Peer, trừ input được cấp quyền rõ ràng.
@@ -161,14 +161,16 @@ routes:
 #   claude: args: ["--permission-mode", "auto"]
 """
 
-REPOS = """# Register existing Git roots relative to this workspace.
-# No qiqi_delegate code or MCP config is written into these repositories.
+REPOS = """# Register existing Git roots relative to THIS workspace.
+# Child repositories: path: frontend. Sibling repositories: path: ../frontend.
+# Siblings must remain inside the workspace parent's directory.
+# No qiqi_delegate code or MCP config is written into these Git repositories.
 repositories: []
-# Example entries:
+# Example siblings (when workspace is herdr-delegate-lab):
 #   - name: frontend
-#     path: frontend
+#     path: ../frontend
 #   - name: backend
-#     path: backend
+#     path: ../backend
 """
 
 async def install_workspace(root: Path, python: Path | None = None) -> dict:
