@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { HerdrRuntime, buildWorkerPrompt } from '../src/herdr.ts';
@@ -29,6 +29,7 @@ async function stubHerdr(state: 'idle' | 'blocked' = 'idle') {
     instruction: 'Implement and report'
   } as Task;
   const report = join(root, 'reports', id + '.json');
+  await mkdir(join(root, 'reports'));
   const runtime = new HerdrRuntime(bin);
   return { root, id, task, report, runtime, log };
 }
@@ -52,7 +53,7 @@ test('worker reports complete long answers without requiring any terminal histor
   const prompt = calls.find(c => c[1] === 'prompt')![3];
   assert.match(prompt, /report .*\.json/);
   assert.match(prompt, /Do not print long outputs to the terminal/);
-  assert.match(prompt, /under 600 characters/);
+  assert.match(prompt, /below 600 characters/);
   assert.match(buildWorkerPrompt(task, report), /artifacts/);
 });
 
