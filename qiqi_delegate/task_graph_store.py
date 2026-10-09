@@ -8,7 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from qiqi_delegate.task_graph import TaskGraph
+from qiqi_delegate.core import build_task_packet
+from qiqi_delegate.task_graph import GraphNode, TaskGraph
 from qiqi_delegate.task_graph_scheduler import GraphSnapshot, NodeState, derive_graph_state
 
 ATTEMPT_TERMINAL_STATES = frozenset({"settled", "failed", "blocked"})
@@ -89,11 +90,38 @@ def _validated_states(snapshot: GraphSnapshot) -> dict[str, NodeState]:
     return {state.node_id: state for state in snapshot.node_states}
 
 
+def _graph_json(graph: TaskGraph) -> str:
+    return _result_json(graph.as_dict())
+
+
+def _graph_from_json(encoded: str) -> TaskGraph:
+    """Decode persisted authored semantics without relying on process memory."""
+    try:
+        payload = json.loads(encoded)
+        if not isinstance(payload, dict) or not isinstance(payload.get("nodes"), list):
+            raise ValueError("authored graph JSON must contain nodes")
+        nodes = []
+        for item in payload["nodes"]:
+            if not isinstance(item, dict):
+                raise ValueError("authored node must be an object")
+            nodes.append(GraphNode(
+                node_id=item["node_id"],
+                repository=item["repository"],
+                route=item.get("route"),
+                kind=item.get("kind", "repo_task"),
+                depends_on=tuple(item.get("depends_on", [])),
+                task_packet=build_task_packet(**item["task_packet"]),
+            ))
+        return TaskGraph(nodes=tuple(nodes))
+    except (TypeError, ValueError, KeyError) as exc:
+        raise RuntimeError("persisted authored TaskGraph is invalid") from exc
+
+
 class GraphRuntimeStore:
     """Durable execution state for TaskGraph runs.
 
-    Authored TaskGraph/TaskPacket semantics remain process-owned. The store persists only
-    execution facts plus a stable fingerprint of the current authored graph. Retired nodes
+    Persist authored TaskGraph, pending retry intent and execution facts atomically.
+    A stable fingerprint verifies restored graph semantics. Retired nodes
     stay in runtime storage with active=0 so graph mutation never deletes attempt/session/
     result history merely because a semantic work unit is no longer material.
     """
@@ -117,6 +145,7 @@ class GraphRuntimeStore:
             CREATE TABLE IF NOT EXISTS graph_runs (
                 graph_run_id TEXT PRIMARY KEY,
                 graph_fingerprint TEXT NOT NULL,
+                graph_json TEXT,
                 current_wave_id TEXT,
                 revision INTEGER NOT NULL CHECK (revision >= 0),
                 created_at_ns INTEGER NOT NULL,
@@ -161,6 +190,17 @@ class GraphRuntimeStore:
                     ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS graph_retry_plans (
+                graph_run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                updated_at_ns INTEGER NOT NULL,
+                PRIMARY KEY (graph_run_id, node_id),
+                FOREIGN KEY (graph_run_id, node_id)
+                    REFERENCES graph_node_states(graph_run_id, node_id)
+                    ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS graph_attempts_run_wave_idx
                 ON graph_attempts(graph_run_id, wave_id, attempt_number);
             CREATE INDEX IF NOT EXISTS graph_attempts_run_node_idx
@@ -174,6 +214,12 @@ class GraphRuntimeStore:
             row["name"] if isinstance(row, sqlite3.Row) else row[1]
             for row in conn.execute("PRAGMA table_info(graph_node_states)").fetchall()
         }
+        run_columns = {
+            row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            for row in conn.execute("PRAGMA table_info(graph_runs)").fetchall()
+        }
+        if "graph_json" not in run_columns:
+            conn.execute("ALTER TABLE graph_runs ADD COLUMN graph_json TEXT")
         if "active" not in columns:
             conn.execute(
                 "ALTER TABLE graph_node_states ADD COLUMN active INTEGER NOT NULL "
@@ -192,15 +238,16 @@ class GraphRuntimeStore:
 
         run_id = _required_id(graph_run_id or new_graph_run_id(), "graph_run_id")
         fingerprint = _graph_fingerprint(snapshot.graph)
+        authored_json = _graph_json(snapshot.graph)
         now = time.time_ns()
         try:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO graph_runs("
-                    "graph_run_id, graph_fingerprint, current_wave_id, revision, "
+                    "graph_run_id, graph_fingerprint, graph_json, current_wave_id, revision, "
                     "created_at_ns, updated_at_ns"
-                    ") VALUES (?, ?, NULL, 0, ?, ?)",
-                    (run_id, fingerprint, now, now),
+                    ") VALUES (?, ?, ?, NULL, 0, ?, ?)",
+                    (run_id, fingerprint, authored_json, now, now),
                 )
                 conn.executemany(
                     "INSERT INTO graph_node_states("
@@ -226,11 +273,42 @@ class GraphRuntimeStore:
         run_id = _required_id(graph_run_id, "graph_run_id")
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT graph_run_id, graph_fingerprint, current_wave_id, revision, "
+                "SELECT graph_run_id, graph_fingerprint, graph_json, current_wave_id, revision, "
                 "created_at_ns, updated_at_ns FROM graph_runs WHERE graph_run_id = ?",
                 (run_id,),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def load_graph(self, graph_run_id: str) -> TaskGraph:
+        """Fail closed for pre-migration runs whose authored definition was never stored."""
+        run = self.get_run(graph_run_id)
+        if run is None:
+            raise RuntimeError(f"unknown graph_run_id: {graph_run_id!r}")
+        encoded = run["graph_json"]
+        if not isinstance(encoded, str) or not encoded:
+            raise RuntimeError(
+                "persisted graph definition unavailable (legacy run); "
+                "cannot safely reconstruct TaskGraph from its fingerprint"
+            )
+        graph = _graph_from_json(encoded)
+        if _graph_fingerprint(graph) != run["graph_fingerprint"]:
+            raise RuntimeError("persisted authored TaskGraph fingerprint mismatch")
+        return graph
+
+    def get_retry_plans(self, graph_run_id: str) -> dict[str, dict[str, Any]]:
+        run_id = _required_id(graph_run_id, "graph_run_id")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT node_id, plan_json FROM graph_retry_plans WHERE graph_run_id = ?",
+                (run_id,),
+            ).fetchall()
+        result = {}
+        for row in rows:
+            plan = json.loads(row["plan_json"])
+            if not isinstance(plan, dict):
+                raise RuntimeError("persisted retry plan must be an object")
+            result[row["node_id"]] = plan
+        return result
 
     def get_node(self, graph_run_id: str, node_id: str) -> dict[str, Any] | None:
         run_id = _required_id(graph_run_id, "graph_run_id")
@@ -406,8 +484,10 @@ class GraphRuntimeStore:
         *,
         expected_revision: int,
         dispositions: tuple[dict[str, Any], ...],
+        decision_node_ids: tuple[str, ...] = (),
+        retry_plans: dict[str, dict[str, Any]] | None = None,
     ) -> None:
-        """Persist Lead decisions atomically with the graph snapshot, without SLP/Supervisor."""
+        """Persist Lead decisions and pending retry intent in one SQLite transaction."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("""CREATE TABLE IF NOT EXISTS lead_decisions (
@@ -428,6 +508,19 @@ class GraphRuntimeStore:
             self._save_snapshot_in_transaction(
                 conn, graph_run_id, snapshot, expected_revision=expected_revision
             )
+            if retry_plans and not set(retry_plans).issubset(set(decision_node_ids)):
+                raise ValueError("retry plans must belong to submitted decisions")
+            for node_id in decision_node_ids:
+                conn.execute(
+                    "DELETE FROM graph_retry_plans WHERE graph_run_id = ? AND node_id = ?",
+                    (graph_run_id, node_id),
+                )
+            for node_id, plan in (retry_plans or {}).items():
+                conn.execute(
+                    "INSERT INTO graph_retry_plans(graph_run_id, node_id, plan_json, updated_at_ns) "
+                    "VALUES (?, ?, ?, ?)",
+                    (graph_run_id, node_id, _result_json(plan), time.time_ns()),
+                )
             for decision in dispositions:
                 conn.execute(
                     "INSERT INTO lead_decisions(graph_run_id, turn_id, action, reason, node_id, attempt_id, created_at_ns) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -452,6 +545,7 @@ class GraphRuntimeStore:
         states = _validated_states(snapshot)
         previous_fingerprint = _graph_fingerprint(previous_graph)
         next_fingerprint = _graph_fingerprint(snapshot.graph)
+        next_authored_json = _graph_json(snapshot.graph)
         previous_ids = {node.node_id for node in previous_graph.nodes}
         next_ids = set(states)
         reset_ids = set(reset_node_ids)
@@ -558,10 +652,22 @@ class GraphRuntimeStore:
                         ),
                     )
 
+            conn.execute(
+                "DELETE FROM graph_retry_plans WHERE graph_run_id = ? AND node_id IN "
+                "(SELECT node_id FROM graph_node_states "
+                "WHERE graph_run_id = ? AND active = 0)",
+                (run_id, run_id),
+            )
+            if reset_ids:
+                conn.executemany(
+                    "DELETE FROM graph_retry_plans WHERE graph_run_id = ? AND node_id = ?",
+                    [(run_id, node_id) for node_id in reset_ids],
+                )
             updated = conn.execute(
-                "UPDATE graph_runs SET graph_fingerprint = ?, updated_at_ns = ?, "
-                "revision = revision + 1 WHERE graph_run_id = ? AND revision = ?",
-                (next_fingerprint, now, run_id, clean_expected_revision),
+                "UPDATE graph_runs SET graph_fingerprint = ?, graph_json = ?, "
+                "updated_at_ns = ?, revision = revision + 1 "
+                "WHERE graph_run_id = ? AND revision = ?",
+                (next_fingerprint, next_authored_json, now, run_id, clean_expected_revision),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("graph run revision changed while reconciling graph")
@@ -575,6 +681,7 @@ class GraphRuntimeStore:
         resume_session: bool = False,
         session_id: str | None = None,
         attempt_id: str | None = None,
+        retry_plan: dict[str, Any] | None = None,
     ) -> str:
         run_id = _required_id(graph_run_id, "graph_run_id")
         clean_node_id = _required_id(node_id, "node_id")
@@ -610,6 +717,18 @@ class GraphRuntimeStore:
                 raise RuntimeError(
                     "graph run already has a different active wave: "
                     f"{run['current_wave_id']!r}"
+                )
+
+            persisted_retry = conn.execute(
+                "SELECT plan_json FROM graph_retry_plans "
+                "WHERE graph_run_id = ? AND node_id = ?",
+                (run_id, clean_node_id),
+            ).fetchone()
+            expected_plan = _result_json(retry_plan) if retry_plan is not None else None
+            actual_plan = persisted_retry["plan_json"] if persisted_retry is not None else None
+            if expected_plan != actual_plan:
+                raise RuntimeError(
+                    f"retry plan changed for node {clean_node_id!r} before attempt claim"
                 )
 
             node = conn.execute(
@@ -669,6 +788,10 @@ class GraphRuntimeStore:
                 "current_attempt_id = ?, session_id = ?, turn_id = NULL, updated_at_ns = ? "
                 "WHERE graph_run_id = ? AND node_id = ? AND active = 1",
                 (clean_attempt_id, clean_session_id, now, run_id, clean_node_id),
+            )
+            conn.execute(
+                "DELETE FROM graph_retry_plans WHERE graph_run_id = ? AND node_id = ?",
+                (run_id, clean_node_id),
             )
             conn.execute(
                 "UPDATE graph_runs SET current_wave_id = ?, updated_at_ns = ?, "
