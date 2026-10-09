@@ -304,6 +304,89 @@ def test_herdr_command_asyncio_timeout_kills_and_reaps_child(tmp_path, monkeypat
     assert child.killed and child.reaped
 
 
+@pytest.mark.parametrize("close_succeeds", [True, False])
+def test_delegate_workspace_close_survives_repeated_cancellation(
+    tmp_path, monkeypatch, close_succeeds,
+):
+    """Never abandon workspace close on a second cancellation of the request."""
+    repo = tmp_path / "backend"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\\n  - name: backend\\n    path: backend\\n".replace("\\n", "\n")
+    )
+    (tmp_path / "agent-routing.yaml").write_text(
+        "routes:\\n  codex-balanced:\\n    agent: codex\\n    args: []\\n".replace("\\n", "\n")
+    )
+    rt = DelegateRuntime(tmp_path)
+    monkeypatch.setattr("qiqi_delegate.runtime.shutil.which", lambda _: "/bin/true")
+
+    async def scenario():
+        prompting = asyncio.Event()
+        closing = asyncio.Event()
+        permit_close = asyncio.Event()
+        close_completed = False
+        close_calls = 0
+
+        async def server_ready():
+            return None
+
+        async def create_workspace(*args, **kwargs):
+            return {"workspace": {"workspace_id": "w-cancel"}, "root_pane": {"pane_id": "p"}}
+
+        async def start(*args, **kwargs):
+            return "peer", {"agent_status": "idle"}
+
+        async def prompt(*args, **kwargs):
+            prompting.set()
+            await asyncio.Event().wait()
+
+        async def run(*args, **kwargs):
+            nonlocal close_calls, close_completed
+            assert args == ("workspace", "close", "w-cancel")
+            close_calls += 1
+            closing.set()
+            await permit_close.wait()
+            if not close_succeeds:
+                raise RuntimeError("synthetic close failure")
+            close_completed = True
+            return 0, "", ""
+
+        monkeypatch.setattr(rt, "_ensure_herdr_server", server_ready)
+        monkeypatch.setattr(rt, "_json", create_workspace)
+        monkeypatch.setattr(rt, "_start_agent", start)
+        monkeypatch.setattr(rt, "_prompt", prompt)
+        monkeypatch.setattr(rt, "_run", run)
+        packet = build_task_packet(
+            objective="Test", scope=["src"], acceptance_criteria=["Evidence"],
+        )
+        task = asyncio.create_task(
+            rt.delegate(repository="backend", route="codex-balanced", packet=packet)
+        )
+        await asyncio.wait_for(prompting.wait(), 2)
+        with rt._connect() as db:
+            assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 1
+        task.cancel()  # Cancel while Peer is working.
+        await asyncio.wait_for(closing.wait(), 2)
+        task.cancel()  # Cancel again while workspace teardown is blocked.
+        await asyncio.sleep(0)
+        assert not task.done()
+        with rt._connect() as db:
+            assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 1
+        permit_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert close_calls == 1
+        assert close_completed is close_succeeds
+        with rt._connect() as db:
+            # Keep the write claim if Herdr does not confirm workspace closure.
+            assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == (
+                0 if close_succeeds else 1
+            )
+
+    asyncio.run(scenario())
+
+
 def test_direct_native_capture_creates_and_releases_repo_claim(tmp_path, monkeypatch):
     repo = tmp_path / "backend"
     repo.mkdir()
