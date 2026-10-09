@@ -76,6 +76,8 @@ def test_direct_native_capture_creates_and_releases_repo_claim(tmp_path, monkeyp
     async def mock_capture(*args, **kwargs):
         return {"state": "settled", "agent_response": "Native hook result was captured"}
     async def mock_run(*args, **kwargs):
+        if args[:2] == ("status", "server"):
+            return 0, "", ""
         assert args[:3] == ("workspace", "close", "w1")
         return 0, "", ""
     monkeypatch.setattr(rt, "_json", mock_json)
@@ -134,4 +136,65 @@ asyncio.run(verify())
         capture_output=True, text=True, timeout=20
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_herdr_uses_current_socket_by_default_and_named_session_only_when_opted_in(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERDR_SOCKET_PATH", "/tmp/herdr-existing.sock")
+    monkeypatch.delenv("QIQI_HERDR_SESSION", raising=False)
+    current = DelegateRuntime(tmp_path)
+    assert current.herdr_session is None
+    assert current._herdr_argv("workspace", "list") == [
+        "herdr", "workspace", "list"
+    ]
+
+    monkeypatch.setenv("QIQI_HERDR_SESSION", "isolated-work")
+    dedicated = DelegateRuntime(tmp_path)
+    assert dedicated._herdr_argv("workspace", "list") == [
+        "herdr", "--session", "isolated-work", "workspace", "list"
+    ]
+
+    monkeypatch.setenv("QIQI_HERDR_SESSION", " ")
+    with pytest.raises(ValueError, match="non-empty"):
+        DelegateRuntime(tmp_path)
+
+
+def test_herdr_existing_server_reused_without_nested_client_launch(tmp_path, monkeypatch):
+    rt = DelegateRuntime(tmp_path)
+    calls = []
+    async def healthy(*args, **kwargs):
+        calls.append(args)
+        assert args[:2] == ("status", "server")
+        return 0, "", ""
+    monkeypatch.setattr(rt, "_run", healthy)
+    asyncio.run(rt._ensure_herdr_server())
+    assert calls == [("status", "server")]
+
+
+def test_herdr_missing_server_starts_headless_without_session_attach(tmp_path, monkeypatch):
+    monkeypatch.delenv("QIQI_HERDR_SESSION", raising=False)
+    rt = DelegateRuntime(tmp_path)
+    commands = []
+    checks = []
+    class FakeServer:
+        returncode = None
+    async def probe(*args, **kwargs):
+        checks.append(args)
+        assert args[:2] == ("status", "server")
+        return (0 if len(checks) >= 3 else 1), "", ""
+    async def launch(*argv, **kwargs):
+        commands.append((argv, kwargs))
+        return FakeServer()
+
+    monkeypatch.setattr(rt, "_run", probe)
+    monkeypatch.setattr("qiqi_delegate.runtime.asyncio.create_subprocess_exec", launch)
+    asyncio.run(rt._ensure_herdr_server())
+    assert len(checks) == 3
+    assert len(commands) == 1
+    argv, options = commands[0]
+    assert argv == ("herdr", "server")
+    assert options["start_new_session"] is True
+    assert "attach" not in argv
+
 
