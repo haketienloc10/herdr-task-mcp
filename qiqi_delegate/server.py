@@ -58,9 +58,18 @@ class Decision(BaseModel):
     node_id: str
     action: Literal["accept", "retry", "replan", "block"]
     resume_session: bool = False
-    feedback: list[str] = Field(default_factory=list)
-    owner: str | None = None
-    return_checkpoint: str | None = None
+    feedback: list[str] = Field(
+        default_factory=list,
+        description="Only valid for action='retry'; not allowed for block/replan/accept.",
+    )
+    owner: str | None = Field(
+        default=None,
+        description="Required with action='block' or 'replan' to assign recovery owner.",
+    )
+    return_checkpoint: str | None = Field(
+        default=None,
+        description="Required with action='block' or 'replan' to define next review point.",
+    )
 
 runtime = DelegateRuntime(workspace_root())
 graph_runtime = GraphRuntime(GraphRuntimeStore(runtime.db))
@@ -72,7 +81,11 @@ mcp = MCPServer(
         "Lead owns technical acceptance. Native result hooks are the only answer source. "
         "No terminal scraping, Supervisor, or sibling repository reads. "
         "For multiple nodes: start_graph, delegate_next, get_node_review(s), submit_decisions. "
-        "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it."
+        "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
+        "If a Peer cannot start because Herdr is unavailable, review the runtime error "
+        "and do not inspect or implement in the target repository directly. "
+        "For block/replan decisions provide owner and return_checkpoint; "
+        "feedback and resume_session are retry-only."
     ),
 )
 
@@ -184,7 +197,12 @@ async def delegate_next(graph_run_id: str) -> dict[str, Any]:
 @_public_tool_errors
 async def submit_decisions(graph_run_id: str, decisions: list[Decision],
                            expected_revision: int) -> dict[str, Any]:
-    """Record Lead ACCEPT/RETRY/REPLAN/BLOCK for exact attempts."""
+    """Record Lead decisions for exact attempts.
+
+    For action='block' or 'replan', set owner and return_checkpoint.
+    Only action='retry' permits feedback or resume_session.
+    Never ACCEPT a failed runtime attempt without captured Peer evidence.
+    """
     parsed = decisions_from_payload([
         d.model_dump(exclude_none=True, exclude_defaults=True) for d in decisions
     ])
