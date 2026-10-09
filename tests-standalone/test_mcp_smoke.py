@@ -306,6 +306,81 @@ def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, mon
         claim = db.execute("SELECT claim_id FROM write_claims WHERE repository='backend'").fetchone()
     assert claim is not None and claim[0] in error
     assert f"--claim-id {shlex.quote(claim[0])}" in error
+    assert exc.value.recovery_command in exc.value.actionable_detail()
+
+
+def test_long_recovery_command_survives_public_mcp_error(tmp_path, monkeypatch):
+    """Clip verbose diagnostics, not exact recovery arguments, on the direct tool."""
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(tmp_path))
+    from mcp.server.mcpserver.exceptions import ToolError
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.server import _public_tool_errors
+
+    long_workspace = "/tmp/" + "/".join(["it's-a-long-workspace-" * 15] * 6)
+    recovery = (
+        f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+        f"release-claim --workspace {shlex.quote(long_workspace)} "
+        "--repository backend --claim-id turn:actual "
+        "--worker-termination-confirmed"
+    )
+    blocker = AgentStartupBlocked(
+        "qiqi-agent", "pane-id", "startup evidence " * 200,
+        recovery_command=recovery,
+        public_context="agent_not_ready; inspect: " + "verbose data " * 200,
+    )
+
+    @_public_tool_errors
+    async def blocked():
+        raise blocker
+
+    with pytest.raises(ToolError) as exc:
+        asyncio.run(blocked())
+    public = str(exc.value)
+    assert public.startswith("code=agent_startup_blocked;")
+    assert f"recovery_command={recovery}" in public
+    assert public.endswith("operator-side claim cleanup before retrying.")
+    assert "--repository backend --claim-id turn:actual " in public
+    assert "--worker-termination-confirmed" in public
+    assert len(public) > 1200
+    assert "verbose data " * 100 not in public
+
+
+def test_graph_review_preserves_long_startup_recovery(tmp_path):
+    """Graph results must not tail-truncate a retained claim recovery command."""
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
+    from qiqi_delegate.task_graph_store import GraphRuntimeStore
+
+    command = (
+        f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+        "release-claim --workspace /tmp/" + "long-workspace-" * 175
+        + " --repository backend --claim-id turn:exact --worker-termination-confirmed"
+    )
+    gr = GraphRuntime(GraphRuntimeStore(tmp_path / "graph.sqlite3"))
+    started = gr.start_graph(task_graph_from_payload({"nodes": [{
+        "node_id": "backend", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {"objective": "Inspect", "scope": ["src"],
+                        "acceptance_criteria": ["Describe API"]},
+    }]}), repository_names=["backend"])
+
+    async def fail(_node):
+        raise AgentStartupBlocked(
+            "peer", "pane", "evidence " * 500,
+            recovery_command=command,
+            public_context="agent_not_ready; " + "detailed evidence " * 400,
+        )
+
+    with pytest.raises(AgentStartupBlocked):
+        asyncio.run(gr.delegate_next(started["graph_run_id"], executor=fail))
+    current = gr.get_graph(started["graph_run_id"])
+    loc = current["review_required"][0]
+    reviews = gr.get_node_reviews(
+        started["graph_run_id"], [(loc["node_id"], loc["attempt_id"])],
+        expected_revision=current["revision"],
+    )
+    detail = reviews["reviews"][0]["result"]["failure_detail"]
+    assert f"recovery_command={command}" in detail
+    assert detail.endswith("--worker-termination-confirmed")
 
 
 def test_graph_review_keeps_startup_failure_details(tmp_path):
