@@ -115,6 +115,8 @@ Nếu startup yêu cầu xác nhận, người dùng kiểm tra nội dung và q
 herdr --session <SESSION_NAME> workspace close <WORKSPACE_ID>
 ```
 
+**Khóa writer dựa trên Git root chuẩn hóa, không dựa trên tên repository.** Việc đổi tên entry trong `repos.yaml` khi worker cũ còn chạy sẽ không tạo thêm quyền ghi vào cùng checkout. `show-claim` và `release-claim` chấp nhận tên đăng ký mới để tra cứu claim cũ theo Git root, nhưng vẫn yêu cầu đúng `claim_id` và xác nhận termination. Khi nâng cấp từ SQLite cũ chưa lưu Git root, các claim chưa có định danh root sẽ chặn toàn bộ delegation mới (fail closed), không tự suy đoán đường dẫn từ registry đã sửa. Sau khi dừng worker, operator có thể dùng **tên gốc của legacy claim** với `show-claim`/`release-claim` để xử lý đúng ID và ghi audit.
+
 Sau khi đã **xác nhận agent cũ đã kết thúc** và workspace cũ đã đóng, người vận hành dùng CLI bảo trì riêng. **Không chạy lệnh này khi worker còn sống hoặc khi chưa xác minh được trạng thái worker.** Có thể xem claim đang giữ repository bằng:
 
 ```bash
