@@ -9,7 +9,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from qiqi_delegate.core import build_task_packet
-from qiqi_delegate.runtime import DelegateRuntime, workspace_root
+from qiqi_delegate.runtime import AgentStartupBlocked, DelegateRuntime, workspace_root
 from qiqi_delegate.task_graph_runtime import (
     GraphRuntime, task_graph_from_payload, decisions_from_payload,
 )
@@ -138,8 +138,15 @@ def _public_tool_errors(func):
             else:
                 code = "delegation_invalid"
                 action = "inspect the reported input, task state or runtime stage and retry"
+            # Startup recovery may contain a long, shell-quoted workspace path.
+            # Clip only diagnostic evidence, never the exact operator command.
+            public_detail = (
+                exc.actionable_detail()
+                if isinstance(exc, AgentStartupBlocked)
+                else detail[:1200]
+            )
             raise ToolError(
-                f"code={code}; {detail[:1200]}; action={action}"
+                f"code={code}; {public_detail}; action={action}"
             ) from exc
     return wrapper
 
