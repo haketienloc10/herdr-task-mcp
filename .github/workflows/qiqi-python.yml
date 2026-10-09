@@ -6,13 +6,13 @@ on:
       - "tests-standalone/**"
       - "pyproject.toml"
       - "setup.py"
-      - "setup.py"
       - ".github/workflows/qiqi-python.yml"
   pull_request:
     paths:
       - "qiqi_delegate/**"
       - "tests-standalone/**"
       - "pyproject.toml"
+      - "setup.py"
       - ".github/workflows/qiqi-python.yml"
 jobs:
   standalone:
