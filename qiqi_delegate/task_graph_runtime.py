@@ -400,8 +400,16 @@ class GraphRuntime:
     fail-closed until external worker termination is confirmed.
     """
 
-    def __init__(self, store: GraphRuntimeStore):
+    def __init__(
+        self,
+        store: GraphRuntimeStore,
+        *,
+        repository_key: Callable[[str], str] | None = None,
+    ):
         self.store = store
+        # The MCP runtime supplies canonical Git-root identities. Standalone
+        # scheduler tests may use logical names when no workspace exists.
+        self.repository_key = repository_key or (lambda name: name)
 
     def _pending_retry_plans(self, graph_run_id: str) -> dict[str, RetryPlan]:
         return {
@@ -814,7 +822,8 @@ class GraphRuntime:
 
         for node in [*retry_nodes, *fresh_nodes]:
             retry_plan = retry_plans.get(node.node_id)
-            if node.repository in repositories:
+            repository_identity = self.repository_key(node.repository)
+            if repository_identity in repositories:
                 continue
             if (
                 retry_plan is not None
@@ -829,7 +838,7 @@ class GraphRuntime:
                 else node
             )
             selected.append((execution_node, retry_plan))
-            repositories.add(node.repository)
+            repositories.add(repository_identity)
             if (
                 retry_plan is not None
                 and retry_plan.resume_session
