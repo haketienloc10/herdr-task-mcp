@@ -17,6 +17,40 @@ def test_standalone_mcp_imports_without_supervisor_or_workspace_template(tmp_pat
     ], env=env, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
 
+
+def test_mcp_initialize_stdio_handshake(tmp_path):
+    """Import-only tests miss crashes in MCPServer.run and stdio transport."""
+    env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path))
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "qiqi-startup-test", "version": "1.0.0"},
+        },
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "qiqi_delegate.server"],
+        input=json.dumps(initialize) + "\n",
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    replies = []
+    for line in proc.stdout.splitlines():
+        try:
+            response = json.loads(line)
+        except ValueError:
+            continue
+        if response.get("id") == 1:
+            replies.append(response)
+    assert len(replies) == 1, (
+        f"MCP initialize response missing; exit={proc.returncode}; "
+        f"stdout={proc.stdout[-2000:]!r}; stderr={proc.stderr[-4000:]!r}"
+    )
+    assert "result" in replies[0], f"MCP initialize error: {replies[0]!r}"
+    assert replies[0]["result"].get("serverInfo", {}).get("name"), replies[0]
+
 def test_direct_native_capture_creates_and_releases_repo_claim(tmp_path, monkeypatch):
     repo = tmp_path / "backend"
     repo.mkdir()
