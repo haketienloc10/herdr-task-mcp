@@ -12,11 +12,16 @@ Chạy tại workspace cha chứa frontend/ và backend/:
 mkdir -p .tools
 git clone -b feat/standalone-qiqi-delegate \
   https://github.com/haketienloc10/herdr-task-mcp.git .tools/herdr-task-mcp
-python3 -m venv .tools/herdr-task-mcp/.venv
+# Chọn interpreter đã cài (>=3.10), ví dụ python3.12; KHÔNG dùng mặc định python3 nếu là 3.8.
+PYTHON=python3.12
+"$PYTHON" -c 'import sys; assert sys.version_info >= (3, 10), "Requires Python >= 3.10"'
+"$PYTHON" -m venv .tools/herdr-task-mcp/.venv
 .tools/herdr-task-mcp/.venv/bin/python -m pip install --upgrade pip setuptools wheel
 .tools/herdr-task-mcp/.venv/bin/python -m pip install -e './.tools/herdr-task-mcp'
 .tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.install --workspace "$PWD"
 ```
+
+**Quan trọng với Ubuntu có `python3` mặc định là 3.8:** lệnh `python3 -m venv` sẽ tạo virtualenv Python 3.8, dù `pip` đã được nâng cấp. `mcp==2.1.1` và package này yêu cầu Python >=3.10; phải tạo lại virtualenv từ Python 3.10+. Kiểm tra bằng `.tools/herdr-task-mcp/.venv/bin/python --version`. Nếu virtualenv cũ đang dùng 3.8, chỉ xóa `.tools/herdr-task-mcp/.venv` rồi tạo lại bằng interpreter mới, không xóa `.tools/herdr-task-mcp`, workspace, `AGENTS.md` hay các Git repo con.
 
 Nếu `pip install -e` báo thiếu `setup.py` thì `pip` trong virtualenv quá cũ. Bản này có `setup.py` tương thích, nhưng nên nâng cấp `pip`, `setuptools` và `wheel` theo lệnh trên trước khi cài. Sau đó mới chạy `qiqi_delegate.install`; không cần clone lại hoặc xóa workspace.
 
