@@ -25,6 +25,8 @@ PYTHON=python3.12
 
 Nếu `pip install -e` báo thiếu `setup.py` thì `pip` trong virtualenv quá cũ. Bản này có `setup.py` tương thích, nhưng nên nâng cấp `pip`, `setuptools` và `wheel` theo lệnh trên trước khi cài. Sau đó mới chạy `qiqi_delegate.install`; không cần clone lại hoặc xóa workspace.
 
+**Sửa lỗi MCP `connection closed` / `ModuleNotFoundError: qiqi_delegate`:** phiên bản installer cũ có thể dereference symlink `.venv/bin/python` về Python gốc do `uv` quản lý, khiến MCP chạy ngoài virtualenv. Sau khi `git -C .tools/herdr-task-mcp pull --ff-only`, chạy lại `.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.install --workspace "$PWD"`. Cấu hình `.codex/config.toml` và `.mcp.json` sẽ được sửa về đúng đường dẫn `.venv/bin/python`; không cần tạo lại virtualenv và mọi rule ngoài marker `AGENTS.md` vẫn giữ nguyên.
+
 Installer chỉ cấu hình workspace: AGENTS.md, .codex/config.toml, .mcp.json, repos.yaml, agent-routing.yaml và .herdr-task-mcp/ (SQLite). Không sửa frontend/, backend/ hoặc cài MCP vào home/global.
 
 ## AGENTS.md — chỉ sửa nội dung nằm trong marker
