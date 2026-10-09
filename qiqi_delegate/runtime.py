@@ -314,41 +314,68 @@ class DelegateRuntime:
                 # detached process (start_new_session=True on POSIX).
                 # Only confirmed readiness transfers ownership to Herdr.
                 if not ready:
-                    if server.returncode is None:
-                        try:
-                            server.terminate()
-                        except ProcessLookupError:
-                            pass
-                    try:
-                        await asyncio.wait_for(server.wait(), 3)
-                    except (TimeoutError, asyncio.TimeoutError):
-                        if server.returncode is None:
-                            try:
-                                server.kill()
-                            except ProcessLookupError:
-                                pass
-                        await server.wait()
+                    cancelled = await self._terminate_and_reap_server(server)
+                    if cancelled:
+                        # Cancellation during cleanup supersedes an earlier
+                        # startup error just as cancellation during a timeout
+                        # supersedes the earlier command timeout.
+                        raise asyncio.CancelledError()
 
     @staticmethod
-    async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
-        """Do not abandon a Herdr child when the requesting task is cancelled.
+    async def _await_reaper(
+        reaper: asyncio.Task[Any], *, timeout: float | None = None,
+    ) -> tuple[bool, bool]:
+        """Wait without cancelling the child reaper; remember parent cancellations.
 
-        Cleanup runs in its own task. Shielding prevents a second cancellation
-        of the MCP request from cancelling the child reaper too.
+        asyncio.wait() does not cancel supplied tasks when its own waiter is
+        cancelled or times out. Keep waiting after repeated cancellations,
+        and propagate that cancellation only once the child is reaped.
         """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout if timeout is not None else None
+        cancelled = False
+        while not reaper.done():
+            remaining = None if deadline is None else max(0.0, deadline - loop.time())
+            if remaining == 0:
+                return cancelled, False
+            try:
+                await asyncio.wait((reaper,), timeout=remaining)
+            except asyncio.CancelledError:
+                cancelled = True
+        await reaper
+        return cancelled, True
+
+    @classmethod
+    async def _terminate_and_reap_server(cls, server: asyncio.subprocess.Process) -> bool:
+        """Gracefully stop a failed headless launch, escalating after three seconds."""
+        if server.returncode is None:
+            try:
+                server.terminate()
+            except ProcessLookupError:
+                pass
+        reaper = asyncio.create_task(server.wait())
+        cancelled, completed = await cls._await_reaper(reaper, timeout=3)
+        if not completed:
+            if server.returncode is None:
+                try:
+                    server.kill()
+                except ProcessLookupError:
+                    pass
+            cancelled_after_kill, _ = await cls._await_reaper(reaper)
+            cancelled = cancelled or cancelled_after_kill
+        return cancelled
+
+    @classmethod
+    async def _kill_and_reap(cls, proc: asyncio.subprocess.Process) -> bool:
+        """Kill a command and report cancellation arriving during its cleanup."""
         if proc.returncode is None:
             try:
                 proc.kill()
             except ProcessLookupError:
-                pass  # The child exited between checking returncode and kill.
+                pass  # Child exited between checking returncode and kill.
         reaper = asyncio.create_task(proc.communicate())
-        while not reaper.done():
-            try:
-                await asyncio.shield(reaper)
-            except asyncio.CancelledError:
-                # Continue reaping even if the parent receives more cancellations.
-                pass
-        await reaper
+        cancelled, _ = await cls._await_reaper(reaper)
+        return cancelled
 
     async def _run(self, *args: str, timeout=60, check=True):
         argv = self._herdr_argv(*args)
@@ -359,7 +386,11 @@ class DelegateRuntime:
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout)
         except (TimeoutError, asyncio.TimeoutError):
-            await self._kill_and_reap(proc)
+            cancelled = await self._kill_and_reap(proc)
+            if cancelled:
+                # A request cancelled *during* timeout cleanup must not
+                # report a timeout instead of its cancellation.
+                raise asyncio.CancelledError()
             raise RuntimeError(f"Herdr command timeout: {args[:2]}")
         except asyncio.CancelledError:
             await self._kill_and_reap(proc)
