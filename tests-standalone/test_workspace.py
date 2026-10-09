@@ -1,9 +1,14 @@
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 import pytest
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 from qiqi_delegate.install import START, END, managed_rules, install_workspace
 from qiqi_delegate.runtime import DelegateRuntime
@@ -58,12 +63,48 @@ def test_install_workspace_preserves_unrelated_agent_rules_and_mcp(tmp_path: Pat
     claude = json.loads((root / ".mcp.json").read_text())
     assert "other" in claude["mcpServers"]
     assert claude["unrelated"] == {"keep": True}
-    assert first["python"] == str(Path(sys.executable).resolve())
+    assert first["python"] == os.path.abspath(sys.executable)
     asyncio.run(install_workspace(root))
     assert (root / "AGENTS.md").read_bytes() == agents
     assert (root / ".codex" / "config.toml").read_text() == toml
     assert tuple((root / "frontend").rglob("*")) == previous_front
     assert "repositories: []" in (root / "repos.yaml").read_text()
+
+def test_installer_preserves_uv_venv_python_symlink_and_repairs_prior_config(tmp_path: Path):
+    """A venv Python symlink must not be resolved to uv's base interpreter."""
+    venv_bin = tmp_path / "tools" / "qiqi-venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    interpreter = venv_bin / "python"
+    interpreter.symlink_to(Path(sys.executable).resolve())
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    original = b"# Project-owned rules\r\n\r\nDo not change. \r\n"
+    (workspace / "AGENTS.md").write_bytes(original)
+
+    # Model a previously installed broken registration using the uv-managed base.
+    asyncio.run(install_workspace(workspace, python=Path(sys.executable).resolve()))
+    before = (workspace / "AGENTS.md").read_bytes()
+    old_codex = tomllib.loads((workspace / ".codex" / "config.toml").read_text())
+    assert old_codex["mcp_servers"]["qiqi_delegate"]["command"] != str(interpreter)
+
+    info = asyncio.run(install_workspace(workspace, python=interpreter))
+    assert info["python"] == str(interpreter)
+    assert (workspace / "AGENTS.md").read_bytes() == before
+    assert before.startswith(original)
+
+    new_codex = tomllib.loads((workspace / ".codex" / "config.toml").read_text())
+    codex = new_codex["mcp_servers"]["qiqi_delegate"]
+    assert codex["command"] == str(interpreter)
+    assert codex["env"]["QIQI_WORKSPACE_ROOT"] == str(workspace)
+    claude = json.loads((workspace / ".mcp.json").read_text())
+    assert claude["mcpServers"]["qiqi_delegate"]["command"] == str(interpreter)
+
+    # Venv identity remains even though physical interpreter target is elsewhere.
+    assert interpreter.resolve() != interpreter
+    asyncio.run(install_workspace(workspace, python=interpreter))
+    assert (workspace / "AGENTS.md").read_bytes() == before
+
 
 def test_invalid_rules_abort_before_any_other_changes(tmp_path: Path):
     (tmp_path / "AGENTS.md").write_text(START + "\n")
