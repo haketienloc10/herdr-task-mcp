@@ -20,6 +20,18 @@ from qiqi_delegate.core import (
     codex_session_hook_key, load_capture_events, resolve_capture_events,
 )
 
+class AgentStartupBlocked(RuntimeError):
+    """Herdr started a named Peer, but its startup UI requires attention."""
+
+    def __init__(self, agent_name: str, pane_id: str, evidence: str):
+        self.agent_name = agent_name
+        self.pane_id = pane_id
+        super().__init__(
+            f"agent_not_ready: {agent_name} blocked during startup; "
+            f"pane_id={pane_id}; startup_evidence={evidence}"
+        )
+
+
 def workspace_root() -> Path:
     raw = os.environ.get("QIQI_WORKSPACE_ROOT")
     if not raw:
@@ -285,8 +297,24 @@ class DelegateRuntime:
                 if not isinstance(agent, dict):
                     raise RuntimeError("agent start returned no agent identity")
                 return name, agent
-            if not (isinstance(data, dict) and isinstance(data.get("error"), dict)
-                    and data["error"].get("code") == "agent_pane_busy"):
+            code = (data.get("error", {}).get("code")
+                    if isinstance(data, dict) and isinstance(data.get("error"), dict)
+                    else None)
+            if code == "agent_not_ready":
+                # Herdr intentionally leaves this named agent running while its
+                # interactive startup prompt is blocked (trust/auth/approval).
+                # Use structured detection evidence, NOT terminal final-output scraping.
+                evidence = "agent start returned agent_not_ready"
+                try:
+                    rc_explain, out_explain, _ = await self._run(
+                        "agent", "explain", name, "--json", check=False, timeout=8
+                    )
+                    if rc_explain == 0 and out_explain.strip():
+                        evidence = out_explain[-1600:].strip()
+                except (OSError, RuntimeError, TimeoutError):
+                    pass
+                raise AgentStartupBlocked(name, pane_id, evidence)
+            if code != "agent_pane_busy":
                 raise RuntimeError(f"agent start failed: {(err or out)[-1800:]}")
             if time.monotonic() > deadline:
                 raise RuntimeError(f"pane {pane_id} did not become ready in 10s")
@@ -364,6 +392,7 @@ class DelegateRuntime:
         self._claim(repository, claim_id)
         workspace_id = None
         closed = False
+        preserve_startup = False
         result = None
         try:
             with tempfile.TemporaryDirectory(prefix="qiqi-result-") as td:
@@ -413,9 +442,30 @@ class DelegateRuntime:
                                        (turn_id, native, repository, route, state, response, time.time_ns()))
                         result = {"session_id": native, "turn_id": turn_id,
                                   "state": state, "agent_response": response}
+        except AgentStartupBlocked as exc:
+            # Do not destroy the blocked startup pane before the user can inspect
+            # it. The write claim stays held until manual verified cleanup.
+            preserve_startup = True
+            target = (f"{self.herdr_bin} --session {self.herdr_session}"
+                      if self.herdr_session else self.herdr_bin)
+            raise AgentStartupBlocked(
+                exc.agent_name, exc.pane_id,
+                f"{exc}; workspace_id={workspace_id}; "
+                f"write_claim_id={claim_id}; repository={repository}; "
+                f"inspect: {target} agent explain {exc.agent_name} --json; "
+                f"inspect startup UI: {target} agent read {exc.agent_name} "
+                f"--source visible --lines 30; "
+                f"recovery: close Herdr workspace {workspace_id} after inspection, "
+                "confirm agent termination, then call release_write_claim "
+                "with this exact repository and claim ID. Do not send the "
+                "delegated task prompt to the blocked agent manually."
+            ) from exc
         finally:
             error = None
-            if workspace_id:
+            if preserve_startup:
+                # Keep the workspace and repo claim for safe manual diagnosis.
+                pass
+            elif workspace_id:
                 try:
                     await self._run("workspace", "close", workspace_id, timeout=20)
                     closed = True
