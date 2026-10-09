@@ -13,9 +13,12 @@ mkdir -p .tools
 git clone -b feat/standalone-qiqi-delegate \
   https://github.com/haketienloc10/herdr-task-mcp.git .tools/herdr-task-mcp
 python3 -m venv .tools/herdr-task-mcp/.venv
+.tools/herdr-task-mcp/.venv/bin/python -m pip install --upgrade pip setuptools wheel
 .tools/herdr-task-mcp/.venv/bin/python -m pip install -e './.tools/herdr-task-mcp'
 .tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.install --workspace "$PWD"
 ```
+
+Nếu `pip install -e` báo thiếu `setup.py` thì `pip` trong virtualenv quá cũ. Bản này có `setup.py` tương thích, nhưng nên nâng cấp `pip`, `setuptools` và `wheel` theo lệnh trên trước khi cài. Sau đó mới chạy `qiqi_delegate.install`; không cần clone lại hoặc xóa workspace.
 
 Installer chỉ cấu hình workspace: AGENTS.md, .codex/config.toml, .mcp.json, repos.yaml, agent-routing.yaml và .herdr-task-mcp/ (SQLite). Không sửa frontend/, backend/ hoặc cài MCP vào home/global.
 
