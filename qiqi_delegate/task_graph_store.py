@@ -920,6 +920,38 @@ class GraphRuntimeStore:
                 (now, attempt["graph_run_id"]),
             )
 
+    def recover_quiescent_wave(self, graph_run_id: str) -> bool:
+        """Close a wave with no running attempts after an interrupted coordinator.
+
+        Never infer worker termination from process restart: an attempt still marked
+        running keeps its wave locked for external recovery.
+        """
+        run_id = _required_id(graph_run_id, "graph_run_id")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT current_wave_id FROM graph_runs WHERE graph_run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"unknown graph_run_id: {run_id!r}")
+            wave_id = row["current_wave_id"]
+            if wave_id is None:
+                return False
+            active = conn.execute(
+                "SELECT COUNT(*) FROM graph_attempts "
+                "WHERE graph_run_id = ? AND wave_id = ? AND runtime_state = 'running'",
+                (run_id, wave_id),
+            ).fetchone()[0]
+            if active:
+                return False
+            conn.execute(
+                "UPDATE graph_runs SET current_wave_id = NULL, updated_at_ns = ?, "
+                "revision = revision + 1 WHERE graph_run_id = ? AND current_wave_id = ?",
+                (time.time_ns(), run_id, wave_id),
+            )
+            return True
+
     def close_wave(self, graph_run_id: str, wave_id: str) -> None:
         run_id = _required_id(graph_run_id, "graph_run_id")
         clean_wave_id = _required_id(wave_id, "wave_id")
@@ -933,6 +965,21 @@ class GraphRuntimeStore:
             ).fetchone()
             if run is None:
                 raise RuntimeError(f"unknown graph_run_id: {run_id!r}")
+            if run["current_wave_id"] is None:
+                # Another reader may already have completed safe quiescent recovery.
+                prior = conn.execute(
+                    "SELECT COUNT(*) FROM graph_attempts "
+                    "WHERE graph_run_id = ? AND wave_id = ?",
+                    (run_id, clean_wave_id),
+                ).fetchone()[0]
+                if prior:
+                    active_prior = conn.execute(
+                        "SELECT COUNT(*) FROM graph_attempts "
+                        "WHERE graph_run_id = ? AND wave_id = ? AND runtime_state = 'running'",
+                        (run_id, clean_wave_id),
+                    ).fetchone()[0]
+                    if not active_prior:
+                        return
             if run["current_wave_id"] != clean_wave_id:
                 raise RuntimeError(
                     f"wave {clean_wave_id!r} is not the current wave for graph run"
