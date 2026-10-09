@@ -569,3 +569,61 @@ def test_corrupt_or_legacy_graph_definition_fails_closed(tmp_path):
         )
     with pytest.raises(RuntimeError, match="fingerprint mismatch"):
         make_runtime(path).get_graph(run_id)
+
+def test_direct_runtime_cannot_accept_failed_peer_with_fake_turn(tmp_path):
+    """Python callers cannot bypass the MCP's native capture ACCEPT guard."""
+    graph = make_graph()
+    gr = make_runtime(tmp_path / "graph.sqlite3")
+    started = gr.start_graph(graph, repository_names={"backend", "frontend"})
+    run_id = started["graph_run_id"]
+
+    async def failed_with_turn(node):
+        return {
+            "state": "failed",
+            "session_id": "native_" + node.node_id,
+            "turn_id": "turn_" + node.node_id,
+            "agent_response": "A failure is not successful evidence",
+        }
+
+    current = asyncio.run(gr.delegate_next(run_id, executor=failed_with_turn))
+    assert current["graph_state"] == "awaiting_review"
+    with pytest.raises(ValueError, match="exact settled attempt"):
+        gr.submit_decisions(
+            run_id,
+            decisions_from_payload([{"node_id": "B1", "action": "accept"}]),
+            expected_revision=current["revision"],
+        )
+    after = make_runtime(tmp_path / "graph.sqlite3").get_graph(run_id)
+    assert after["graph_state"] == "awaiting_review"
+    assert after["runnable_nodes"] == []
+    assert after["nodes"][0]["semantic_state"] == "pending"
+    assert after["nodes"][1]["semantic_state"] == "pending"
+
+
+def test_graph_wave_conflicts_use_git_root_identity_not_mutable_repo_alias(tmp_path):
+    """Two historic logical names mapped to one Git root never share a wave."""
+    graph = task_graph_from_payload({"nodes": [{
+        "node_id": name, "repository": name, "route": "codex-balanced",
+        "task_packet": {
+            "objective": name, "scope": ["src"],
+            "acceptance_criteria": ["Evidence"],
+        },
+    } for name in ("old", "renamed")]})
+    gr = GraphRuntime(
+        GraphRuntimeStore(tmp_path / "graph.sqlite3"),
+        repository_key=lambda name: "/canonical/same-root",
+    )
+    run_id = gr.start_graph(
+        graph, repository_names={"old", "renamed"},
+    )["graph_run_id"]
+    work = []
+
+    async def execute(node):
+        work.append(node.node_id)
+        return await settled(node)
+
+    result = asyncio.run(gr.delegate_next(run_id, executor=execute))
+    assert len(result["results"]) == 1
+    assert len(work) == 1
+
+
