@@ -104,9 +104,29 @@ class DelegateRuntime:
                 CREATE TABLE IF NOT EXISTS write_claims (
                     repository TEXT PRIMARY KEY,
                     claim_id TEXT NOT NULL,
-                    created_at_ns INTEGER NOT NULL
+                    created_at_ns INTEGER NOT NULL,
+                    repository_root TEXT
                 );
             """)
+            # Schema upgrade must be serialized with other MCP processes.
+            # Legacy claims cannot be safely mapped by current mutable aliases:
+            # leave their roots NULL and reject all new claims until they are
+            # released by exact ID (or their existing worker finishes).
+            db.execute("BEGIN IMMEDIATE")
+            columns = {
+                row["name"] for row in db.execute(
+                    "PRAGMA table_info(write_claims)"
+                ).fetchall()
+            }
+            if "repository_root" not in columns:
+                db.execute(
+                    "ALTER TABLE write_claims ADD COLUMN repository_root TEXT"
+                )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS write_claims_canonical_root "
+                "ON write_claims(repository_root) "
+                "WHERE repository_root IS NOT NULL"
+            )
 
     def _load_yaml(self, filename: str) -> dict:
         path = self.root / filename
@@ -185,18 +205,51 @@ class DelegateRuntime:
             raise ValueError("result capture configuration is runtime-owned")
         return agent, args
 
-    def _claim(self, repository: str, claim_id: str) -> None:
+    def _claim(
+        self,
+        repository: str,
+        claim_id: str,
+        *,
+        repository_root: Path | None = None,
+    ) -> None:
+        # The path actually used for execution is the write identity. A
+        # logical repo name can be renamed while an earlier worker is alive.
+        root = repository_root if repository_root is not None else self.repos()[repository]
+        canonical = str(root.resolve())
         try:
             with self._connect() as db:
-                db.execute("INSERT INTO write_claims VALUES (?, ?, ?)",
-                           (repository, claim_id, time.time_ns()))
+                db.execute("BEGIN IMMEDIATE")
+                # An old claim has no trustworthy root when repos.yaml may
+                # have been renamed. Fail closed rather than guessing and
+                # dispatching a concurrent writer during a rolling upgrade.
+                unknown = db.execute(
+                    "SELECT repository FROM write_claims "
+                    "WHERE repository_root IS NULL LIMIT 1"
+                ).fetchone()
+                if unknown is not None:
+                    raise RuntimeError(
+                        "unmapped legacy write claim is active for "
+                        f"{unknown['repository']!r}; verify worker termination "
+                        "and release its exact claim before delegation"
+                    )
+                db.execute(
+                    "INSERT INTO write_claims("
+                    "repository, claim_id, created_at_ns, repository_root"
+                    ") VALUES (?, ?, ?, ?)",
+                    (repository, claim_id, time.time_ns(), canonical),
+                )
         except sqlite3.IntegrityError as exc:
-            raise RuntimeError(f"repository {repository} is busy; recover stale claim explicitly") from exc
+            raise RuntimeError(
+                f"repository {repository} / Git root {canonical} is busy; "
+                "recover stale claim explicitly"
+            ) from exc
 
     def release_claim(self, repository: str, claim_id: str) -> bool:
         with self._connect() as db:
-            result = db.execute("DELETE FROM write_claims WHERE repository=? AND claim_id=?",
-                                (repository, claim_id))
+            result = db.execute(
+                "DELETE FROM write_claims WHERE repository=? AND claim_id=?",
+                (repository, claim_id),
+            )
             return result.rowcount == 1
 
     def _session(self, session_id: str, repository: str, adapter: str):
@@ -433,7 +486,7 @@ class DelegateRuntime:
                 raise ValueError("unknown session or session owned by another repository/agent")
         turn_id = str(uuid.uuid4())
         claim_id = "turn:" + turn_id
-        self._claim(repository, claim_id)
+        self._claim(repository, claim_id, repository_root=repos[repository])
         workspace_id = None
         closed = False
         preserve_startup = False
