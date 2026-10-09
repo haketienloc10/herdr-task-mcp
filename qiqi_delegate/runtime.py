@@ -632,6 +632,9 @@ class DelegateRuntime:
         finally:
             error = None
             cancelled_during_close = False
+            # When delegation itself was cancelled, a failed close must not
+            # convert that cancellation into an unrelated RuntimeError.
+            was_cancelled = bool(asyncio.current_task().cancelling())
             if preserve_startup:
                 # Keep the workspace and repo claim for safe manual diagnosis.
                 pass
@@ -640,20 +643,23 @@ class DelegateRuntime:
                 # request, otherwise both the Herdr worker and its write claim
                 # can be stranded. Do not mark closed or release the claim until
                 # the *actual* Herdr close command has completed successfully.
-                close_task = asyncio.create_task(
-                    self._run("workspace", "close", workspace_id, timeout=20)
-                )
-                try:
-                    cancelled_during_close, _ = await self._await_reaper(close_task)
-                    closed = True
-                except Exception as exc:
-                    error = str(exc)
+                async def close_workspace() -> str | None:
+                    try:
+                        await self._run("workspace", "close", workspace_id, timeout=20)
+                    except Exception as exc:
+                        return str(exc)
+                    return None
+
+                close_task = asyncio.create_task(close_workspace())
+                cancelled_during_close, _ = await self._await_reaper(close_task)
+                error = close_task.result()
+                closed = error is None
             else:
                 closed = True
             if closed:
                 self.release_claim(repository, claim_id)
             if error:
-                if result is None and not cancelled_during_close:
+                if result is None and not (was_cancelled or cancelled_during_close):
                     raise RuntimeError(
                         f"workspace close unconfirmed; workspace={workspace_id}; "
                         f"claim={claim_id}; {error}"
