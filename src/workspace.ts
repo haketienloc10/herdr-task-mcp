@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const START = '# >>> herdr-task-mcp workspace (managed)';
 const END = '# <<< herdr-task-mcp workspace (managed)';
 const SERVER_NAME = 'herdr-task';
+const CODEX_DIRECT_NAMESPACE = `mcp__${SERVER_NAME.replace(/[^A-Za-z0-9_]/g, '_')}`;
 
 export interface WorkspacePaths {
   root: string;
@@ -39,6 +40,69 @@ async function readOptional(path: string): Promise<string> {
   }
 }
 
+/** Preserve user code-mode settings when adding our MCP to direct-only tools. */
+function addCodexDirectNamespace(config: string): { config: string; needsSection: boolean } {
+  const headers = Array.from(config.matchAll(/^[ \t]*\[features\.code_mode\][ \t]*(?:#.*)?$/gm));
+  if (headers.length > 1) throw new Error('.codex/config.toml defines features.code_mode more than once');
+  if (headers.length === 0) return { config, needsSection: true };
+  const header = headers[0];
+  const bodyStart = header.index! + header[0].length;
+  const nextTable = /^[ \t]*\[\[?[^\n]+/gm;
+  nextTable.lastIndex = bodyStart;
+  const bodyEnd = nextTable.exec(config)?.index ?? config.length;
+  const body = config.slice(bodyStart, bodyEnd);
+  const keys = Array.from(body.matchAll(/^[ \t]*direct_only_tool_namespaces[ \t]*=/gm));
+  if (keys.length > 1) throw new Error('.codex/config.toml defines direct_only_tool_namespaces more than once');
+  if (keys.length === 0) {
+    const inserted = '\ndirect_only_tool_namespaces = [' + JSON.stringify(CODEX_DIRECT_NAMESPACE) + ']';
+    return { config: config.slice(0, bodyStart) + inserted + config.slice(bodyStart), needsSection: false };
+  }
+  const key = keys[0];
+  const arrayStart = key.index! + key[0].length + (body.slice(key.index! + key[0].length).match(/^[ \t]*/)?.[0].length ?? 0);
+  if (body[arrayStart] !== '[') {
+    throw new Error('.codex/config.toml direct_only_tool_namespaces must be a TOML array');
+  }
+  const values: string[] = [];
+  let i = arrayStart + 1;
+  const skip = () => {
+    while (i < body.length) {
+      if (/\s/.test(body[i])) { i++; continue; }
+      if (body[i] === '#') { while (i < body.length && body[i] !== '\n') i++; continue; }
+      break;
+    }
+  };
+  let closing = -1;
+  while (i < body.length) {
+    skip();
+    if (body[i] === ']') { closing = i; break; }
+    const quote = body[i];
+    if (quote !== '"' && quote !== "'") {
+      throw new Error('.codex/config.toml direct_only_tool_namespaces must contain quoted strings');
+    }
+    i++;
+    let value = '';
+    let closed = false;
+    while (i < body.length) {
+      if (body[i] === '\\' && quote === '"') {
+        if (i + 1 >= body.length) break;
+        value += body[i + 1]; i += 2;
+      } else if (body[i] === quote) { i++; closed = true; break; }
+      else { value += body[i++]; }
+    }
+    if (!closed) throw new Error('.codex/config.toml has an unterminated direct_only_tool_namespaces string');
+    values.push(value);
+    skip();
+    if (body[i] === ',') { i++; continue; }
+    if (body[i] === ']') { closing = i; break; }
+    throw new Error('.codex/config.toml has an invalid direct_only_tool_namespaces array');
+  }
+  if (closing < 0) throw new Error('.codex/config.toml has an unterminated direct_only_tool_namespaces array');
+  if (values.includes(CODEX_DIRECT_NAMESPACE)) return { config, needsSection: false };
+  const addition = JSON.stringify(CODEX_DIRECT_NAMESPACE) + (values.length ? ', ' : '');
+  const absoluteStart = bodyStart + arrayStart + 1;
+  return { config: config.slice(0, absoluteStart) + addition + config.slice(absoluteStart), needsSection: false };
+}
+
 function codexConfig(existing: string, paths: WorkspacePaths): string {
   const begin = existing.indexOf(START);
   const end = existing.indexOf(END);
@@ -49,9 +113,12 @@ function codexConfig(existing: string, paths: WorkspacePaths): string {
   if (/^\s*\[\s*mcp_servers\.(?:herdr-task|"herdr-task"|'herdr-task')(?:\s*\]|\s*\.)/m.test(original)) {
     throw new Error('.codex/config.toml already defines mcp_servers.herdr-task outside its managed section');
   }
+  const { config, needsSection } = addCodexDirectNamespace(original);
   const env = workspaceEnvironment(paths);
   const section = [
     START,
+    ...(needsSection ? ['[features.code_mode]',
+      'direct_only_tool_namespaces = [' + JSON.stringify(CODEX_DIRECT_NAMESPACE) + ']', ''] : []),
     '[mcp_servers.herdr-task]',
     'command = "node"',
     `args = [${JSON.stringify(paths.entryPoint)}, "mcp"]`,
@@ -59,7 +126,7 @@ function codexConfig(existing: string, paths: WorkspacePaths): string {
     ...Object.entries(env).map(([key, value]) => `${key} = ${JSON.stringify(value)}`),
     END
   ].join('\n');
-  return `${original.trimEnd()}${original.trim() ? '\n\n' : ''}${section}\n`;
+  return `${config.trimEnd()}${config.trim() ? '\n\n' : ''}${section}\n`;
 }
 
 function claudeConfig(existing: string, paths: WorkspacePaths): string {
