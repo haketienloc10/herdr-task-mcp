@@ -97,8 +97,17 @@ class DelegateRuntime:
             if not isinstance(path, str) or not path.strip() or Path(path).is_absolute():
                 raise ValueError("repository path must be nonempty and relative")
             target = (self.root / path).resolve()
-            if not target.is_relative_to(self.root):
-                raise ValueError(f"repository escapes workspace: {name}")
+            # A standalone MCP is installed in the control workspace, while
+            # Git repositories can be children OR siblings of that workspace.
+            # Explicitly registered sibling paths (../frontend, ../backend)
+            # stay inside the common parent boundary. Do not allow arbitrary
+            # ancestor traversal or symlink escapes outside that boundary.
+            allowed_root = self.root.parent
+            if target == allowed_root or not target.is_relative_to(allowed_root):
+                raise ValueError(
+                    f"repos.yaml repository {name!r} path escapes the workspace "
+                    f"parent boundary: {path!r}"
+                )
             if not target.is_dir():
                 raise ValueError(f"repository is missing: {target}")
             try:
