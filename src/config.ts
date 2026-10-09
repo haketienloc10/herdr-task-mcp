@@ -7,6 +7,7 @@ export interface Config {
   dbPath: string;
   reportDir: string;
   herdrBin: string;
+  workspaceRoot?: string;
   maxConcurrent: number;
   maxDepth: number;
   maxChildren: number;
@@ -26,6 +27,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: join(dataDir, 'tasks.sqlite'),
     reportDir: join(dataDir, 'reports'),
     herdrBin: env.HERDR_BIN ?? 'herdr',
+    workspaceRoot: env.HERDR_TASK_WORKSPACE_ROOT ? resolve(env.HERDR_TASK_WORKSPACE_ROOT) : undefined,
     maxConcurrent: Math.max(2, positiveInteger('HERDR_TASK_MAX_CONCURRENT', 3)),
     maxDepth: positiveInteger('HERDR_TASK_MAX_DEPTH', 1),
     maxChildren: positiveInteger('HERDR_TASK_MAX_CHILDREN', 6),

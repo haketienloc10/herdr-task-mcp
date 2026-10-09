@@ -1,5 +1,5 @@
 import { mkdir, readFile, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { stat } from 'node:fs/promises';
 import type { Config } from './config.ts';
 import type { AgentRuntime } from './herdr.ts';
@@ -45,6 +45,13 @@ export class Orchestrator {
       throw new Error('Too many or duplicate dependencies');
     const cwd = await realpath(input.cwd);
     if (!(await stat(cwd)).isDirectory()) throw new Error('cwd must be a directory');
+    if (this.config.workspaceRoot) {
+      const root = await realpath(this.config.workspaceRoot);
+      const rel = relative(root, cwd);
+      if (rel === '..' || rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(rel)) {
+        throw new Error(`cwd must remain inside workspace: ${root}`);
+      }
+    }
     const parent = input.parent_task_id ? this.store.get(input.parent_task_id) : null;
     if (input.parent_task_id && !parent) throw new Error('Unknown parent_task_id');
     if (parent && TERMINAL_STATUSES.has(parent.status)) throw new Error('Parent task already finished');

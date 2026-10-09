@@ -20,30 +20,47 @@ Hai MCP client sử dụng chung daemon, thay vì mỗi MCP process giữ queue 
 - Codex CLI và/hoặc Claude Code CLI, đã đăng nhập và sẵn sàng trong Herdr.
 - macOS/Linux (Unix-domain socket); Windows chưa được kiểm thử.
 
-## Cài đặt
+## Cài đặt theo workspace (không global)
+
+Chỉ những workspace được cấu hình mới có MCP này. Mọi lệnh dưới đây chạy **từ thư mục gốc của workspace cần dùng**, không chạy `npm install -g`, `codex mcp add` hoặc `claude mcp add`.
 
 ```bash
-npm install
-npm run build
-npm test
+cd /absolute/path/to/my-project
+mkdir -p .tools
+git clone -b feat/mcp-task-orchestrator https://github.com/haketienloc10/herdr-task-mcp.git .tools/herdr-task-mcp
+npm --prefix .tools/herdr-task-mcp install
+npm --prefix .tools/herdr-task-mcp run build
+npm --prefix .tools/herdr-task-mcp test
+
+node .tools/herdr-task-mcp/dist/src/cli.js workspace init
 ```
 
-Mở một terminal trong môi trường Herdr và **chạy daemon một lần**:
+`workspace init [workspace-path]` tạo hoặc cập nhật đúng hai cấu hình **cấp project**:
+
+- `.codex/config.toml` — Codex đọc khi project được đánh dấu **trusted**.
+- `.mcp.json` — Claude Code đọc tại workspace và yêu cầu phê duyệt MCP theo thiết lập bảo mật của Claude.
+
+Nội dung MCP dùng `node` chạy file CLI được build **bên trong workspace**, không thay đổi `~/.codex/config.toml`, `~/.claude.json` hoặc đăng ký MCP global. Nếu hai file đã có cấu hình khác, installer giữ nguyên cấu hình khác. Nếu có cấu hình `herdr-task` không do installer quản lý, installer báo lỗi thay vì ghi đè.
+
+Trong một terminal Herdr tại thư mục gốc workspace, chạy daemon **riêng cho workspace đó**:
 
 ```bash
-node dist/src/cli.js daemon
+node .tools/herdr-task-mcp/dist/src/cli.js workspace daemon
 ```
 
-Giữ daemon chạy. Mặc định dữ liệu nằm ở `~/.herdr-task-mcp/` (SQLite, socket và report JSON). MCP client chỉ kết nối đến daemon đã chạy.
+Giữ daemon chạy khi dùng Codex/Claude. Dữ liệu chỉ nằm trong `<workspace>/.herdr-task-mcp/` (SQLite, Unix socket, report JSON). Thư mục dữ liệu chứa `.gitignore` để không commit SQLite/report. Daemon từ chối `task_submit.cwd` nằm ngoài workspace, kể cả đường dẫn symlink trỏ ra ngoài. Đây là kiểm tra phạm vi task, **không phải sandbox chống mã độc**.
 
-Đăng ký MCP cho **cả hai CLI** (đổi `<absolute-repo-path>` thành đường dẫn tuyệt đối):
+Khởi động lại Codex/Claude đang mở workspace để đọc cấu hình. Kiểm tra bằng `codex mcp list` / `claude mcp list` hoặc `/mcp` trong Claude. Khi không cần MCP ở workspace khác, **không chạy `workspace init` tại đó**.
+
+Nếu cài đặt chỉ phục vụ máy cá nhân, có thể thêm các đường dẫn cấu hình có chứa absolute path vào `.git/info/exclude` của project (hoặc `.gitignore`) để tránh commit. Ví dụ:
 
 ```bash
-codex mcp add herdr-task -- node <absolute-repo-path>/dist/src/cli.js mcp
-claude mcp add herdr-task -- node <absolute-repo-path>/dist/src/cli.js mcp
+printf '%s\n' '.tools/herdr-task-mcp/' '.codex/config.toml' '.mcp.json' >> .git/info/exclude
 ```
 
-Kiểm tra `codex mcp list` / `claude mcp list`, rồi khởi động lại phiên Codex và Claude. Nếu CLI trên máy bạn khác cú pháp, xem `codex mcp add --help` và `claude mcp add --help`.
+Lưu ý: ignore không áp dụng cho file đã được Git track. Các path absolute trong cấu hình tạo ra từ `workspace init` không dùng chung trực tiếp giữa nhiều máy; mỗi máy nên chạy lệnh init tại workspace tương ứng.
+
+Nếu trước đó đã đăng ký MCP ở user/global config, hãy kiểm tra và gỡ bản đăng ký cũ riêng. `workspace init` không tự sửa cấu hình cá nhân của Codex hoặc Claude.
 
 ## Workflow
 
@@ -78,8 +95,9 @@ Worker phải ghi file report JSON đúng `task_id`. Herdr chỉ biết agent đ
 
 | Environment variable | Mặc định | Ý nghĩa |
 |---|---|---|
-| `HERDR_TASK_DATA_DIR` | `~/.herdr-task-mcp` | SQLite, Unix socket, report |
+| `HERDR_TASK_DATA_DIR` | `~/.herdr-task-mcp` với `daemon` cũ; `<workspace>/.herdr-task-mcp` với `workspace daemon` | SQLite, Unix socket, report |
 | `HERDR_TASK_SOCKET` | `<dataDir>/orchestrator.sock` | Đường dẫn Unix socket; đồng nhất giữa daemon và adapters |
+| `HERDR_TASK_WORKSPACE_ROOT` | Không giới hạn nếu không cấu hình; được đặt tự động với `workspace` | Cấm task `cwd` nằm ngoài root |
 | `HERDR_BIN` | `herdr` | Path đến CLI Herdr |
 | `HERDR_TASK_MAX_CONCURRENT` | `3` | Số worker hoạt động đồng thời |
 | `HERDR_TASK_MAX_DEPTH` | `1` | Độ sâu task con |

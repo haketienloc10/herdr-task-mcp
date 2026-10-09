@@ -2,10 +2,25 @@
 import { mkdir } from 'node:fs/promises';
 import { loadConfig } from './config.ts';
 
-const config = loadConfig();
 const command = process.argv[2] ?? 'mcp';
+let config = loadConfig();
+if (command === 'workspace') {
+  const { workspacePaths, workspaceEnvironment, initWorkspace } = await import('./workspace.ts');
+  const action = process.argv[3];
+  if (action !== 'init' && action !== 'daemon') {
+    throw new Error('Usage: herdr-task-mcp workspace [init|daemon] [workspace-path]');
+  }
+  const paths = await workspacePaths(process.argv[4]);
+  if (action === 'init') {
+    await initWorkspace(paths);
+    console.error(`Workspace MCP configured: ${paths.root}`);
+    process.exit(0);
+  }
+  config = loadConfig({ ...process.env, ...workspaceEnvironment(paths) });
+}
 
-if (command === 'daemon') {
+
+if (command === 'daemon' || command === 'workspace') {
   const [{ TaskStore }, { HerdrRuntime }, { Orchestrator }, { serveSocket }] = await Promise.all([
     import('./store.ts'), import('./herdr.ts'), import('./orchestrator.ts'), import('./http.ts')
   ]);
@@ -29,6 +44,6 @@ if (command === 'daemon') {
   const { serveMcp } = await import('./mcp.ts');
   await serveMcp(config.socketPath);
 } else {
-  console.error('Usage: herdr-task-mcp [daemon|mcp]');
+  console.error('Usage: herdr-task-mcp [daemon|mcp|workspace init|workspace daemon]');
   process.exitCode = 2;
 }
