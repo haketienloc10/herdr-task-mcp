@@ -1118,10 +1118,21 @@ class GraphRuntime:
             attempt_id = persisted.get("current_attempt_id")
             attempt = self.store.get_attempt(attempt_id) if attempt_id else None
             result = attempt.get("result") if isinstance(attempt, dict) else None
-            if isinstance(result, dict) and result.get("state") == "capture_ambiguous":
+            # Enforce this at the runtime boundary, not just the MCP wrapper:
+            # the Python API must never ACCEPT a failed/blocked/ambiguous Peer.
+            if (
+                not isinstance(attempt, dict)
+                or attempt.get("runtime_state") != "settled"
+                or not isinstance(result, dict)
+                or result.get("state") != "settled"
+                or not isinstance(result.get("agent_response"), str)
+                or not result["agent_response"].strip()
+                or not attempt.get("turn_id")
+            ):
                 raise ValueError(
-                    f"ACCEPT requires unambiguous captured Peer evidence for node "
-                    f"{decision.node_id!r}; retry, replan or block instead"
+                    f"ACCEPT requires an exact settled attempt with captured "
+                    f"Peer evidence for node {decision.node_id!r}; "
+                    "retry, replan or block instead"
                 )
 
         scheduler_decisions = tuple(
