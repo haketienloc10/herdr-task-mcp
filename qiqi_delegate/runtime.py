@@ -631,12 +631,20 @@ class DelegateRuntime:
             ) from exc
         finally:
             error = None
+            cancelled_during_close = False
             if preserve_startup:
                 # Keep the workspace and repo claim for safe manual diagnosis.
                 pass
             elif workspace_id:
+                # The close operation must survive further cancellation of the
+                # request, otherwise both the Herdr worker and its write claim
+                # can be stranded. Do not mark closed or release the claim until
+                # the *actual* Herdr close command has completed successfully.
+                close_task = asyncio.create_task(
+                    self._run("workspace", "close", workspace_id, timeout=20)
+                )
                 try:
-                    await self._run("workspace", "close", workspace_id, timeout=20)
+                    cancelled_during_close, _ = await self._await_reaper(close_task)
                     closed = True
                 except Exception as exc:
                     error = str(exc)
@@ -645,11 +653,19 @@ class DelegateRuntime:
             if closed:
                 self.release_claim(repository, claim_id)
             if error:
-                if result is None:
-                    raise RuntimeError(f"workspace close unconfirmed; claim={claim_id}; {error}")
-                result.update({"cleanup_state": "workspace_close_unconfirmed",
-                               "write_claim_id": claim_id, "write_claim_repository": repository,
-                               "workspace_id": workspace_id,
-                               "recovery_action": "Verify worker has stopped; then release claim"})
+                if result is None and not cancelled_during_close:
+                    raise RuntimeError(
+                        f"workspace close unconfirmed; workspace={workspace_id}; "
+                        f"claim={claim_id}; {error}"
+                    )
+                if result is not None:
+                    result.update({"cleanup_state": "workspace_close_unconfirmed",
+                                   "write_claim_id": claim_id, "write_claim_repository": repository,
+                                   "workspace_id": workspace_id,
+                                   "recovery_action": "Verify worker has stopped; then release claim"})
+            if cancelled_during_close:
+                # A second cancel must be propagated *after* the close task
+                # succeeds or fails, never while it can still leave live agents.
+                raise asyncio.CancelledError()
         assert result is not None
         return result
