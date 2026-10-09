@@ -118,7 +118,6 @@ def _validated_execution_result(value: Any) -> dict[str, Any]:
             raise RuntimeError(
                 "capture_ambiguous repo-task result must not include agent_response"
             )
-        _required_execution_id(value.get("capture_review_id"), "capture_review_id")
         candidate_count = value.get("candidate_count")
         if (
             isinstance(candidate_count, bool)
@@ -429,7 +428,6 @@ class GraphRuntime:
             )
             attempt_result = attempt.get("result") if isinstance(attempt, dict) else None
             public_runtime_state = state.runtime_state
-            capture_review_id: str | None = None
             candidate_count: int | None = None
             if (
                 state.semantic_state == "pending"
@@ -438,10 +436,7 @@ class GraphRuntime:
                 and attempt_result.get("state") == "capture_ambiguous"
             ):
                 public_runtime_state = "capture_ambiguous"
-                raw_review_id = attempt_result.get("capture_review_id")
                 raw_candidate_count = attempt_result.get("candidate_count")
-                if isinstance(raw_review_id, str) and raw_review_id:
-                    capture_review_id = raw_review_id
                 if isinstance(raw_candidate_count, int) and not isinstance(
                     raw_candidate_count, bool
                 ):
@@ -455,10 +450,9 @@ class GraphRuntime:
                     "current_attempt_id": current_attempt_id,
                     **(
                         {
-                            "capture_review_id": capture_review_id,
                             "candidate_count": candidate_count,
                         }
-                        if capture_review_id is not None
+                        if candidate_count is not None
                         else {}
                     ),
                     "session_id": persisted.get("session_id"),
@@ -488,10 +482,9 @@ class GraphRuntime:
                         "attempt_id": current_attempt_id,
                         **(
                             {
-                                "capture_review_id": capture_review_id,
                                 "candidate_count": candidate_count,
                             }
-                            if capture_review_id is not None
+                            if candidate_count is not None
                             else {}
                         ),
                         "acceptance_criteria": list(
@@ -594,24 +587,6 @@ class GraphRuntime:
             "acceptance_criteria": list(authored.task_packet.acceptance_criteria),
             "result": result,
         }
-
-    def get_node_review(
-        self,
-        graph_run_id: str,
-        node_id: str,
-        attempt_id: str,
-    ) -> dict[str, Any]:
-        """Hydrate one exact current attempt for semantic review or replan evidence."""
-
-        graph, snapshot, revision = self._snapshot(graph_run_id)
-        return self._review_payload(
-            graph_run_id,
-            graph,
-            snapshot,
-            revision,
-            node_id,
-            attempt_id,
-        )
 
     def get_node_reviews(
         self,
@@ -1066,7 +1041,6 @@ class GraphRuntime:
                     ),
                     **(
                         {
-                            "capture_review_id": outcome["capture_review_id"],
                             "candidate_count": outcome["candidate_count"],
                         }
                         if outcome.get("state") == "capture_ambiguous"
@@ -1105,6 +1079,24 @@ class GraphRuntime:
                 "graph decisions are only accepted while graph_state='awaiting_review'; "
                 f"current state={graph_state!r}"
             )
+
+        # Scheduler maps capture_ambiguous onto a reviewable settled state.
+        # An ambiguous capture still has no authoritative Peer response and
+        # must never be promoted to semantic ACCEPT through this lower layer.
+        for decision in decisions:
+            if decision.action != "accept":
+                continue
+            persisted = self.store.get_node(graph_run_id, decision.node_id)
+            if persisted is None:
+                raise ValueError(f"unknown node: {decision.node_id}")
+            attempt_id = persisted.get("current_attempt_id")
+            attempt = self.store.get_attempt(attempt_id) if attempt_id else None
+            result = attempt.get("result") if isinstance(attempt, dict) else None
+            if isinstance(result, dict) and result.get("state") == "capture_ambiguous":
+                raise ValueError(
+                    f"ACCEPT requires unambiguous captured Peer evidence for node "
+                    f"{decision.node_id!r}; retry, replan or block instead"
+                )
 
         scheduler_decisions = tuple(
             NodeDecision(node_id=decision.node_id, action=decision.action)
