@@ -545,6 +545,7 @@ class DelegateRuntime:
         closed = False
         preserve_startup = False
         result = None
+        was_cancelled = False
         try:
             with tempfile.TemporaryDirectory(prefix="qiqi-result-") as td:
                 sink = Path(td)
@@ -629,12 +630,16 @@ class DelegateRuntime:
                 recovery_command=recovery,
                 public_context=public_context,
             ) from exc
+        except asyncio.CancelledError:
+            # Task.cancelling() is only available on newer Python releases;
+            # record the original cancellation explicitly for Python 3.10.
+            was_cancelled = True
+            raise
         finally:
             error = None
             cancelled_during_close = False
             # When delegation itself was cancelled, a failed close must not
             # convert that cancellation into an unrelated RuntimeError.
-            was_cancelled = bool(asyncio.current_task().cancelling())
             if preserve_startup:
                 # Keep the workspace and repo claim for safe manual diagnosis.
                 pass
