@@ -175,6 +175,16 @@ Human → Lead QiQi → TaskPacket / TaskGraph → qiqi_delegate → Herdr
 
 **Không có Supervisor:** không chạy broker, supervisor agent hoặc case audit. SLP R1–R5 không nằm trong runtime độc lập. Lead chịu trách nhiệm technical review.
 
+### TaskGraph restart recovery
+
+- Authored DAG (bao gồm TaskPacket, route và dependency), node state, revision, attempts và pending retry plan được lưu vào SQLite. Sau khi server restart, `get_graph(graph_run_id)`, `get_node_reviews`, `submit_decisions`, `reconcile_graph` và `delegate_next` đọc lại dữ liệu này; không tự reset ACCEPT hoặc dispatch lại node.
+- `submit_decisions(action="retry")` lưu TaskPacket kèm feedback và lựa chọn START/RESUME trong cùng transaction với semantic transition. `delegate_next` kiểm tra revision và claim **cả wave atomically**; nếu node thứ hai không claim được, toàn bộ wave rollback (không có attempt giả hoặc mất feedback).
+- Attempt mới ở trạng thái dispatch `prepared` vẫn giữ retry plan trong SQLite; chỉ khi coroutine tới ranh giới dispatch mới tiêu thụ pending plan, đồng thời lưu `retry_plan_json` gốc trong attempt để audit. Crash trước hoặc sau ranh giới này đều **fail-closed** nếu wave còn `running`—không tự kết luận worker đã dừng hay tự replay.
+- Nếu server chết sau khi mọi attempt đã terminal nhưng trước `close_wave()`, lần load kế tiếp tự đóng quiescent wave bằng transaction. Không tạo thêm attempt hoặc giả định Peer tạo kết quả mới.
+- Nếu restart lúc wave đang chạy, attempt vẫn `running` và graph không `ready`. Không tự coi worker đã dừng, không xóa claim, không retry. Người vận hành phải kiểm tra và xử lý worker/claim theo quy trình an toàn trước khi mở lại graph. Không có MCP recovery tool.
+- Graph run được tạo trước phiên bản lưu `graph_json` không thể khôi phục chỉ từ fingerprint. Runtime từ chối mở graph legacy thay vì tự suy đoán authored DAG. Nên tạo graph run mới hoặc di chuyển authored definition qua migration được kiểm chứng; không sửa SQLite bằng phỏng đoán.
+
+
 ## Test và giới hạn
 
 ```bash

@@ -52,12 +52,45 @@ class ReviewDecision:
 
 @dataclass(frozen=True)
 class RetryPlan:
-    """Process-owned execution plan for the next attempt of one reviewed node."""
+    """Persisted execution plan for the next attempt of one reviewed node."""
 
     task_packet: TaskPacket
     resume_session: bool
     session_id: str | None
     feedback: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "task_packet": self.task_packet.as_dict(),
+            "resume_session": self.resume_session,
+            "session_id": self.session_id,
+            "feedback": list(self.feedback),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RetryPlan":
+        if set(payload) != {"task_packet", "resume_session", "session_id", "feedback"}:
+            raise RuntimeError("persisted retry plan has invalid fields")
+        resume = payload["resume_session"]
+        session_id = payload["session_id"]
+        feedback = payload["feedback"]
+        if not isinstance(resume, bool):
+            raise RuntimeError("persisted retry plan has invalid resume_session")
+        if resume and (not isinstance(session_id, str) or not session_id.strip()):
+            raise RuntimeError("persisted retry plan has no RESUME session")
+        if not resume and session_id is not None:
+            raise RuntimeError("persisted fresh retry plan unexpectedly has a session")
+        if not isinstance(feedback, list):
+            raise RuntimeError("persisted retry feedback must be an array")
+        try:
+            parsed_feedback = _feedback_from_payload(feedback, "retry.feedback")
+            packet = build_task_packet(**payload["task_packet"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("persisted retry plan is invalid") from exc
+        return cls(
+            task_packet=packet, resume_session=resume,
+            session_id=session_id, feedback=parsed_feedback,
+        )
 
 
 @dataclass(frozen=True)
@@ -362,18 +395,19 @@ def decisions_from_payload(payload: Any) -> tuple[ReviewDecision, ...]:
 class GraphRuntime:
     """QiQi outer-loop runtime over scheduler, persistence, and repo-task execution.
 
-    Authored TaskGraph semantics remain process-owned and are not copied into SQLite.
-    Phase 6 established sequential execution, Phase 7 per-node semantic review, and Phase 8
-    selective START/RESUME retry. Phase 9 executes independent runnable nodes concurrently
-    in one wave while preserving per-node attempts and review. Phase 10 reconciles explicit
-    QiQi-authored graph revisions without deleting execution history. Durable authored-graph
-    restart recovery remains a later phase.
+    Authored graph, semantic states, execution attempts and retry plans are persisted.
+    Completed/reviewable work survives server restart. In-flight waves remain
+    fail-closed until external worker termination is confirmed.
     """
 
     def __init__(self, store: GraphRuntimeStore):
         self.store = store
-        self._graphs: dict[str, TaskGraph] = {}
-        self._retry_plans: dict[tuple[str, str], RetryPlan] = {}
+
+    def _pending_retry_plans(self, graph_run_id: str) -> dict[str, RetryPlan]:
+        return {
+            node_id: RetryPlan.from_dict(payload)
+            for node_id, payload in self.store.get_retry_plans(graph_run_id).items()
+        }
 
     def start_graph(
         self,
@@ -384,25 +418,19 @@ class GraphRuntime:
         validate_task_graph(graph, repository_names=repository_names)
         snapshot = initial_graph_snapshot(graph)
         graph_run_id = self.store.create_run(snapshot)
-        self._graphs[graph_run_id] = graph
         return self.get_graph(graph_run_id)
 
     def _graph_for_run(self, graph_run_id: str) -> TaskGraph:
         if not isinstance(graph_run_id, str) or not graph_run_id.strip():
             raise ValueError("graph_run_id must be a non-empty string")
         graph_run_id = graph_run_id.strip()
-        graph = self._graphs.get(graph_run_id)
-        if graph is not None:
-            return graph
-        if self.store.get_run(graph_run_id) is None:
-            raise RuntimeError(f"unknown graph_run_id: {graph_run_id!r}")
-        raise RuntimeError(
-            "graph definition is unavailable for this persisted graph_run_id; "
-            "durable authored-graph restart recovery is not implemented"
-        )
+        return self.store.load_graph(graph_run_id)
 
     def _snapshot(self, graph_run_id: str) -> tuple[TaskGraph, GraphSnapshot, int]:
         graph = self._graph_for_run(graph_run_id)
+        # Restart may happen after all attempts settled but before close_wave().
+        # Close only proven-quiescent waves; running attempts remain fail-closed.
+        self.store.recover_quiescent_wave(graph_run_id)
         snapshot, revision = self.store.load_snapshot_with_revision(graph_run_id, graph)
         return graph, snapshot, revision
 
@@ -413,6 +441,7 @@ class GraphRuntime:
             raise RuntimeError(f"unknown graph_run_id: {graph_run_id!r}")
 
         graph_nodes = {node.node_id: node for node in graph.nodes}
+        retry_plans = self._pending_retry_plans(graph_run_id)
         execution_nodes: list[dict[str, Any]] = []
         review_required: list[dict[str, Any]] = []
         for state in snapshot.node_states:
@@ -442,7 +471,7 @@ class GraphRuntime:
                     raw_candidate_count, bool
                 ):
                     candidate_count = raw_candidate_count
-            retry_plan = self._retry_plans.get((graph_run_id, state.node_id))
+            retry_plan = retry_plans.get(state.node_id)
             execution_nodes.append(
                 {
                     "node_id": state.node_id,
@@ -726,16 +755,6 @@ class GraphRuntime:
             expected_revision=expected_revision,
             reset_node_ids=reset_ids,
         )
-        self._graphs[graph_run_id] = graph
-
-        next_ids = {node.node_id for node in graph.nodes}
-        for key in list(self._retry_plans):
-            run_id, node_id = key
-            if run_id == graph_run_id and (
-                node_id not in next_ids or node_id in reset_ids
-            ):
-                self._retry_plans.pop(key, None)
-
         current = self.get_graph(graph_run_id)
         previous_order = [node.node_id for node in previous_graph.nodes]
         next_order = [node.node_id for node in graph.nodes]
@@ -777,22 +796,19 @@ class GraphRuntime:
         wave resources, preventing two nodes from racing the same native conversation.
         """
 
+        retry_plans = self._pending_retry_plans(graph_run_id)
         retry_nodes = [
-            node
-            for node in candidates
-            if (graph_run_id, node.node_id) in self._retry_plans
+            node for node in candidates if node.node_id in retry_plans
         ]
         fresh_nodes = [
-            node
-            for node in candidates
-            if (graph_run_id, node.node_id) not in self._retry_plans
+            node for node in candidates if node.node_id not in retry_plans
         ]
         selected: list[tuple[GraphNode, RetryPlan | None]] = []
         repositories: set[str] = set()
         sessions: set[str] = set()
 
         for node in [*retry_nodes, *fresh_nodes]:
-            retry_plan = self._retry_plans.get((graph_run_id, node.node_id))
+            retry_plan = retry_plans.get(node.node_id)
             if node.repository in repositories:
                 continue
             if (
@@ -827,6 +843,10 @@ class GraphRuntime:
     ) -> dict[str, Any]:
         retry_plan = wave_attempt.retry_plan
         try:
+            # Persist this dispatch boundary before calling the executor.
+            # Prepared attempts retain their retry plans if the coordinator
+            # crashes before scheduling or starting a coroutine.
+            self.store.mark_attempt_dispatched(wave_attempt.attempt_id)
             if retry_plan is not None and retry_plan.resume_session:
                 assert retry_plan.session_id is not None
                 assert resume_executor is not None
@@ -925,7 +945,7 @@ class GraphRuntime:
         wave is closed only after every claimed attempt reaches a terminal runtime state.
         """
 
-        _, snapshot, _ = self._snapshot(graph_run_id)
+        _, snapshot, revision = self._snapshot(graph_run_id)
         graph_state = derive_graph_state(snapshot)
         if graph_state != "ready":
             raise RuntimeError(
@@ -955,39 +975,33 @@ class GraphRuntime:
                 )
 
         wave_id = new_wave_id()
-        claimed: list[WaveAttempt] = []
-        try:
-            for execution_node, retry_plan in selected:
-                attempt_id = self.store.start_attempt(
-                    graph_run_id,
-                    execution_node.node_id,
-                    wave_id,
-                    resume_session=(
+        # One SQLite transaction validates the authored revision and claims the
+        # entire wave. If a later node cannot be claimed, the whole wave rolls
+        # back: no artificial failed attempts, lost feedback, or dispatched Peer.
+        attempt_ids = self.store.start_wave(
+            graph_run_id,
+            wave_id,
+            expected_revision=revision,
+            attempts=tuple(
+                {
+                    "node_id": node.node_id,
+                    "resume_session": (
                         retry_plan.resume_session if retry_plan is not None else False
                     ),
-                    session_id=(retry_plan.session_id if retry_plan is not None else None),
-                )
-                claimed.append(
-                    WaveAttempt(
-                        node=execution_node,
-                        retry_plan=retry_plan,
-                        attempt_id=attempt_id,
-                    )
-                )
-        except Exception:
-            if claimed:
-                self._terminalize_running_wave_attempts(
-                    claimed,
-                    failure_type="wave_start_failed",
-                )
-                self.store.close_wave(graph_run_id, wave_id)
-            raise
+                    "session_id": retry_plan.session_id if retry_plan else None,
+                    "retry_plan": retry_plan.as_dict() if retry_plan else None,
+                }
+                for node, retry_plan in selected
+            ),
+        )
+        claimed = [
+            WaveAttempt(node=node, retry_plan=plan, attempt_id=attempt_id)
+            for (node, plan), attempt_id in zip(selected, attempt_ids, strict=True)
+        ]
 
-        # Retry metadata is consumed only after the whole wave has been claimed. This keeps
-        # retry intent intact if wave setup fails partway through before execution starts.
-        for item in claimed:
-            if item.retry_plan is not None:
-                self._retry_plans.pop((graph_run_id, item.node.node_id), None)
+        # Until each coroutine enters the dispatch boundary, retry intent
+        # remains durable. A crash with prepared attempts is fail-closed:
+        # never automatically assume an external worker is absent.
 
         tasks = [
             asyncio.create_task(
@@ -1142,13 +1156,13 @@ class GraphRuntime:
             updated,
             expected_revision=expected_revision,
             dispositions=lead_dispositions,
+            decision_node_ids=tuple(decision.node_id for decision in decisions),
+            retry_plans={
+                node_id: plan.as_dict()
+                for (run_id, node_id), plan in retry_plans.items()
+                if run_id == graph_run_id
+            },
         )
-        # The current authored graph remains unchanged. Retry plans are process-owned
-        # execution metadata, matching the current process-owned graph-definition boundary.
-        self._graphs[graph_run_id] = graph
-        for decision in decisions:
-            self._retry_plans.pop((graph_run_id, decision.node_id), None)
-        self._retry_plans.update(retry_plans)
 
         updated_states = {state.node_id: state for state in updated.node_states}
         current = self.get_graph(graph_run_id)
