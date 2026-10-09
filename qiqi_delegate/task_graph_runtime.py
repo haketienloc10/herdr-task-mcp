@@ -427,6 +427,9 @@ class GraphRuntime:
 
     def _snapshot(self, graph_run_id: str) -> tuple[TaskGraph, GraphSnapshot, int]:
         graph = self._graph_for_run(graph_run_id)
+        # Restart may happen after all attempts settled but before close_wave().
+        # Close only proven-quiescent waves; running attempts remain fail-closed.
+        self.store.recover_quiescent_wave(graph_run_id)
         snapshot, revision = self.store.load_snapshot_with_revision(graph_run_id, graph)
         return graph, snapshot, revision
 
