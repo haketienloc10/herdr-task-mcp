@@ -173,7 +173,13 @@ repositories: []
 
 async def install_workspace(root: Path, python: Path | None = None) -> dict:
     root = root.resolve(strict=True)
-    python = (python or Path(sys.executable)).resolve(strict=True)
+    # sys.executable commonly points at <venv>/bin/python, itself a symlink
+    # to a base interpreter (notably for uv-managed CPython). Resolving that
+    # final symlink discards the venv's site-packages and breaks MCP startup.
+    # Normalize to an absolute path WITHOUT dereferencing the final symlink.
+    python = Path(os.path.abspath(os.fspath(python or sys.executable)))
+    if not python.is_file():
+        raise ValueError(f"Python interpreter does not exist: {python}")
     if not root.is_dir():
         raise ValueError("workspace root must be a directory")
     agents = root / "AGENTS.md"
