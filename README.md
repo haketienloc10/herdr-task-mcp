@@ -40,6 +40,21 @@ node .tools/herdr-task-mcp/dist/src/cli.js workspace init
 - `.codex/config.toml` — Codex đọc khi project được đánh dấu **trusted**.
 - `.mcp.json` — Claude Code đọc tại workspace và yêu cầu phê duyệt MCP theo thiết lập bảo mật của Claude.
 
+**Codex direct MCP tools:** `workspace init` còn thêm setting sau vào `.codex/config.toml` của workspace:
+
+```toml
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__herdr_task"]
+
+[mcp_servers.herdr-task]
+command = "node"
+# args và env được tự tạo từ đường dẫn workspace
+```
+
+`mcp__herdr_task` là namespace Codex tạo từ server `herdr-task` (đổi dấu `-` thành `_`).
+Setting này giữ các tool trong namespace đó ở dạng direct, không đưa qua Code Mode. `workspace init` không tự bật `features.code_mode.enabled`.
+Nếu đã có `[features.code_mode]`, installer bổ sung namespace vào array hiện có và giữ các setting khác. Chạy lại không tạo trùng table/key.
+
 Nội dung MCP dùng `node` chạy file CLI được build **bên trong workspace**, không thay đổi `~/.codex/config.toml`, `~/.claude.json` hoặc đăng ký MCP global. Nếu hai file đã có cấu hình khác, installer giữ nguyên cấu hình khác. Nếu có cấu hình `herdr-task` không do installer quản lý, installer báo lỗi thay vì ghi đè.
 
 Trong một terminal Herdr tại thư mục gốc workspace, chạy daemon **riêng cho workspace đó**:
