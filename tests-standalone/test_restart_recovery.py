@@ -451,6 +451,107 @@ def test_concurrent_legacy_schema_migration_preserves_existing_attempts(tmp_path
         ).fetchone()[0] is None
 
 
+def test_block_and_replan_defer_metadata_survive_restart_without_peer_turn(tmp_path):
+    """Uncaptured startup failure still has an auditable Lead owner and checkpoint."""
+    path = tmp_path / "graph.sqlite3"
+    for action in ("block", "replan"):
+        gr = make_runtime(path)
+        started = gr.start_graph(
+            task_graph_from_payload({"nodes": [{
+                "node_id": "B1", "repository": "backend", "route": "codex-balanced",
+                "task_packet": {
+                    "objective": "Inspect", "scope": ["src"],
+                    "acceptance_criteria": ["Explain startup"],
+                },
+            }]}), repository_names={"backend"},
+        )
+        run = started["graph_run_id"]
+
+        async def fail(_node):
+            raise RuntimeError("agent_not_ready before any captured turn")
+
+        with pytest.raises(RuntimeError, match="agent_not_ready"):
+            asyncio.run(gr.delegate_next(run, executor=fail))
+        review_state = gr.get_graph(run)
+        node_state = review_state["nodes"][0]
+        assert node_state["turn_id"] is None
+        attempt = node_state["current_attempt_id"]
+        choice = decisions_from_payload([{
+            "node_id": "B1", "action": action,
+            "owner": "platform-oncall",
+            "return_checkpoint": "after Herdr worker termination",
+        }])
+        decided = gr.submit_decisions(
+            run, choice, expected_revision=review_state["revision"],
+        )
+        assert decided["decision_outcomes"][0]["defer"]["owner"] == "platform-oncall"
+        restored = make_runtime(path)
+        persisted = restored.get_graph(run)["nodes"][0]["last_lead_decision"]
+        assert persisted["action"] == action
+        assert persisted["owner"] == "platform-oncall"
+        assert persisted["return_checkpoint"] == "after Herdr worker termination"
+        assert persisted["attempt_id"] == attempt
+        assert persisted["turn_id"] is None
+        with sqlite3.connect(path) as db:
+            row = db.execute(
+                "SELECT turn_id, owner, return_checkpoint FROM lead_decisions "
+                "WHERE graph_run_id = ? ORDER BY id DESC LIMIT 1", (run,),
+            ).fetchone()
+            assert row == (None, "platform-oncall", "after Herdr worker termination")
+
+
+def test_legacy_decision_audit_migrates_with_preserved_rows(tmp_path):
+    """Upgrading the old NOT NULL turn schema must not lose decision history."""
+    path = tmp_path / "graph.sqlite3"
+    gr = make_runtime(path)
+    started = gr.start_graph(
+        task_graph_from_payload({"nodes": [{
+            "node_id": "B1", "repository": "backend", "route": "codex-balanced",
+            "task_packet": {"objective": "Inspect", "scope": ["src"],
+                            "acceptance_criteria": ["Evidence"]},
+        }]}), repository_names={"backend"},
+    )
+    run = started["graph_run_id"]
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE lead_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            graph_run_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            node_id TEXT,
+            attempt_id TEXT,
+            created_at_ns INTEGER NOT NULL
+        )""")
+        db.execute(
+            "INSERT INTO lead_decisions("
+            "graph_run_id,turn_id,action,reason,node_id,attempt_id,created_at_ns"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (run, "turn:old", "retry", "historic", "B1", "old-attempt", 10),
+        )
+    async def fail(_node):
+        raise RuntimeError("agent_not_ready")
+
+    with pytest.raises(RuntimeError, match="agent_not_ready"):
+        asyncio.run(gr.delegate_next(run, executor=fail))
+    current = gr.get_graph(run)
+    gr.submit_decisions(
+        run, decisions_from_payload([{
+            "node_id": "B1", "action": "block", "owner": "oncall",
+            "return_checkpoint": "manual release verified",
+        }]), expected_revision=current["revision"],
+    )
+    with sqlite3.connect(path) as db:
+        rows = db.execute(
+            "SELECT turn_id, action, owner, return_checkpoint "
+            "FROM lead_decisions WHERE graph_run_id = ? ORDER BY id", (run,),
+        ).fetchall()
+        assert rows == [
+            ("turn:old", "retry", None, None),
+            (None, "block", "oncall", "manual release verified"),
+        ]
+
+
 def test_corrupt_or_legacy_graph_definition_fails_closed(tmp_path):
     path = tmp_path / "graph.sqlite3"
     runtime = make_runtime(path)
