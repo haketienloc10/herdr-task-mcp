@@ -123,6 +123,7 @@ class DelegateRuntime:
         if not isinstance(entries, list):
             raise ValueError("repos.yaml repositories must be a list")
         result = {}
+        canonical_roots: dict[Path, str] = {}
         for entry in entries:
             if not isinstance(entry, dict) or set(entry) != {"name", "path"}:
                 raise ValueError("repos.yaml entries need exact name and path")
@@ -154,6 +155,13 @@ class DelegateRuntime:
                 raise ValueError(f"not a Git repository: {target}") from exc
             if Path(proc.stdout.strip()).resolve() != target:
                 raise ValueError(f"repository path is not exact Git root: {target}")
+            if target in canonical_roots:
+                raise ValueError(
+                    f"repos.yaml repository {name!r} points to the same Git root "
+                    f"as {canonical_roots[target]!r}: {target}; "
+                    "repository aliases would bypass write-claim exclusivity"
+                )
+            canonical_roots[target] = name
             result[name] = target
         return result
 
@@ -243,7 +251,7 @@ class DelegateRuntime:
                 server.terminate()
                 try:
                     await asyncio.wait_for(server.wait(), 3)
-                except TimeoutError:
+                except (TimeoutError, asyncio.TimeoutError):
                     server.kill()
                     await server.wait()
             raise RuntimeError(
@@ -260,7 +268,7 @@ class DelegateRuntime:
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout)
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             proc.kill()
             await proc.communicate()
             raise RuntimeError(f"Herdr command timeout: {args[:2]}")
