@@ -238,27 +238,43 @@ class DelegateRuntime:
                 stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=(os.name == "posix"),
             )
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                status, _, _ = await self._run("status", "server",
-                                               check=False, timeout=5)
-                if status == 0:
-                    return
-                if server.returncode is not None:
-                    break
-                await asyncio.sleep(0.1)
-            if server.returncode is None:
-                server.terminate()
-                try:
-                    await asyncio.wait_for(server.wait(), 3)
-                except (TimeoutError, asyncio.TimeoutError):
-                    server.kill()
-                    await server.wait()
-            raise RuntimeError(
-                "Herdr headless server did not become ready. "
-                "Check 'herdr status server', Herdr logs, and HERDR_SOCKET_PATH; "
-                "do not run 'herdr session attach' from a nested Herdr pane."
-            )
+            ready = False
+            try:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    status, _, _ = await self._run(
+                        "status", "server", check=False, timeout=5
+                    )
+                    if status == 0:
+                        ready = True
+                        return
+                    if server.returncode is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                raise RuntimeError(
+                    "Herdr headless server did not become ready. "
+                    "Check 'herdr status server', Herdr logs, and HERDR_SOCKET_PATH; "
+                    "do not run 'herdr session attach' from a nested Herdr pane."
+                )
+            finally:
+                # A failing/raising readiness probe must not strand the
+                # detached process (start_new_session=True on POSIX).
+                # Only confirmed readiness transfers ownership to Herdr.
+                if not ready:
+                    if server.returncode is None:
+                        try:
+                            server.terminate()
+                        except ProcessLookupError:
+                            pass
+                    try:
+                        await asyncio.wait_for(server.wait(), 3)
+                    except (TimeoutError, asyncio.TimeoutError):
+                        if server.returncode is None:
+                            try:
+                                server.kill()
+                            except ProcessLookupError:
+                                pass
+                        await server.wait()
 
     async def _run(self, *args: str, timeout=60, check=True):
         argv = self._herdr_argv(*args)
