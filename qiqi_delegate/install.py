@@ -72,7 +72,41 @@ def _strip_own_section(text: str) -> str:
         end += 1
     return text[:i] + text[end:]
 
-def codex_config(existing: str, python: Path, root: Path) -> str:
+def _validate_herdr_session(name: str | None) -> str | None:
+    if name is None:
+        return None
+    if (not isinstance(name, str) or len(name) > 64
+            or name in ("", ".", "..")
+            or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None):
+        raise ValueError(
+            "Herdr session must be 1–64 ASCII letters, digits, '.', '_' or '-' "
+            "(excluding '.' and '..')"
+        )
+    return name
+
+
+def _existing_herdr_session(codex: str, claude: str) -> str | None:
+    """Preserve a project-scoped session choice when rerunning the installer."""
+    old_codex = None
+    if MCP_START in codex:
+        _strip_own_section(codex)
+        managed = codex.split(MCP_START, 1)[1].split(MCP_END, 1)[0]
+        cfg = tomllib.loads(managed)
+        old_codex = (cfg.get("mcp_servers", {})
+                     .get(SERVER, {}).get("env", {}).get("QIQI_HERDR_SESSION"))
+    old_claude = None
+    if claude.strip():
+        cfg = json.loads(claude)
+        if isinstance(cfg, dict):
+            old_claude = (cfg.get("mcpServers", {})
+                          .get(SERVER, {}).get("env", {}).get("QIQI_HERDR_SESSION"))
+    if old_codex and old_claude and old_codex != old_claude:
+        raise ValueError("Conflicting Herdr sessions in project Codex/Claude MCP config")
+    return _validate_herdr_session(old_codex or old_claude)
+
+
+def codex_config(existing: str, python: Path, root: Path,
+                 herdr_session: str | None = None) -> str:
     original = _strip_own_section(existing)
     try:
         parsed = tomllib.loads(original)
@@ -124,11 +158,14 @@ def codex_config(existing: str, python: Path, root: Path) -> str:
         'args = ["-m", "qiqi_delegate.server"]',
         "[mcp_servers.qiqi_delegate.env]",
         'QIQI_WORKSPACE_ROOT = ' + json.dumps(str(root)),
+        *(['QIQI_HERDR_SESSION = ' + json.dumps(herdr_session)]
+          if herdr_session else []),
         MCP_END,
     ])
     return original.rstrip("\r\n") + ("\n\n" if original.strip() else "") + block + "\n"
 
-def claude_config(existing: str, python: Path, root: Path) -> str:
+def claude_config(existing: str, python: Path, root: Path,
+                  herdr_session: str | None = None) -> str:
     try:
         config = json.loads(existing) if existing.strip() else {}
     except json.JSONDecodeError as exc:
@@ -145,7 +182,10 @@ def claude_config(existing: str, python: Path, root: Path) -> str:
     servers[SERVER] = {
         "command": str(python),
         "args": ["-m", "qiqi_delegate.server"],
-        "env": {"QIQI_WORKSPACE_ROOT": str(root)},
+        "env": {
+            "QIQI_WORKSPACE_ROOT": str(root),
+            **({"QIQI_HERDR_SESSION": herdr_session} if herdr_session else {}),
+        },
     }
     config["mcpServers"] = servers
     return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
@@ -175,7 +215,8 @@ repositories: []
 #     path: ../backend
 """
 
-async def install_workspace(root: Path, python: Path | None = None) -> dict:
+async def install_workspace(root: Path, python: Path | None = None,
+                            herdr_session: str | None = None) -> dict:
     root = root.resolve(strict=True)
     # sys.executable commonly points at <venv>/bin/python, itself a symlink
     # to a base interpreter (notably for uv-managed CPython). Resolving that
@@ -197,9 +238,14 @@ async def install_workspace(root: Path, python: Path | None = None) -> dict:
     c_old = codex.read_text(encoding="utf-8") if codex.exists() else ""
     m_old = claude.read_text(encoding="utf-8") if claude.exists() else ""
     # Complete all validations before modifying any file.
+    herdr_session = (
+        _validate_herdr_session(herdr_session)
+        if herdr_session is not None
+        else _existing_herdr_session(c_old, m_old)
+    )
     a_new = managed_rules(a_old)
-    c_new = codex_config(c_old, python, root)
-    m_new = claude_config(m_old, python, root)
+    c_new = codex_config(c_old, python, root, herdr_session=herdr_session)
+    m_new = claude_config(m_old, python, root, herdr_session=herdr_session)
     (root / ".codex").mkdir(exist_ok=True)
     state = root / ".herdr-task-mcp"
     state.mkdir(mode=0o700, exist_ok=True)
@@ -212,15 +258,23 @@ async def install_workspace(root: Path, python: Path | None = None) -> dict:
         if not path.exists():
             path.write_text(value, encoding="utf-8")
     return {"workspace": str(root), "mcp": SERVER,
-            "agents_marker": START, "python": str(python)}
+            "agents_marker": START, "python": str(python),
+            "herdr_session": herdr_session}
 
 def main():
     import argparse
     import asyncio
     parser = argparse.ArgumentParser(description="Install QiQi MCP only in one workspace")
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--herdr-session",
+        help="Target an existing named Herdr session in project MCP configs",
+    )
     args = parser.parse_args()
-    print(json.dumps(asyncio.run(install_workspace(args.workspace)), ensure_ascii=False, indent=2))
+    print(json.dumps(
+        asyncio.run(install_workspace(args.workspace, herdr_session=args.herdr_session)),
+        ensure_ascii=False, indent=2
+    ))
 
 if __name__ == "__main__":
     main()
