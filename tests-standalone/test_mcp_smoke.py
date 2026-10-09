@@ -52,6 +52,42 @@ def test_mcp_initialize_stdio_handshake(tmp_path):
     assert "result" in replies[0], f"MCP initialize error: {replies[0]!r}"
     assert replies[0]["result"].get("serverInfo", {}).get("name"), replies[0]
 
+def test_herdr_command_asyncio_timeout_kills_and_reaps_child(tmp_path, monkeypatch):
+    """Python 3.10 asyncio.TimeoutError must reach subprocess cleanup."""
+    rt = DelegateRuntime(tmp_path)
+    class TimedOutChild:
+        returncode = None
+
+        def __init__(self):
+            self.killed = False
+            self.reaped = False
+
+        def kill(self):
+            self.killed = True
+
+        async def communicate(self):
+            if self.killed:
+                self.reaped = True
+            return b"", b""
+
+    child = TimedOutChild()
+
+    async def create_child(*argv, **kwargs):
+        return child
+
+    async def raise_timeout(task, timeout):
+        # Avoid leaving an un-awaited coroutine in this intentionally mocked wait.
+        task.close()
+        raise asyncio.TimeoutError("synthetic Python 3.10-style wait_for timeout")
+
+    monkeypatch.setattr("qiqi_delegate.runtime.asyncio.create_subprocess_exec", create_child)
+    monkeypatch.setattr("qiqi_delegate.runtime.asyncio.wait_for", raise_timeout)
+
+    with pytest.raises(RuntimeError, match="Herdr command timeout"):
+        asyncio.run(rt._run("status", "server", timeout=0.001))
+    assert child.killed and child.reaped
+
+
 def test_direct_native_capture_creates_and_releases_repo_claim(tmp_path, monkeypatch):
     repo = tmp_path / "backend"
     repo.mkdir()
