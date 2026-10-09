@@ -128,6 +128,42 @@ def test_installer_preserves_uv_venv_python_symlink_and_repairs_prior_config(tmp
     assert (workspace / "AGENTS.md").read_bytes() == before
 
 
+def test_installer_sets_named_herdr_session_in_project_configs(tmp_path: Path):
+    original = b"# Existing workspace rules\\r\\nOnly modify owned marker.  \\r\\n"
+    # Use CRLF in the user-controlled rules to verify exact preservation.
+    original = original.replace(b"\\\\r", b"\\r").replace(b"\\\\n", b"\\n")
+    (tmp_path / "AGENTS.md").write_bytes(original)
+
+    info = asyncio.run(install_workspace(tmp_path, herdr_session="qiqi-delegate"))
+    assert info["herdr_session"] == "qiqi-delegate"
+
+    codex = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text())
+    codex_server = codex["mcp_servers"]["qiqi_delegate"]
+    assert codex_server["env"]["QIQI_HERDR_SESSION"] == "qiqi-delegate"
+    assert codex_server["env"]["QIQI_WORKSPACE_ROOT"] == str(tmp_path)
+    claude = json.loads((tmp_path / ".mcp.json").read_text())
+    assert claude["mcpServers"]["qiqi_delegate"]["env"]["QIQI_HERDR_SESSION"] == "qiqi-delegate"
+
+    before = (tmp_path / "AGENTS.md").read_bytes()
+    assert before.startswith(original)
+    # Reinstall without an explicit flag: project-specific selection is durable.
+    retained = asyncio.run(install_workspace(tmp_path))
+    assert retained["herdr_session"] == "qiqi-delegate"
+    assert (tmp_path / "AGENTS.md").read_bytes() == before
+    assert "qiqi-delegate" in (tmp_path / ".codex" / "config.toml").read_text()
+
+
+@pytest.mark.parametrize("invalid", ["", ".", "..", "../escape", "bad name", "a" * 65])
+def test_installer_rejects_invalid_session_before_any_write(tmp_path: Path, invalid: str):
+    original = b"# Existing workspace policy\\n"
+    (tmp_path / "AGENTS.md").write_bytes(original)
+    with pytest.raises(ValueError, match="Herdr session"):
+        asyncio.run(install_workspace(tmp_path, herdr_session=invalid))
+    assert (tmp_path / "AGENTS.md").read_bytes() == original
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+
+
 def test_invalid_rules_abort_before_any_other_changes(tmp_path: Path):
     (tmp_path / "AGENTS.md").write_text(START + "\n")
     with pytest.raises(ValueError, match="marker"):
