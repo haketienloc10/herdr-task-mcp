@@ -134,12 +134,35 @@ Sau khi đối chiếu đúng `claim_id` trong lỗi và xác nhận không còn
 
 Hai ví dụ trên chạy **tại workspace điều phối** và sử dụng đúng Python của virtualenv cài MCP; **không cần activate virtualenv**. Nếu chạy từ thư mục khác, dùng đường dẫn tuyệt đối tới `.tools/herdr-task-mcp/.venv/bin/python` và `--workspace` trỏ đến workspace điều phối. Thông báo lỗi `agent_not_ready` cũng in sẵn lệnh đầy đủ với Python interpreter đang chạy MCP, workspace, repository và claim ID thực tế (không tự động chạy). CLI không nằm trong MCP; chỉ xóa đúng cặp `repository`/`claim_id`, từ chối claim không khớp và ghi audit vào SQLite khi giải phóng thành công. Cờ confirmation chỉ là xác nhận của người vận hành, **không tự chứng minh worker đã dừng**. Không xóa SQLite, không dùng claim ID phỏng đoán và không sửa repository đích để khắc phục lỗi hạ tầng. Sau khi xử lý an toàn mới điều phối task lại.
 
+### Phục hồi TaskGraph wave bị kẹt sau restart
+
+Nếu MCP đã thoát khi một attempt còn `running`, TaskGraph cố ý **không tự replay hoặc tự đóng wave**. Sau khi operator dùng Herdr kiểm tra và **xác nhận worker tương ứng đã kết thúc**, lấy `graph_run_id` và `attempt_id` từ `get_graph`, rồi đọc đúng `wave_id`/`node_id` qua CLI:
+
+```bash
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.maintenance \\
+  show-attempt --workspace "$PWD" --repository backend \\
+  --graph-run-id '<exact-graph-run-id>' --attempt-id '<exact-attempt-id>'
+```
+
+Nếu repository còn write claim, thực hiện **`release-claim` trước** sau khi xác nhận Herdr worker thực sự đã dừng. Sau đó terminalize đúng attempt:
+
+```bash
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.maintenance \\
+  recover-attempt --workspace "$PWD" --repository backend \\
+  --graph-run-id '<exact-graph-run-id>' --wave-id '<exact-wave-id>' \\
+  --node-id '<exact-node-id>' --attempt-id '<exact-attempt-id>' \\
+  --worker-termination-confirmed
+```
+
+Lệnh này chỉ có trên **CLI operator, không phải MCP tool**. Nó kiểm tra graph/wave/node/attempt/repository chính xác, yêu cầu operator xác nhận termination, từ chối nếu write claim còn tồn tại, ghi audit và đánh dấu attempt `failed` trong cùng transaction. Nếu wave còn sibling `running`, operator phải xác minh và xử lý từng attempt riêng; wave chỉ đóng khi không còn attempt chạy. Quyết định retry/replan/block tiếp theo thuộc Lead sau khi review lỗi; không có tự động replay. Cờ confirmation là lời xác nhận của operator, **không tự chứng minh worker đã kết thúc**.
+
 Nếu `agent_not_ready` xảy ra, `get_node_reviews` hiển thị `failure_detail` thay vì chỉ có `executor_exception`, giúp Lead báo chính xác blocker cho người dùng. Việc Herdr yêu cầu xác nhận trust/auth không thể được CI mock loại bỏ hoàn toàn: cần xác minh E2E trên môi trường Herdr thực.
 
 ## Decision contract và xử lý lỗi
 
 - `start_graph` chỉ tạo TaskGraph. `delegate_next` mới chạy một wave của Peer.
 - `get_node_reviews` cung cấp runtime state và evidence. `failed` vì hạ tầng không được xem là kết quả do Peer tạo; không ACCEPT.
+- Mỗi Lead decision, kể cả BLOCK/REPLAN khi chưa có captured turn, được audit với `turn_id` nullable, `owner` và `return_checkpoint`. `get_graph.nodes[].last_lead_decision` lưu metadata này sau restart; `get_node_reviews` cũng trả metadata cho attempt reviewable.
 - `submit_decisions(action="block")` yêu cầu `owner` và `return_checkpoint`. **Không** truyền `feedback` cho `block`, vì `feedback` chỉ dùng cho `retry`.
 - `submit_decisions(action="retry")` cho phép `feedback` và `resume_session` để hướng dẫn lần chạy tiếp theo.
 - Nếu bị `blocked`, Lead chỉ định người xử lý và checkpoint. Khi hạ tầng phục hồi, Lead cần replan/reconcile đúng node trước khi dispatch lại. Không tự đọc source hoặc chạy test trong repository đích thay Peer.
