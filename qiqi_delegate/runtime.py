@@ -450,15 +450,15 @@ class DelegateRuntime:
                       if self.herdr_session else self.herdr_bin)
             raise AgentStartupBlocked(
                 exc.agent_name, exc.pane_id,
-                f"{exc}; workspace_id={workspace_id}; "
-                f"write_claim_id={claim_id}; repository={repository}; "
+                f"workspace_id={workspace_id}; write_claim_id={claim_id}; "
+                f"repository={repository}; "
                 f"inspect: {target} agent explain {exc.agent_name} --json; "
                 f"inspect startup UI: {target} agent read {exc.agent_name} "
                 f"--source visible --lines 30; "
                 f"recovery: close Herdr workspace {workspace_id} after inspection, "
                 "confirm agent termination, then call release_write_claim "
                 "with this exact repository and claim ID. Do not send the "
-                "delegated task prompt to the blocked agent manually."
+                f"delegated task prompt to the blocked agent manually. {exc}"
             ) from exc
         finally:
             error = None
