@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -291,11 +292,95 @@ def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, mon
     assert "workspace_id=w-blocked" in error
     assert "write_claim_id=turn:" in error
     assert "agent explain" in error and "agent read" in error
-    assert "release_write_claim" in error
+    # Recovery must use the MCP process interpreter, not an unqualified CLI
+    # which is absent from PATH under the documented non-activated venv setup.
+    assert (
+        f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+        "release-claim" in error
+    )
+    assert f"--workspace {shlex.quote(str(tmp_path.resolve()))}" in error
+    assert "--worker-termination-confirmed" in error
+    assert "qiqi-delegate-admin" not in error
     assert not any(x[:2] == ("workspace", "close") for x in calls)
     with rt._connect() as db:
         claim = db.execute("SELECT claim_id FROM write_claims WHERE repository='backend'").fetchone()
     assert claim is not None and claim[0] in error
+    assert f"--claim-id {shlex.quote(claim[0])}" in error
+    assert exc.value.recovery_command in exc.value.actionable_detail()
+
+
+def test_long_recovery_command_survives_public_mcp_error(tmp_path, monkeypatch):
+    """Clip verbose diagnostics, not exact recovery arguments, on the direct tool."""
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(tmp_path))
+    from mcp.server.mcpserver.exceptions import ToolError
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.server import _public_tool_errors
+
+    long_workspace = "/tmp/" + "/".join(["it's-a-long-workspace-" * 15] * 6)
+    recovery = (
+        f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+        f"release-claim --workspace {shlex.quote(long_workspace)} "
+        "--repository backend --claim-id turn:actual "
+        "--worker-termination-confirmed"
+    )
+    blocker = AgentStartupBlocked(
+        "qiqi-agent", "pane-id", "startup evidence " * 200,
+        recovery_command=recovery,
+        public_context="agent_not_ready; inspect: " + "verbose data " * 200,
+    )
+
+    @_public_tool_errors
+    async def blocked():
+        raise blocker
+
+    with pytest.raises(ToolError) as exc:
+        asyncio.run(blocked())
+    public = str(exc.value)
+    assert public.startswith("code=agent_startup_blocked;")
+    assert f"recovery_command={recovery}" in public
+    assert public.endswith("operator-side claim cleanup before retrying.")
+    assert "--repository backend --claim-id turn:actual " in public
+    assert "--worker-termination-confirmed" in public
+    assert len(public) > 1200
+    assert "verbose data " * 100 not in public
+
+
+def test_graph_review_preserves_long_startup_recovery(tmp_path):
+    """Graph results must not tail-truncate a retained claim recovery command."""
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
+    from qiqi_delegate.task_graph_store import GraphRuntimeStore
+
+    command = (
+        f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+        "release-claim --workspace /tmp/" + "long-workspace-" * 175
+        + " --repository backend --claim-id turn:exact --worker-termination-confirmed"
+    )
+    gr = GraphRuntime(GraphRuntimeStore(tmp_path / "graph.sqlite3"))
+    started = gr.start_graph(task_graph_from_payload({"nodes": [{
+        "node_id": "backend", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {"objective": "Inspect", "scope": ["src"],
+                        "acceptance_criteria": ["Describe API"]},
+    }]}), repository_names=["backend"])
+
+    async def fail(_node):
+        raise AgentStartupBlocked(
+            "peer", "pane", "evidence " * 500,
+            recovery_command=command,
+            public_context="agent_not_ready; " + "detailed evidence " * 400,
+        )
+
+    with pytest.raises(AgentStartupBlocked):
+        asyncio.run(gr.delegate_next(started["graph_run_id"], executor=fail))
+    current = gr.get_graph(started["graph_run_id"])
+    loc = current["review_required"][0]
+    reviews = gr.get_node_reviews(
+        started["graph_run_id"], [(loc["node_id"], loc["attempt_id"])],
+        expected_revision=current["revision"],
+    )
+    detail = reviews["reviews"][0]["result"]["failure_detail"]
+    assert f"recovery_command={command}" in detail
+    assert detail.endswith("--worker-termination-confirmed")
 
 
 def test_graph_review_keeps_startup_failure_details(tmp_path):
@@ -317,11 +402,95 @@ def test_graph_review_keeps_startup_failure_details(tmp_path):
     after = gr.get_graph(current["graph_run_id"])
     assert len(after["review_required"]) == 1
     item = after["review_required"][0]
-    review = gr.get_node_review(
-        current["graph_run_id"], item["node_id"], item["attempt_id"]
+    review = gr.get_node_reviews(
+        current["graph_run_id"], [(item["node_id"], item["attempt_id"])],
+        expected_revision=after["revision"],
     )
-    result = review["result"]
+    result = review["reviews"][0]["result"]
     assert result["failure_type"] == "executor_exception"
     assert result["agent_response"] is None
     assert "write_claim_id=turn:abc" in result["failure_detail"]
 
+
+
+def test_removed_mcp_tools_are_not_public(tmp_path, monkeypatch):
+    """Review batching is the only public review entry point; recovery is not MCP."""
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(tmp_path))
+    from qiqi_delegate import server
+    assert not hasattr(server, "get_node_review")
+    assert not hasattr(server, "release_write_claim")
+    assert hasattr(server, "get_node_reviews")
+    assert hasattr(server, "submit_decisions")
+
+
+def test_native_ambiguous_capture_flows_into_graph(tmp_path, monkeypatch):
+    """DelegateRuntime and GraphRuntime must agree on the ambiguous result shape."""
+    from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
+    from qiqi_delegate.task_graph_store import GraphRuntimeStore
+
+    repo = tmp_path / "backend"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n  - name: backend\n    path: backend\n"
+    )
+    (tmp_path / "agent-routing.yaml").write_text(
+        "routes:\n  codex-balanced:\n    agent: codex\n    args: []\n"
+    )
+    rt = DelegateRuntime(tmp_path)
+    monkeypatch.setattr("qiqi_delegate.runtime.shutil.which", lambda _: "/bin/true")
+
+    async def ready():
+        return None
+
+    async def create(*args, **kwargs):
+        assert args[:2] == ("workspace", "create")
+        return {"workspace": {"workspace_id": "w1"}, "root_pane": {"pane_id": "p1"}}
+
+    async def start(*args, **kwargs):
+        return "agent1", {"agent_status": "idle"}
+
+    async def prompt(*args, **kwargs):
+        return "done", {
+            "agent_status": "done",
+            "agent_session": {"kind": "id", "agent": "codex", "value": "native-1"},
+        }
+
+    async def capture(*args, **kwargs):
+        return {
+            "state": "capture_ambiguous",
+            "agent_response": None,
+            "candidate_count": 2,
+        }
+
+    async def run(*args, **kwargs):
+        assert args[:3] == ("workspace", "close", "w1")
+        return 0, "", ""
+
+    monkeypatch.setattr(rt, "_ensure_herdr_server", ready)
+    monkeypatch.setattr(rt, "_json", create)
+    monkeypatch.setattr(rt, "_start_agent", start)
+    monkeypatch.setattr(rt, "_prompt", prompt)
+    monkeypatch.setattr(rt, "_capture", capture)
+    monkeypatch.setattr(rt, "_run", run)
+
+    graph = task_graph_from_payload({"nodes": [{
+        "node_id": "B1", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {"objective": "Inspect", "scope": ["src"],
+                        "acceptance_criteria": ["Describe API"]},
+    }]})
+    gr = GraphRuntime(GraphRuntimeStore(rt.db))
+    started = gr.start_graph(graph, repository_names=["backend"])
+
+    async def execute(node):
+        return await rt.delegate(
+            repository=node.repository, route=node.route, packet=node.task_packet
+        )
+
+    output = asyncio.run(gr.delegate_next(started["graph_run_id"], executor=execute))
+    assert output["graph_state"] == "awaiting_review"
+    assert output["results"][0]["runtime_state"] == "capture_ambiguous"
+    assert output["review_required"][0]["candidate_count"] == 2
+    with rt._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 0

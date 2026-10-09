@@ -115,14 +115,31 @@ Nếu startup yêu cầu xác nhận, người dùng kiểm tra nội dung và q
 herdr --session <SESSION_NAME> workspace close <WORKSPACE_ID>
 ```
 
-Sau khi đã **xác nhận agent cũ kết thúc**, gọi MCP `release_write_claim(repository, claim_id, worker_termination_confirmed=true)` bằng chính ID lỗi trả về. Không xóa SQLite hoặc giải phóng claim khi chưa xác nhận worker đã dừng. Sau đó mới tạo TaskGraph mới để chạy lại. Không sửa repository đích để khắc phục lỗi hạ tầng.
+Sau khi đã **xác nhận agent cũ đã kết thúc** và workspace cũ đã đóng, người vận hành dùng CLI bảo trì riêng. **Không chạy lệnh này khi worker còn sống hoặc khi chưa xác minh được trạng thái worker.** Có thể xem claim đang giữ repository bằng:
 
-Nếu `agent_not_ready` xảy ra, `get_node_review(s)` hiển thị `failure_detail` thay vì chỉ có `executor_exception`, giúp Lead báo chính xác blocker cho người dùng. Việc Herdr yêu cầu xác nhận trust/auth không thể được CI mock loại bỏ hoàn toàn: cần xác minh E2E trên môi trường Herdr thực.
+```bash
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.maintenance \
+  show-claim --workspace "$PWD" --repository backend
+```
+
+Sau khi đối chiếu đúng `claim_id` trong lỗi và xác nhận không còn Herdr worker đang ghi vào repository:
+
+```bash
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.maintenance \
+  release-claim --workspace "$PWD" \
+  --repository backend \
+  --claim-id 'turn:<exact-id-from-error>' \
+  --worker-termination-confirmed
+```
+
+Hai ví dụ trên chạy **tại workspace điều phối** và sử dụng đúng Python của virtualenv cài MCP; **không cần activate virtualenv**. Nếu chạy từ thư mục khác, dùng đường dẫn tuyệt đối tới `.tools/herdr-task-mcp/.venv/bin/python` và `--workspace` trỏ đến workspace điều phối. Thông báo lỗi `agent_not_ready` cũng in sẵn lệnh đầy đủ với Python interpreter đang chạy MCP, workspace, repository và claim ID thực tế (không tự động chạy). CLI không nằm trong MCP; chỉ xóa đúng cặp `repository`/`claim_id`, từ chối claim không khớp và ghi audit vào SQLite khi giải phóng thành công. Cờ confirmation chỉ là xác nhận của người vận hành, **không tự chứng minh worker đã dừng**. Không xóa SQLite, không dùng claim ID phỏng đoán và không sửa repository đích để khắc phục lỗi hạ tầng. Sau khi xử lý an toàn mới điều phối task lại.
+
+Nếu `agent_not_ready` xảy ra, `get_node_reviews` hiển thị `failure_detail` thay vì chỉ có `executor_exception`, giúp Lead báo chính xác blocker cho người dùng. Việc Herdr yêu cầu xác nhận trust/auth không thể được CI mock loại bỏ hoàn toàn: cần xác minh E2E trên môi trường Herdr thực.
 
 ## Decision contract và xử lý lỗi
 
 - `start_graph` chỉ tạo TaskGraph. `delegate_next` mới chạy một wave của Peer.
-- `get_node_review(s)` cung cấp runtime state và evidence. `failed` vì hạ tầng không được xem là kết quả do Peer tạo; không ACCEPT.
+- `get_node_reviews` cung cấp runtime state và evidence. `failed` vì hạ tầng không được xem là kết quả do Peer tạo; không ACCEPT.
 - `submit_decisions(action="block")` yêu cầu `owner` và `return_checkpoint`. **Không** truyền `feedback` cho `block`, vì `feedback` chỉ dùng cho `retry`.
 - `submit_decisions(action="retry")` cho phép `feedback` và `resume_session` để hướng dẫn lần chạy tiếp theo.
 - Nếu bị `blocked`, Lead chỉ định người xử lý và checkpoint. Khi hạ tầng phục hồi, Lead cần replan/reconcile đúng node trước khi dispatch lại. Không tự đọc source hoặc chạy test trong repository đích thay Peer.
@@ -152,9 +169,9 @@ Human → Lead QiQi → TaskPacket / TaskGraph → qiqi_delegate → Herdr
 
 **Direct Delegation:** `delegate_repo_task` nhận `repository`, `route`, `objective`, `scope`, `acceptance_criteria` và các field tùy chọn. Không có `session_id` thì START; có exact `session_id` được sở hữu hợp lệ thì RESUME.
 
-**TaskGraph:** `workspace_info` → `start_graph` → `delegate_next` → `get_node_review` (hoặc `get_node_reviews`) → `submit_decisions`. Có thể dùng `get_graph` hoặc `reconcile_graph` khi cần. Downstream chỉ chạy sau khi upstream được Lead ACCEPT. Tối đa một writer cùng repo trong một wave.
+**TaskGraph:** `workspace_info` → `start_graph` → `delegate_next` → `get_node_reviews` → `submit_decisions`. Có thể dùng `get_graph` hoặc `reconcile_graph` khi cần. Downstream chỉ chạy sau khi upstream được Lead ACCEPT. Tối đa một writer cùng repo trong một wave.
 
-**Native result:** mỗi delegated turn có sink/nonce riêng, lấy final response từ Stop/StopFailure hook thay vì Herdr screen. SQLite tại `.herdr-task-mcp/qiqi_delegate.sqlite3` giữ session, turn và write claim. Khi cleanup không xác nhận, claim còn hiệu lực và phải được giải phóng thủ công sau khi worker cũ đã dừng.
+**Native result:** mỗi delegated turn có sink/nonce riêng, lấy final response từ Stop/StopFailure hook thay vì Herdr screen. Nếu nhiều Stop events tạo `capture_ambiguous`, result chỉ có `candidate_count`, không có authoritative `agent_response` hoặc `capture_review_id`; TaskGraph giữ attempt để review nhưng không cho ACCEPT. Lead cần RETRY, REPLAN hoặc BLOCK. SQLite tại `.herdr-task-mcp/qiqi_delegate.sqlite3` giữ session, turn và write claim. Khi cleanup không xác nhận, claim còn hiệu lực và phải được giải phóng thủ công sau khi worker cũ đã dừng.
 
 **Không có Supervisor:** không chạy broker, supervisor agent hoặc case audit. SLP R1–R5 không nằm trong runtime độc lập. Lead chịu trách nhiệm technical review.
 

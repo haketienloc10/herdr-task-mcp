@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -23,13 +24,32 @@ from qiqi_delegate.core import (
 class AgentStartupBlocked(RuntimeError):
     """Herdr started a named Peer, but its startup UI requires attention."""
 
-    def __init__(self, agent_name: str, pane_id: str, evidence: str):
+    def __init__(
+        self,
+        agent_name: str,
+        pane_id: str,
+        evidence: str,
+        *,
+        recovery_command: str | None = None,
+        public_context: str | None = None,
+    ):
         self.agent_name = agent_name
         self.pane_id = pane_id
+        self.recovery_command = recovery_command
+        self.public_context = public_context
         super().__init__(
             f"agent_not_ready: {agent_name} blocked during startup; "
             f"pane_id={pane_id}; startup_evidence={evidence}"
         )
+
+    def actionable_detail(self) -> str:
+        """Bound verbose evidence, never truncate the exact operator recovery command."""
+        if self.recovery_command is None:
+            return str(self)[:1200]
+        context = self.public_context or (
+            f"agent_not_ready; agent_name={self.agent_name}; pane_id={self.pane_id}"
+        )
+        return f"{context[:1200]}; recovery_command={self.recovery_command}"
 
 
 def workspace_root() -> Path:
@@ -448,6 +468,22 @@ class DelegateRuntime:
             preserve_startup = True
             target = (f"{self.herdr_bin} --session {self.herdr_session}"
                       if self.herdr_session else self.herdr_bin)
+            # This stdio server is launched with the package's venv Python.
+            # Reuse that exact interpreter: operators are not required to
+            # activate the venv, and qiqi-delegate-admin is not on global PATH.
+            recovery = (
+                f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+                f"release-claim --workspace {shlex.quote(str(self.root))} "
+                f"--repository {shlex.quote(repository)} "
+                f"--claim-id {shlex.quote(claim_id)} "
+                "--worker-termination-confirmed"
+            )
+            public_context = (
+                f"agent_not_ready; agent_name={exc.agent_name}; pane_id={exc.pane_id}; "
+                f"workspace_id={workspace_id}; write_claim_id={claim_id}; "
+                f"repository={repository}; inspect: {target} agent explain "
+                f"{exc.agent_name} --json; startup_evidence={exc}"
+            )
             raise AgentStartupBlocked(
                 exc.agent_name, exc.pane_id,
                 f"workspace_id={workspace_id}; write_claim_id={claim_id}; "
@@ -456,9 +492,11 @@ class DelegateRuntime:
                 f"inspect startup UI: {target} agent read {exc.agent_name} "
                 f"--source visible --lines 30; "
                 f"recovery: close Herdr workspace {workspace_id} after inspection, "
-                "confirm agent termination, then call release_write_claim "
-                "with this exact repository and claim ID. Do not send the "
-                f"delegated task prompt to the blocked agent manually. {exc}"
+                f"confirm agent termination, then run: {recovery}. "
+                "See README operator recovery instructions; do not send the "
+                f"delegated task prompt to the blocked agent manually. {exc}",
+                recovery_command=recovery,
+                public_context=public_context,
             ) from exc
         finally:
             error = None

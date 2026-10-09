@@ -20,6 +20,7 @@ test = ["pytest>=8,<10"]
 [project.scripts]
 qiqi-delegate-init = "qiqi_delegate.install:main"
 qiqi-delegate-mcp = "qiqi_delegate.server:main"
+qiqi-delegate-admin = "qiqi_delegate.maintenance:main"
 
 [tool.setuptools]
 packages = ["qiqi_delegate"]
