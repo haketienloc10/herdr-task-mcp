@@ -153,6 +153,121 @@ def test_cancelled_herdr_command_always_kills_and_reaps(
     asyncio.run(scenario())
 
 
+def test_cancellation_during_command_timeout_cleanup_wins_after_reap(
+    tmp_path, monkeypatch,
+):
+    """A late MCP cancellation takes precedence over an earlier command timeout."""
+    rt = DelegateRuntime(tmp_path)
+
+    async def scenario():
+        first_communicate = asyncio.Event()
+        cleaning_up = asyncio.Event()
+        allow_reap = asyncio.Event()
+
+        class TimedOutChild:
+            returncode = None
+            killed = False
+            reaped = False
+            communicates = 0
+
+            def kill(self):
+                self.killed = True
+
+            async def communicate(self):
+                self.communicates += 1
+                if self.communicates == 1:
+                    first_communicate.set()
+                    await asyncio.Event().wait()
+                cleaning_up.set()
+                await allow_reap.wait()
+                self.reaped = True
+                self.returncode = -9
+                return b"", b""
+
+        child = TimedOutChild()
+
+        async def spawn(*argv, **kwargs):
+            return child
+
+        monkeypatch.setattr(
+            "qiqi_delegate.runtime.asyncio.create_subprocess_exec", spawn,
+        )
+        task = asyncio.create_task(rt._run("status", "server", timeout=0.01))
+        await asyncio.wait_for(first_communicate.wait(), 2)
+        await asyncio.wait_for(cleaning_up.wait(), 2)
+        assert child.killed and not child.reaped
+        task.cancel()  # Arrives while the timed-out command is being reaped.
+        await asyncio.sleep(0)
+        assert not task.done()
+        allow_reap.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert child.reaped and child.communicates == 2
+        assert child.returncode == -9
+
+    asyncio.run(scenario())
+
+
+def test_repeated_cancellation_during_detached_server_reap_is_shielded(
+    tmp_path, monkeypatch,
+):
+    """The second cancellation must not abandon a terminated headless server."""
+    rt = DelegateRuntime(tmp_path)
+
+    async def scenario():
+        probe_in_progress = asyncio.Event()
+        server_reaping = asyncio.Event()
+        allow_server_reap = asyncio.Event()
+        probes = []
+
+        class DetachedServer:
+            returncode = None
+            terminated = False
+            reaped = False
+
+            def terminate(self):
+                self.terminated = True
+
+            async def wait(self):
+                server_reaping.set()
+                await allow_server_reap.wait()
+                self.reaped = True
+                self.returncode = -15
+                return self.returncode
+
+        server = DetachedServer()
+
+        async def spawn(*argv, **kwargs):
+            return server
+
+        async def status(*argv, **kwargs):
+            probes.append(argv)
+            if len(probes) <= 2:
+                return 1, "", ""
+            probe_in_progress.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(rt, "_run", status)
+        monkeypatch.setattr(
+            "qiqi_delegate.runtime.asyncio.create_subprocess_exec", spawn,
+        )
+        task = asyncio.create_task(rt._ensure_herdr_server())
+        await asyncio.wait_for(probe_in_progress.wait(), 2)
+        task.cancel()  # Cancel post-launch readiness probe.
+        await asyncio.wait_for(server_reaping.wait(), 2)
+        assert server.terminated and not server.reaped
+        task.cancel()  # Cancel while waiting for the terminated child.
+        await asyncio.sleep(0)
+        assert not task.done()
+        allow_server_reap.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert server.reaped
+        assert server.returncode == -15
+
+    asyncio.run(scenario())
+
+
 def test_herdr_command_asyncio_timeout_kills_and_reaps_child(tmp_path, monkeypatch):
     """Python 3.10 asyncio.TimeoutError must reach subprocess cleanup."""
     rt = DelegateRuntime(tmp_path)
