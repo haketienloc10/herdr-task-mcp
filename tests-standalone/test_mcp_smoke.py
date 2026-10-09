@@ -328,8 +328,9 @@ def test_graph_review_keeps_startup_failure_details(tmp_path):
 
 
 
-def test_removed_mcp_tools_are_not_public(tmp_path):
+def test_removed_mcp_tools_are_not_public(tmp_path, monkeypatch):
     """Review batching is the only public review entry point; recovery is not MCP."""
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(tmp_path))
     from qiqi_delegate import server
     assert not hasattr(server, "get_node_review")
     assert not hasattr(server, "release_write_claim")
