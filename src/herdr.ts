@@ -34,15 +34,20 @@ export function buildWorkerPrompt(task: Task, reportPath: string): string {
 /** Raised after Herdr creates a pane but cannot start the requested agent. */
 export class WorkerStartupError extends Error {
   readonly name = 'WorkerStartupError';
-  constructor(
-    readonly kind: AgentKind,
-    readonly agentName: string,
-    readonly paneId: string,
-    readonly launchError: string,
-    readonly paneOutput: string
-  ) {
+  readonly kind: AgentKind;
+  readonly agentName: string;
+  readonly paneId: string;
+  readonly launchError: string;
+  readonly paneOutput: string;
+
+  constructor(kind: AgentKind, agentName: string, paneId: string, launchError: string, paneOutput: string) {
     const transcript = paneOutput.trim() ? `\nPane output (last lines):\n${paneOutput.slice(-3000)}` : '';
     super(`Failed to start ${kind} worker in pane ${paneId}: ${launchError}${transcript}`);
+    this.kind = kind;
+    this.agentName = agentName;
+    this.paneId = paneId;
+    this.launchError = launchError;
+    this.paneOutput = paneOutput;
   }
 }
 
