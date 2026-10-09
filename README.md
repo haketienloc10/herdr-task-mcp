@@ -115,14 +115,14 @@ Nếu startup yêu cầu xác nhận, người dùng kiểm tra nội dung và q
 herdr --session <SESSION_NAME> workspace close <WORKSPACE_ID>
 ```
 
-Sau khi đã **xác nhận agent cũ kết thúc**, gọi MCP `release_write_claim(repository, claim_id, worker_termination_confirmed=true)` bằng chính ID lỗi trả về. Không xóa SQLite hoặc giải phóng claim khi chưa xác nhận worker đã dừng. Sau đó mới tạo TaskGraph mới để chạy lại. Không sửa repository đích để khắc phục lỗi hạ tầng.
+Sau khi đã **xác nhận agent cũ kết thúc**, người vận hành cần xử lý write claim theo quy trình bảo trì riêng bằng đúng `repository` và `claim_id` từ lỗi. MCP không expose thao tác giải phóng claim. Không xóa SQLite hoặc giải phóng claim khi chưa xác nhận worker đã dừng. Sau khi xử lý an toàn mới tạo TaskGraph mới để chạy lại. Không sửa repository đích để khắc phục lỗi hạ tầng.
 
-Nếu `agent_not_ready` xảy ra, `get_node_review(s)` hiển thị `failure_detail` thay vì chỉ có `executor_exception`, giúp Lead báo chính xác blocker cho người dùng. Việc Herdr yêu cầu xác nhận trust/auth không thể được CI mock loại bỏ hoàn toàn: cần xác minh E2E trên môi trường Herdr thực.
+Nếu `agent_not_ready` xảy ra, `get_node_reviews` hiển thị `failure_detail` thay vì chỉ có `executor_exception`, giúp Lead báo chính xác blocker cho người dùng. Việc Herdr yêu cầu xác nhận trust/auth không thể được CI mock loại bỏ hoàn toàn: cần xác minh E2E trên môi trường Herdr thực.
 
 ## Decision contract và xử lý lỗi
 
 - `start_graph` chỉ tạo TaskGraph. `delegate_next` mới chạy một wave của Peer.
-- `get_node_review(s)` cung cấp runtime state và evidence. `failed` vì hạ tầng không được xem là kết quả do Peer tạo; không ACCEPT.
+- `get_node_reviews` cung cấp runtime state và evidence. `failed` vì hạ tầng không được xem là kết quả do Peer tạo; không ACCEPT.
 - `submit_decisions(action="block")` yêu cầu `owner` và `return_checkpoint`. **Không** truyền `feedback` cho `block`, vì `feedback` chỉ dùng cho `retry`.
 - `submit_decisions(action="retry")` cho phép `feedback` và `resume_session` để hướng dẫn lần chạy tiếp theo.
 - Nếu bị `blocked`, Lead chỉ định người xử lý và checkpoint. Khi hạ tầng phục hồi, Lead cần replan/reconcile đúng node trước khi dispatch lại. Không tự đọc source hoặc chạy test trong repository đích thay Peer.
@@ -152,9 +152,9 @@ Human → Lead QiQi → TaskPacket / TaskGraph → qiqi_delegate → Herdr
 
 **Direct Delegation:** `delegate_repo_task` nhận `repository`, `route`, `objective`, `scope`, `acceptance_criteria` và các field tùy chọn. Không có `session_id` thì START; có exact `session_id` được sở hữu hợp lệ thì RESUME.
 
-**TaskGraph:** `workspace_info` → `start_graph` → `delegate_next` → `get_node_review` (hoặc `get_node_reviews`) → `submit_decisions`. Có thể dùng `get_graph` hoặc `reconcile_graph` khi cần. Downstream chỉ chạy sau khi upstream được Lead ACCEPT. Tối đa một writer cùng repo trong một wave.
+**TaskGraph:** `workspace_info` → `start_graph` → `delegate_next` → `get_node_reviews` → `submit_decisions`. Có thể dùng `get_graph` hoặc `reconcile_graph` khi cần. Downstream chỉ chạy sau khi upstream được Lead ACCEPT. Tối đa một writer cùng repo trong một wave.
 
-**Native result:** mỗi delegated turn có sink/nonce riêng, lấy final response từ Stop/StopFailure hook thay vì Herdr screen. SQLite tại `.herdr-task-mcp/qiqi_delegate.sqlite3` giữ session, turn và write claim. Khi cleanup không xác nhận, claim còn hiệu lực và phải được giải phóng thủ công sau khi worker cũ đã dừng.
+**Native result:** mỗi delegated turn có sink/nonce riêng, lấy final response từ Stop/StopFailure hook thay vì Herdr screen. Nếu nhiều Stop events tạo `capture_ambiguous`, result chỉ có `candidate_count`, không có authoritative `agent_response` hoặc `capture_review_id`; TaskGraph giữ attempt để review nhưng không cho ACCEPT. Lead cần RETRY, REPLAN hoặc BLOCK. SQLite tại `.herdr-task-mcp/qiqi_delegate.sqlite3` giữ session, turn và write claim. Khi cleanup không xác nhận, claim còn hiệu lực và phải được giải phóng thủ công sau khi worker cũ đã dừng.
 
 **Không có Supervisor:** không chạy broker, supervisor agent hoặc case audit. SLP R1–R5 không nằm trong runtime độc lập. Lead chịu trách nhiệm technical review.
 
