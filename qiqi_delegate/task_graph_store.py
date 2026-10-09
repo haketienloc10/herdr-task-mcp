@@ -132,11 +132,34 @@ class GraphRuntimeStore:
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        self._ensure_schema(conn)
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            # Switching a legacy database into WAL is itself a write-like
+            # schema operation. SQLite can report SQLITE_BUSY immediately
+            # when two new processes request the switch simultaneously,
+            # even though the connection has a busy timeout. A read-only
+            # mode probe avoids repeating the switch once it is complete.
+            for attempt in range(60):
+                try:
+                    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                    if mode.lower() != "wal":
+                        mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                    if mode.lower() == "wal":
+                        break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt == 59:
+                        raise
+                if attempt == 59:
+                    raise sqlite3.OperationalError(
+                        "could not initialize SQLite WAL after concurrent open"
+                    )
+                time.sleep(0.05)
+            self._ensure_schema(conn)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
