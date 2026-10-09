@@ -18,16 +18,18 @@ MCP_END = "# <<< qiqi-delegate MCP (managed)"
 SERVER = "qiqi_delegate"
 DIRECT = "mcp__qiqi_delegate"
 
-RULES = """## QiQi Delegate — managed rules
+RULES = """## Quy tắc điều phối qua qiqi_delegate
 
-- Khi cần giao việc, dùng MCP qiqi_delegate tại workspace này.
-- Lead giữ quyền chọn repository, route, dependency và quyết định ACCEPT/RETRY/REPLAN/BLOCK.
-- Mỗi TaskPacket phải có objective, scope và acceptance_criteria đủ nghĩa.
-- Repository là name trong repos.yaml. Repo có thể nằm trong workspace hoặc cùng cấp (../frontend). Không yêu cầu Peer đọc repo khác.
-- Không suy đoán kết quả từ Herdr terminal. Dùng native captured agent_response.
-- Một Peer settled chưa đồng nghĩa được ACCEPT. Downstream chỉ chạy sau ACCEPT.
-- Không sửa file bên ngoài Git root của Peer, trừ input được cấp quyền rõ ràng.
-- Không chạy Supervisor Broker. Không yêu cầu cài module trong repository con.
+- Lead không tự đọc, sửa, chạy lệnh, kiểm thử hoặc commit trong repository đích. Giao mọi công việc repository-scoped cho Peer qua MCP `qiqi_delegate`.
+- Lead chịu trách nhiệm lập TaskPacket, chọn repository và route, quản lý dependency, review evidence và quyết định ACCEPT/RETRY/REPLAN/BLOCK.
+- Chỉ sử dụng repository có tên chính xác trong `repos.yaml`. Không tự suy đoán đường dẫn, tạo, clone hoặc thêm repository nếu chưa được người dùng yêu cầu.
+- Mỗi TaskPacket phải tự đủ nghĩa với `objective`, `scope`, `acceptance_criteria` và context hoặc constraints cần thiết. Không dựa vào lịch sử hội thoại mà Peer không thể truy cập.
+- Peer chỉ làm việc trong Git root và phạm vi được giao. Không đọc hoặc sửa repository khác; không tự điều phối Peer khác.
+- Dùng TaskGraph để quản lý các task có dependency. Chỉ cho downstream chạy sau khi Lead ACCEPT upstream; chỉ chạy song song khi không xung đột phạm vi ghi.
+- Dùng native captured response và evidence làm căn cứ review. Không đọc Herdr terminal để suy đoán final response; trạng thái `settled` không đồng nghĩa với ACCEPT.
+- Khi Peer báo lỗi hoặc blocker, Lead xem evidence rồi quyết định RETRY, REPLAN hoặc BLOCK. Không retry vô hạn hoặc tự tiếp quản công việc của Peer.
+- Không tự cài MCP, thêm rule hoặc sửa `AGENTS.md` trong repository đích. Quản lý cấu hình MCP và rule trong workspace điều phối.
+- Không chạy Supervisor Broker. Lead chịu trách nhiệm review và quyết định cuối cùng.
 """
 
 def managed_rules(existing: bytes) -> bytes:
