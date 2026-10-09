@@ -78,7 +78,10 @@ class Decision(BaseModel):
     )
 
 runtime = DelegateRuntime(workspace_root())
-graph_runtime = GraphRuntime(GraphRuntimeStore(runtime.db))
+graph_runtime = GraphRuntime(
+    GraphRuntimeStore(runtime.db),
+    repository_key=lambda name: str(runtime.repos()[name]),
+)
 mcp = MCPServer(
     "QiQi Delegate (standalone)",
     instructions=(
