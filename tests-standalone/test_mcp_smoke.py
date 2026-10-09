@@ -291,7 +291,7 @@ def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, mon
     assert "workspace_id=w-blocked" in error
     assert "write_claim_id=turn:" in error
     assert "agent explain" in error and "agent read" in error
-    assert "operator-side claim cleanup" in error
+    assert "qiqi-delegate-admin release-claim" in error
     assert not any(x[:2] == ("workspace", "close") for x in calls)
     with rt._connect() as db:
         claim = db.execute("SELECT claim_id FROM write_claims WHERE repository='backend'").fetchone()
