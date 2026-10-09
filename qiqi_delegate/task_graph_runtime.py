@@ -1127,6 +1127,11 @@ class GraphRuntime:
             attempt_id = persisted.get("current_attempt_id")
             attempt = self.store.get_attempt(attempt_id) if attempt_id else None
             result = attempt.get("result") if isinstance(attempt, dict) else None
+            if isinstance(result, dict) and result.get("state") == "capture_ambiguous":
+                raise ValueError(
+                    f"ACCEPT requires unambiguous captured Peer evidence for node "
+                    f"{decision.node_id!r}; retry, replan or block instead"
+                )
             # Enforce this at the runtime boundary, not just the MCP wrapper:
             # the Python API must never ACCEPT a failed/blocked/ambiguous Peer.
             if (
