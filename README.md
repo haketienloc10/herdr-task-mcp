@@ -130,6 +130,33 @@ Scheduler giữ tối thiểu một slot cho task con. Các task root vì vậy 
 - Khi daemon restart, task RUNNING chuyển BLOCKED; kiểm tra worker cũ tránh duplicate changes.
 - Dữ liệu SQLite và prompt có thể chứa thông tin dự án; không commit thư mục dữ liệu vào Git.
 
+## Chẩn đoán lỗi khởi chạy Codex worker
+
+Nếu backend Claude hoàn thành nhưng frontend Codex thất bại trước khi chạy task, kiểm tra `task_status` hoặc `task_result` của task F1. Khi `agent start` lỗi, task giữ `pane_id` và màn hình terminal cuối cùng để hỗ trợ chẩn đoán.
+
+Kiểm tra output trong pane worker (thay `<pane_id>` bằng `pane_id` trả về):
+
+```bash
+herdr pane read <pane_id> --source recent-unwrapped --lines 120
+```
+
+Kiểm tra từ **một pane Herdr mới** (không chỉ shell đang chạy coordinator):
+
+```bash
+command -v codex
+codex --version
+command -v bwrap || true
+bwrap --version 2>&1 || true
+printf 'PATH=%s\\nSHELL=%s\\n' "$PATH" "$SHELL"
+```
+
+- Nếu `codex` không có trong `PATH`: sửa môi trường khởi chạy **Herdr server**, sau đó restart Herdr server và tạo pane mới. Server có thể giữ `PATH` từ khi khởi chạy.
+- Nếu `codex --version` chạy nhưng Codex không spawn được shell: kiểm tra nguyên văn lỗi từ `pane read`, đường dẫn shell/sandbox được nêu trong log và quyền thực thi. Không mặc định coi đây là lỗi task scheduler.
+- Nếu lỗi nhắc tới `bwrap` (Bubblewrap), kiểm tra executable, sandbox backend và quyền Linux/WSL. Không tự động tắt sandbox hoặc dùng `--dangerously-bypass-approvals-and-sandbox`.
+- Nếu pane worker không có interactive shell, xem cấu hình Herdr `[terminal].default_shell` và `shell_mode`. `agent start` cần pane đang ở shell prompt.
+
+Sau khi sửa môi trường, tạo **task F1 mới** với cùng instruction, không khởi chạy lại B1 đã hoàn thành. Hệ thống không tự retry task `FAILED`.
+
 ## Test
 
 `npm test` dùng fake Herdr runtime để kiểm thử điều phối và task lifecycle mà không cần khởi động agent thật. Integration test trên Herdr thực cần cả hai CLI và account đã xác thực.

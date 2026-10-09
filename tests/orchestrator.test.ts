@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { TaskStore } from '../src/store.ts';
 import { Orchestrator } from '../src/orchestrator.ts';
 import { loadConfig } from '../src/config.ts';
-import { parseHerdrResult, validateReport, type AgentRuntime } from '../src/herdr.ts';
+import { parseHerdrResult, validateReport, WorkerStartupError, type AgentRuntime } from '../src/herdr.ts';
 import { rpc, serveSocket } from '../src/http.ts';
 import type { Task } from '../src/types.ts';
 
@@ -110,6 +110,27 @@ test('Herdr CLI envelope and report task ID are validated', () => {
   assert.equal(parseHerdrResult<{ ok: true }>(' {"result":{"ok":true}} ').ok, true);
   assert.throws(() => parseHerdrResult('not-json'), /invalid JSON/);
   assert.throws(() => validateReport('{"task_id":"wrong","outcome":"success","summary":"fake"}', 'right'), /Invalid worker report/);
+});
+
+test('failed Codex startup keeps worker pane and terminal diagnostics for troubleshooting', async () => {
+  const { dir, store, orchestrator } = await setup();
+  const originalStart = orchestrator.runtime.start.bind(orchestrator.runtime);
+  try {
+    orchestrator.runtime.start = async () => {
+      throw new WorkerStartupError('codex', 'htstartup', 'w7:p4', 'Herdr agent_not_ready', 'bwrap: cannot find executable');
+    };
+    const task = await orchestrator.submit({ target: 'codex', cwd: dir, instruction: 'frontend implementation' });
+    const result = await orchestrator.wait(task.id, 3000);
+    assert.equal(result.status, 'FAILED');
+    assert.equal(result.agent_name, 'htstartup');
+    assert.equal(result.pane_id, 'w7:p4');
+    assert.match(result.error!, /agent_not_ready/);
+    assert.match(result.summary!, /bwrap/);
+  } finally {
+    orchestrator.runtime.start = originalStart;
+    await orchestrator.stop();
+    store.close();
+  }
 });
 
 test('shared daemon RPC can be accessed through its Unix socket', async () => {

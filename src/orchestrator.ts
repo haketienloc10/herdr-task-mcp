@@ -3,7 +3,7 @@ import { isAbsolute, join, relative } from 'node:path';
 import { stat } from 'node:fs/promises';
 import type { Config } from './config.ts';
 import type { AgentRuntime } from './herdr.ts';
-import { validateReport } from './herdr.ts';
+import { validateReport, WorkerStartupError } from './herdr.ts';
 import { TaskStore } from './store.ts';
 import { TERMINAL_STATUSES, type SubmitTask, type Task, type TaskStatus } from './types.ts';
 
@@ -167,6 +167,13 @@ export class Orchestrator {
         error: resultStatus === 'FAILED' ? 'Worker reported failure' : null });
     } catch (error) {
       if (this.status(id).status !== 'RUNNING') return;
+      if (error instanceof WorkerStartupError) {
+        this.store.patch(id, {
+          pane_id: error.paneId,
+          agent_name: error.agentName,
+          summary: error.paneOutput.slice(-3000) || null
+        });
+      }
       const errorText = String(error);
       if (controller.signal.aborted) {
         this.store.patch(id, { status: 'BLOCKED', finished_at: new Date().toISOString(), error: 'Daemon stopped; inspect worker pane' });

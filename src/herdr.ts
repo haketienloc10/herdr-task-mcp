@@ -31,6 +31,21 @@ export function buildWorkerPrompt(task: Task, reportPath: string): string {
     `The orchestrator uses the report (not terminal idle) to determine the task outcome.`;
 }
 
+/** Raised after Herdr creates a pane but cannot start the requested agent. */
+export class WorkerStartupError extends Error {
+  readonly name = 'WorkerStartupError';
+  constructor(
+    readonly kind: AgentKind,
+    readonly agentName: string,
+    readonly paneId: string,
+    readonly launchError: string,
+    readonly paneOutput: string
+  ) {
+    const transcript = paneOutput.trim() ? `\nPane output (last lines):\n${paneOutput.slice(-3000)}` : '';
+    super(`Failed to start ${kind} worker in pane ${paneId}: ${launchError}${transcript}`);
+  }
+}
+
 export class HerdrRuntime implements AgentRuntime {
   private readonly binary: string;
   private readonly cliTimeoutMs: number;
@@ -58,7 +73,11 @@ export class HerdrRuntime implements AgentRuntime {
     try {
       parseHerdrResult(await this.call(['agent', 'start', agentName, '--kind', task.target, '--pane', paneId, '--timeout', '30000'], 35000));
     } catch (error) {
-      throw new Error(`Worker pane ${paneId} was created but the ${task.target} agent failed to start: ${String(error)}`);
+      // The agent might not exist yet, so use pane read rather than agent read.
+      const paneOutput = await this.call(
+        ['pane', 'read', paneId, '--source', 'recent-unwrapped', '--lines', '80'], 10000
+      ).catch(() => '');
+      throw new WorkerStartupError(task.target, agentName, paneId, String(error), paneOutput);
     }
     return { agentName, paneId };
   }
