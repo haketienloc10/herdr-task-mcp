@@ -52,6 +52,47 @@ def test_mcp_initialize_stdio_handshake(tmp_path):
     assert "result" in replies[0], f"MCP initialize error: {replies[0]!r}"
     assert replies[0]["result"].get("serverInfo", {}).get("name"), replies[0]
 
+def test_failed_headless_server_readiness_reaps_detached_process(tmp_path, monkeypatch):
+    """A failing status probe after spawn must not leak an orphaned Herdr."""
+    rt = DelegateRuntime(tmp_path)
+    calls = []
+
+    class Child:
+        returncode = None
+
+        def terminate(self):
+            calls.append("terminate")
+
+        async def wait(self):
+            calls.append("wait")
+            self.returncode = -15
+            return self.returncode
+
+    child = Child()
+
+    async def spawn(*args, **kwargs):
+        calls.append("spawn")
+        return child
+
+    async def status(*args, **kwargs):
+        assert args[:2] == ("status", "server")
+        calls.append("status")
+        # First two status checks request the headless launch; the third
+        # raises after the detached child exists.
+        if calls.count("status") < 3:
+            return 1, "", ""
+        raise RuntimeError("Herdr command timeout during startup probe")
+
+    monkeypatch.setattr(rt, "_run", status)
+    monkeypatch.setattr("qiqi_delegate.runtime.asyncio.create_subprocess_exec", spawn)
+
+    with pytest.raises(RuntimeError, match="timeout during startup probe"):
+        asyncio.run(rt._ensure_herdr_server())
+    assert calls == [
+        "status", "status", "spawn", "status", "terminate", "wait",
+    ]
+
+
 def test_herdr_command_asyncio_timeout_kills_and_reaps_child(tmp_path, monkeypatch):
     """Python 3.10 asyncio.TimeoutError must reach subprocess cleanup."""
     rt = DelegateRuntime(tmp_path)
