@@ -96,9 +96,10 @@ def test_maintenance_cli_guard_and_exact_release(tmp_path):
     denied = subprocess.run(base, capture_output=True, text=True)
     assert denied.returncode == 1
     assert "worker has stopped" in denied.stderr
-    assert runtime._connect().execute(
-        "SELECT claim_id FROM write_claims WHERE repository='backend'"
-    ).fetchone()[0] == "turn:blocked"
+    with runtime._connect() as db:
+        assert db.execute(
+            "SELECT claim_id FROM write_claims WHERE repository='backend'"
+        ).fetchone()[0] == "turn:blocked"
 
     shown = subprocess.run(
         [
