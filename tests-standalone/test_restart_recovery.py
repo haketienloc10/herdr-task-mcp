@@ -7,7 +7,7 @@ import pytest
 from qiqi_delegate.task_graph_runtime import (
     GraphRuntime, decisions_from_payload, task_graph_from_payload,
 )
-from qiqi_delegate.task_graph_store import GraphRuntimeStore, _graph_fingerprint
+from qiqi_delegate.task_graph_store import GraphRuntimeStore
 
 
 def make_runtime(path):
