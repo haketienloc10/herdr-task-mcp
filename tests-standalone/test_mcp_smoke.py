@@ -198,3 +198,46 @@ def test_herdr_missing_server_starts_headless_without_session_attach(tmp_path, m
     assert "attach" not in argv
 
 
+
+def test_workspace_info_prevents_unknown_routes_before_graph_persistence(tmp_path):
+    repo = tmp_path / "frontend"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n  - name: frontend\n    path: frontend\n"
+    )
+    (tmp_path / "agent-routing.yaml").write_text(
+        "routes:\n  codex-balanced:\n    agent: codex\n    args: []\n"
+    )
+    script = """
+import asyncio
+from mcp.server.mcpserver.exceptions import ToolError
+from qiqi_delegate.server import workspace_info, start_graph, Graph, Node, Packet
+
+p = Packet(objective="Inspect", scope=["src"],
+           acceptance_criteria=["Report entry point"])
+def graph(route):
+    return Graph(nodes=[Node(node_id="F1", repository="frontend",
+                             route=route, task_packet=p)])
+async def main():
+    info = await workspace_info()
+    assert info["repositories"] == ["frontend"], info
+    assert info["routes"] == {"codex-balanced": "codex"}, info
+    assert info["herdr_session"] == "qiqi-delegate", info
+    try:
+        await start_graph(graph("explore"))
+    except ToolError as exc:
+        assert "unknown route: explore" in str(exc), str(exc)
+    else:
+        raise AssertionError("start_graph accepted nonexistent route")
+    result = await start_graph(graph("codex-balanced"))
+    assert result["revision"] == 0, result
+    assert result["runnable_nodes"] == ["F1"], result
+asyncio.run(main())
+"""
+    env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path),
+               QIQI_HERDR_SESSION="qiqi-delegate")
+    proc = subprocess.run([sys.executable, "-c", script], env=env,
+                          capture_output=True, text=True, timeout=20)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
