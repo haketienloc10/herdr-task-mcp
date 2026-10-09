@@ -94,7 +94,31 @@ Khởi động lại MCP client sau khi đổi cấu hình. Kiểm tra tên sess
 
 ## Danh sách repository và route
 
-Gọi MCP `workspace_info` **trước** `start_graph` hoặc `delegate_repo_task`. Tool này trả danh sách tên repository và route đã khai báo, cùng thông tin session Herdr. Không dùng tên route tự suy đoán. `start_graph` và `reconcile_graph` kiểm tra tất cả route trước khi ghi graph, nên route sai không tạo failed attempt.
+Gọi MCP `workspace_info` **trước** `start_graph` hoặc `delegate_repo_task`. Dùng một tên trong trường `route_names` làm tham số `route`; `routes` là ánh xạ *route name → agent kind*, vì thế giá trị `codex` là agent kind chứ không phải route hợp lệ. Tool này trả danh sách tên repository và route đã khai báo, cùng thông tin session Herdr. Không dùng tên route tự suy đoán. `start_graph` và `reconcile_graph` kiểm tra tất cả route trước khi ghi graph, nên route sai không tạo failed attempt.
+## Chẩn đoán `agent_not_ready` (Peer bị chặn lúc startup)
+
+Lỗi `agent_not_ready` xảy ra khi Herdr nhận diện agent, nhưng startup đang ở trạng thái `blocked` (có thể cần xử lý câu hỏi, đăng nhập hoặc trust prompt). **Không tự động nhấn Enter, cấp quyền hoặc gửi task prompt lại.** Đây không phải bằng chứng Peer đã xử lý task.
+
+Bản runtime mới **giữ lại Herdr workspace và write claim** để có thể kiểm tra UI khởi động, thay vì đóng pane ngay và làm mất dấu vết. MCP trả `agent_name`, `pane_id`, `workspace_id`, `write_claim_id` cùng gợi ý kiểm tra; TaskGraph review cũng giữ `failure_detail` của runtime. `agent explain` dùng chẩn đoán trạng thái; `agent read` chỉ dùng xem startup UI, **không** dùng lấy báo cáo Peer/final response.
+
+Chạy bằng session đã chọn trong `--herdr-session`:
+
+```bash
+herdr --session <SESSION_NAME> agent explain <AGENT_NAME> --json
+herdr --session <SESSION_NAME> agent read <AGENT_NAME> --source visible --lines 30
+herdr --session <SESSION_NAME> agent get <AGENT_NAME>
+```
+
+Nếu startup yêu cầu xác nhận, người dùng kiểm tra nội dung và quyết định thủ công. Nếu không thể tiếp tục, đóng workspace theo `workspace_id`:
+
+```bash
+herdr --session <SESSION_NAME> workspace close <WORKSPACE_ID>
+```
+
+Sau khi đã **xác nhận agent cũ kết thúc**, gọi MCP `release_write_claim(repository, claim_id, worker_termination_confirmed=true)` bằng chính ID lỗi trả về. Không xóa SQLite hoặc giải phóng claim khi chưa xác nhận worker đã dừng. Sau đó mới tạo TaskGraph mới để chạy lại. Không sửa repository đích để khắc phục lỗi hạ tầng.
+
+Nếu `agent_not_ready` xảy ra, `get_node_review(s)` hiển thị `failure_detail` thay vì chỉ có `executor_exception`, giúp Lead báo chính xác blocker cho người dùng. Việc Herdr yêu cầu xác nhận trust/auth không thể được CI mock loại bỏ hoàn toàn: cần xác minh E2E trên môi trường Herdr thực.
+
 ## Decision contract và xử lý lỗi
 
 - `start_graph` chỉ tạo TaskGraph. `delegate_next` mới chạy một wave của Peer.
