@@ -1,6 +1,9 @@
 """Durable TaskGraph semantics and retry intent across runtime process restarts."""
 import asyncio
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from threading import Barrier
 
 import pytest
 
@@ -358,6 +361,94 @@ def test_prepared_restart_retains_retry_plan_and_fails_closed(tmp_path):
     assert after["retry_plan_json"] == attempt["retry_plan_json"]
     with pytest.raises(RuntimeError, match="already dispatched"):
         fresh_process.store.mark_attempt_dispatched(attempt_id)
+
+
+def test_concurrent_legacy_schema_migration_preserves_existing_attempts(tmp_path):
+    """Concurrent servers opening a pre-upgrade database must not ALTER the same column."""
+    path = tmp_path / "graph.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE graph_runs (
+                graph_run_id TEXT PRIMARY KEY,
+                graph_fingerprint TEXT NOT NULL,
+                current_wave_id TEXT,
+                revision INTEGER NOT NULL,
+                created_at_ns INTEGER NOT NULL,
+                updated_at_ns INTEGER NOT NULL
+            );
+            CREATE TABLE graph_node_states (
+                graph_run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                semantic_state TEXT NOT NULL,
+                runtime_state TEXT NOT NULL,
+                current_attempt_id TEXT,
+                session_id TEXT,
+                turn_id TEXT,
+                updated_at_ns INTEGER NOT NULL,
+                PRIMARY KEY (graph_run_id, node_id)
+            );
+            CREATE TABLE graph_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                graph_run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                wave_id TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                runtime_state TEXT NOT NULL,
+                resume_session INTEGER NOT NULL,
+                session_id TEXT,
+                turn_id TEXT,
+                result_json TEXT,
+                created_at_ns INTEGER NOT NULL,
+                updated_at_ns INTEGER NOT NULL
+            );
+            INSERT INTO graph_runs VALUES ('legacy', 'original', 'wave-old', 5, 1, 1);
+            INSERT INTO graph_node_states VALUES
+                ('legacy', 'B1', 'pending', 'running', 'attempt-old', NULL, NULL, 1);
+            INSERT INTO graph_attempts VALUES
+                ('attempt-old', 'legacy', 'B1', 'wave-old', 1,
+                 'running', 0, NULL, NULL, NULL, 1, 1);
+        """)
+
+    workers = 8
+    barrier = Barrier(workers)
+
+    def open_concurrent_store(_):
+        barrier.wait(timeout=15)
+        with closing(GraphRuntimeStore(path)._connect()) as conn:
+            return (
+                conn.execute(
+                    "SELECT dispatch_state FROM graph_attempts "
+                    "WHERE attempt_id = 'attempt-old'"
+                ).fetchone()[0],
+                conn.execute(
+                    "SELECT active FROM graph_node_states "
+                    "WHERE graph_run_id = 'legacy' AND node_id = 'B1'"
+                ).fetchone()[0],
+            )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(open_concurrent_store, range(workers)))
+
+    assert results == [("dispatched", 1)] * workers
+    with sqlite3.connect(path) as conn:
+        expected = {
+            "graph_runs": {"graph_json"},
+            "graph_node_states": {"active"},
+            "graph_attempts": {"retry_plan_json", "dispatch_state"},
+        }
+        for table, additions in expected.items():
+            names = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            for column in additions:
+                assert names.count(column) == 1
+        assert conn.execute(
+            "SELECT current_wave_id, revision FROM graph_runs WHERE graph_run_id = 'legacy'"
+        ).fetchone() == ("wave-old", 5)
+
+    # All columns now exist; opening another server is an idempotent read.
+    with closing(GraphRuntimeStore(path)._connect()) as conn:
+        assert conn.execute(
+            "SELECT retry_plan_json FROM graph_attempts WHERE attempt_id='attempt-old'"
+        ).fetchone()[0] is None
 
 
 def test_corrupt_or_legacy_graph_definition_fails_closed(tmp_path):
