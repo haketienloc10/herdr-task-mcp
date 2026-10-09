@@ -549,16 +549,55 @@ class GraphRuntimeStore:
         """Persist Lead decisions and pending retry intent in one SQLite transaction."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # Historic installations had turn_id NOT NULL and no defer fields.
+            # Rebuild under the same write transaction, preserving all old rows.
+            # No decision must depend on native capture existing.
             conn.execute("""CREATE TABLE IF NOT EXISTS lead_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 graph_run_id TEXT NOT NULL,
-                turn_id TEXT NOT NULL,
+                turn_id TEXT,
                 action TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 node_id TEXT,
                 attempt_id TEXT,
+                owner TEXT,
+                return_checkpoint TEXT,
                 created_at_ns INTEGER NOT NULL
             )""")
+            info = {
+                row["name"]: row
+                for row in conn.execute("PRAGMA table_info(lead_decisions)").fetchall()
+            }
+            if info["turn_id"]["notnull"]:
+                conn.execute("""CREATE TABLE lead_decisions_nullable (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    graph_run_id TEXT NOT NULL,
+                    turn_id TEXT,
+                    action TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    node_id TEXT,
+                    attempt_id TEXT,
+                    owner TEXT,
+                    return_checkpoint TEXT,
+                    created_at_ns INTEGER NOT NULL
+                )""")
+                conn.execute(
+                    "INSERT INTO lead_decisions_nullable "
+                    "(id, graph_run_id, turn_id, action, reason, node_id, "
+                    "attempt_id, created_at_ns) "
+                    "SELECT id, graph_run_id, turn_id, action, reason, node_id, "
+                    "attempt_id, created_at_ns FROM lead_decisions"
+                )
+                conn.execute("DROP TABLE lead_decisions")
+                conn.execute(
+                    "ALTER TABLE lead_decisions_nullable RENAME TO lead_decisions"
+                )
+            else:
+                for column in ("owner", "return_checkpoint"):
+                    if column not in info:
+                        conn.execute(
+                            f"ALTER TABLE lead_decisions ADD COLUMN {column} TEXT"
+                        )
             for decision in dispositions:
                 if not isinstance(decision, dict):
                     raise ValueError("decision must be an object")
@@ -582,11 +621,48 @@ class GraphRuntimeStore:
                 )
             for decision in dispositions:
                 conn.execute(
-                    "INSERT INTO lead_decisions(graph_run_id, turn_id, action, reason, node_id, attempt_id, created_at_ns) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (graph_run_id, decision["turn_id"], decision["action"],
+                    "INSERT INTO lead_decisions("
+                    "graph_run_id, turn_id, action, reason, node_id, attempt_id, "
+                    "owner, return_checkpoint, created_at_ns"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (graph_run_id, decision.get("turn_id"), decision["action"],
                      decision["reason"], decision.get("node_id"),
-                     decision.get("attempt_id"), time.time_ns())
+                     decision.get("attempt_id"), decision.get("owner"),
+                     decision.get("return_checkpoint"), time.time_ns())
                 )
+
+    def get_latest_node_decisions(self, graph_run_id: str) -> dict[str, dict[str, Any]]:
+        """Return last audited Lead decision per node after process restarts."""
+        run_id = _required_id(graph_run_id, "graph_run_id")
+        with self._connect() as conn:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='lead_decisions'"
+            ).fetchone() is None:
+                return {}
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(lead_decisions)"
+                ).fetchall()
+            }
+            # Older databases are read-only compatible until the next write
+            # migrates the historic non-nullable decision audit schema.
+            extras = (
+                "owner, return_checkpoint" if "owner" in columns
+                and "return_checkpoint" in columns
+                else "NULL AS owner, NULL AS return_checkpoint"
+            )
+            rows = conn.execute(
+                "SELECT node_id, action, turn_id, attempt_id, reason, "
+                + extras + " FROM lead_decisions WHERE graph_run_id = ? "
+                "ORDER BY id DESC", (run_id,),
+            ).fetchall()
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            node_id = row["node_id"]
+            if node_id and node_id not in latest:
+                latest[node_id] = dict(row)
+        return latest
 
     def reconcile_graph(
         self,
