@@ -184,6 +184,36 @@ def test_restart_fails_closed_for_running_wave_and_preserves_attempt(tmp_path):
     assert len(restarted.store.list_attempts(run_id, "B1")) == 1
 
 
+def test_restart_finishes_quiescent_wave_without_restarting_attempt(tmp_path):
+    """Crash after attempt finishes but before close_wave does not strand the graph."""
+    path = tmp_path / "graph.sqlite3"
+    original = make_runtime(path)
+    run_id = original.start_graph(
+        make_graph(), repository_names={"backend", "frontend"},
+    )["graph_run_id"]
+    attempt_id = original.store.start_attempt(run_id, "B1", "wave-finished")
+    original.store.finish_attempt(
+        attempt_id, runtime_state="settled",
+        result={"state": "settled", "agent_response": "Persisted Peer result"},
+        session_id="session_B1", turn_id="turn_B1",
+    )
+    before = original.store.get_run(run_id)
+    assert before["current_wave_id"] == "wave-finished"
+
+    restarted = make_runtime(path)
+    current = restarted.get_graph(run_id)
+    assert current["graph_state"] == "awaiting_review"
+    assert current["current_wave_id"] is None
+    assert current["revision"] == before["revision"] + 1
+    assert len(restarted.store.list_attempts(run_id, "B1")) == 1
+    assert restarted.get_node_reviews(
+        run_id, [("B1", attempt_id)]
+    )["reviews"][0]["result"]["agent_response"] == "Persisted Peer result"
+    # Idempotent if a surviving caller tries to close the same wave.
+    restarted.store.close_wave(run_id, "wave-finished")
+    assert restarted.get_graph(run_id)["revision"] == current["revision"]
+
+
 def test_corrupt_or_legacy_graph_definition_fails_closed(tmp_path):
     path = tmp_path / "graph.sqlite3"
     runtime = make_runtime(path)
