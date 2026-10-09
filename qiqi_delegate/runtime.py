@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import shutil
@@ -37,10 +36,14 @@ class DelegateRuntime:
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = self.state / "qiqi_delegate.sqlite3"
         self.herdr_bin = os.environ.get("QIQI_HERDR_BIN", "herdr")
-        self.herdr_session = os.environ.get(
-            "QIQI_HERDR_SESSION",
-            "qiqi-" + hashlib.sha256(str(self.root).encode()).hexdigest()[:12],
-        )
+        # By default use the Herdr server already selected by the caller:
+        # HERDR_SOCKET_PATH (inside a Herdr pane) or HERDR_SESSION/default.
+        # Forcing --session would bypass that socket and create a dead namespace.
+        explicit_session = os.environ.get("QIQI_HERDR_SESSION")
+        self.herdr_session = explicit_session.strip() if explicit_session is not None else None
+        if explicit_session is not None and not self.herdr_session:
+            raise ValueError("QIQI_HERDR_SESSION must be non-empty when set")
+        self._herdr_server_lock = asyncio.Lock()
         self._ensure_db()
 
     def _connect(self):
@@ -166,8 +169,59 @@ class DelegateRuntime:
             elif entry["repository"] != repository or entry["adapter"] != adapter:
                 raise RuntimeError("native session is owned by another repository/agent")
 
+    def _herdr_argv(self, *args: str) -> list[str]:
+        argv = [self.herdr_bin]
+        if self.herdr_session:
+            argv.extend(("--session", self.herdr_session))
+        argv.extend(args)
+        return argv
+
+    async def _ensure_herdr_server(self) -> None:
+        """Reuse the active Herdr server; launch headless only when absent.
+
+        'herdr session attach' is an interactive TUI launch and is forbidden
+        in nested Herdr panes. 'herdr server' is the headless server command.
+        """
+        status, _, _ = await self._run("status", "server", check=False, timeout=10)
+        if status == 0:
+            return
+        async with self._herdr_server_lock:
+            status, _, _ = await self._run("status", "server", check=False, timeout=10)
+            if status == 0:
+                return
+            # Detached headless Herdr stays alive after the MCP stdio process
+            # exits. Do not launch the interactive Herdr client/attach command.
+            server = await asyncio.create_subprocess_exec(
+                *self._herdr_argv("server"),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=(os.name == "posix"),
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                status, _, _ = await self._run("status", "server",
+                                               check=False, timeout=5)
+                if status == 0:
+                    return
+                if server.returncode is not None:
+                    break
+                await asyncio.sleep(0.1)
+            if server.returncode is None:
+                server.terminate()
+                try:
+                    await asyncio.wait_for(server.wait(), 3)
+                except TimeoutError:
+                    server.kill()
+                    await server.wait()
+            raise RuntimeError(
+                "Herdr headless server did not become ready. "
+                "Check 'herdr status server', Herdr logs, and HERDR_SOCKET_PATH; "
+                "do not run 'herdr session attach' from a nested Herdr pane."
+            )
+
     async def _run(self, *args: str, timeout=60, check=True):
-        argv = [self.herdr_bin, "--session", self.herdr_session, *args]
+        argv = self._herdr_argv(*args)
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL,
@@ -316,6 +370,7 @@ class DelegateRuntime:
                 sink = Path(td)
                 os.chmod(sink, 0o700)
                 nonce = uuid.uuid4().hex
+                await self._ensure_herdr_server()
                 top = await self._json("workspace", "create", "--cwd", str(repos[repository]),
                                        "--label", f"qiqi:{repository}:{turn_id[:8]}", "--no-focus")
                 workspace_id = top["workspace"]["workspace_id"]
