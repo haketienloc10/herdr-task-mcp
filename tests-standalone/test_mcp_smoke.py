@@ -93,6 +93,66 @@ def test_failed_headless_server_readiness_reaps_detached_process(tmp_path, monke
     ]
 
 
+@pytest.mark.parametrize("cancel_during_reap", [False, True])
+def test_cancelled_herdr_command_always_kills_and_reaps(
+    tmp_path, monkeypatch, cancel_during_reap,
+):
+    """Cancellation, including a second cancellation during cleanup, cannot orphan children."""
+    rt = DelegateRuntime(tmp_path)
+
+    async def scenario():
+        first_communicate = asyncio.Event()
+        reaping = asyncio.Event()
+        allow_reaping = asyncio.Event()
+
+        class HangingChild:
+            returncode = None
+            killed = False
+            reaped = False
+            communications = 0
+
+            def kill(self):
+                self.killed = True
+
+            async def communicate(self):
+                self.communications += 1
+                if self.communications == 1:
+                    first_communicate.set()
+                    await asyncio.Event().wait()
+                reaping.set()
+                await allow_reaping.wait()
+                self.reaped = True
+                self.returncode = -9
+                return b"", b""
+
+        child = HangingChild()
+
+        async def spawn(*argv, **kwargs):
+            assert argv[-2:] == ("status", "server")
+            return child
+
+        monkeypatch.setattr(
+            "qiqi_delegate.runtime.asyncio.create_subprocess_exec", spawn,
+        )
+        work = asyncio.create_task(rt._run("status", "server", timeout=60))
+        await asyncio.wait_for(first_communicate.wait(), 2)
+        work.cancel()
+        await asyncio.wait_for(reaping.wait(), 2)
+        assert child.killed and not child.reaped
+        if cancel_during_reap:
+            work.cancel()  # Repeated cancellation must not cancel the reaper.
+            await asyncio.sleep(0)
+        allow_reaping.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(work, 2)
+        assert child.killed
+        assert child.reaped
+        assert child.communications == 2
+        assert child.returncode == -9
+
+    asyncio.run(scenario())
+
+
 def test_herdr_command_asyncio_timeout_kills_and_reaps_child(tmp_path, monkeypatch):
     """Python 3.10 asyncio.TimeoutError must reach subprocess cleanup."""
     rt = DelegateRuntime(tmp_path)
