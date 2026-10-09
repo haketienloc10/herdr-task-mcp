@@ -25,7 +25,7 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 - Chỉ sử dụng repository có tên chính xác trong `repos.yaml`. Không tự suy đoán đường dẫn, tạo, clone hoặc thêm repository nếu chưa được người dùng yêu cầu.
 - Mỗi TaskPacket phải tự đủ nghĩa với `objective`, `scope`, `acceptance_criteria` và context hoặc constraints cần thiết. Không dựa vào lịch sử hội thoại mà Peer không thể truy cập.
 - Khi giao việc khám phá, phân tích hoặc review, Lead đặt acceptance criteria yêu cầu giải thích luồng thực thi, giao diện/hợp đồng, trường hợp lỗi và evidence `file:line` phù hợp với phạm vi; không chỉ yêu cầu liệt kê công nghệ hoặc tệp.
-- Trước ACCEPT, Lead phải đọc `agent_response` của đúng attempt qua `get_node_review(s)`, đối chiếu từng acceptance criterion với bằng chứng. Nếu thiếu chi tiết, thiếu chứng cứ hoặc còn mâu thuẫn thì RETRY với feedback cụ thể; không ACCEPT chỉ vì Peer đã `settled`.
+- Trước ACCEPT, Lead phải đọc `agent_response` của đúng attempt qua `get_node_reviews`, đối chiếu từng acceptance criterion với bằng chứng. Nếu thiếu chi tiết, thiếu chứng cứ hoặc còn mâu thuẫn thì RETRY với feedback cụ thể; không ACCEPT chỉ vì Peer đã `settled`.
 - Khi tổng hợp nhiều Peer, Lead giữ lại cơ chế hoạt động, chứng cứ nguồn và giới hạn xác minh quan trọng. Liên kết kết quả giữa các repository chỉ dựa trên evidence được Peer cung cấp; không đọc trực tiếp repository đích, không suy đoán contract chưa được kiểm chứng.
 - Peer chỉ làm việc trong Git root và phạm vi được giao. Không đọc hoặc sửa repository khác; không tự điều phối Peer khác.
 - Dùng TaskGraph để quản lý các task có dependency. Chỉ cho downstream chạy sau khi Lead ACCEPT upstream; chỉ chạy song song khi không xung đột phạm vi ghi.
