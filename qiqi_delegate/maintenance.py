@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.runtime import DelegateRuntime
+from qiqi_delegate.task_graph_store import GraphRuntimeStore
 
 
 def _validated_runtime(workspace: Path, repository: str) -> DelegateRuntime:
@@ -96,6 +97,72 @@ def release_stale_claim(
     return {"repository": repository, "claim_id": claim_id, "released": True}
 
 
+def show_attempt(
+    *,
+    workspace: Path,
+    repository: str,
+    graph_run_id: str,
+    attempt_id: str,
+) -> dict[str, Any]:
+    """Inspect a persisted attempt before attempting manual recovery."""
+    runtime = _validated_runtime(workspace, repository)
+    store = GraphRuntimeStore(runtime.db)
+    graph = store.load_graph(graph_run_id)
+    attempt = store.get_attempt(attempt_id)
+    if attempt is None or attempt["graph_run_id"] != graph_run_id:
+        raise RuntimeError("no exact attempt exists in the requested graph run")
+    matching = [
+        node for node in graph.nodes
+        if node.node_id == attempt["node_id"] and node.repository == repository
+    ]
+    if len(matching) != 1:
+        raise RuntimeError("attempt is not owned by the registered repository")
+    active = store.get_run(graph_run_id)
+    with runtime._connect() as db:
+        holder = db.execute(
+            "SELECT claim_id FROM write_claims WHERE repository = ?",
+            (repository,),
+        ).fetchone()
+    return {
+        "graph_run_id": graph_run_id,
+        "wave_id": attempt["wave_id"],
+        "node_id": attempt["node_id"],
+        "attempt_id": attempt_id,
+        "repository": repository,
+        "runtime_state": attempt["runtime_state"],
+        "dispatch_state": attempt["dispatch_state"],
+        "active_wave_id": active["current_wave_id"] if active else None,
+        "write_claim_id": holder["claim_id"] if holder else None,
+    }
+
+
+def recover_interrupted_attempt(
+    *,
+    workspace: Path,
+    repository: str,
+    graph_run_id: str,
+    wave_id: str,
+    node_id: str,
+    attempt_id: str,
+    worker_termination_confirmed: bool,
+) -> dict[str, Any]:
+    """Fail closed unless an operator attests the old worker has terminated."""
+    if worker_termination_confirmed is not True:
+        raise ValueError(
+            "refusing attempt recovery: verify worker termination first and "
+            "pass --worker-termination-confirmed"
+        )
+    runtime = _validated_runtime(workspace, repository)
+    return GraphRuntimeStore(runtime.db).recover_interrupted_attempt(
+        graph_run_id=graph_run_id,
+        wave_id=wave_id,
+        node_id=node_id,
+        attempt_id=attempt_id,
+        repository=repository,
+        worker_termination_confirmed=worker_termination_confirmed,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Operator-only QiQi maintenance; not an MCP tool",
@@ -118,15 +185,55 @@ def main(argv: list[str] | None = None) -> int:
         help="I verified that the old Herdr worker is no longer running",
     )
 
+    attempt = actions.add_parser(
+        "show-attempt", help="Inspect one persisted graph attempt and its wave",
+    )
+    attempt.add_argument("--workspace", required=True, type=Path)
+    attempt.add_argument("--repository", required=True)
+    attempt.add_argument("--graph-run-id", required=True)
+    attempt.add_argument("--attempt-id", required=True)
+
+    recover = actions.add_parser(
+        "recover-attempt",
+        help="Terminalize one exact interrupted attempt after verified worker termination",
+    )
+    recover.add_argument("--workspace", required=True, type=Path)
+    recover.add_argument("--repository", required=True)
+    recover.add_argument("--graph-run-id", required=True)
+    recover.add_argument("--wave-id", required=True)
+    recover.add_argument("--node-id", required=True)
+    recover.add_argument("--attempt-id", required=True)
+    recover.add_argument(
+        "--worker-termination-confirmed", action="store_true",
+        help="I verified the old worker stopped and released any repository write claim",
+    )
+
     args = parser.parse_args(argv)
     try:
         if args.action == "show-claim":
             output = show_claim(workspace=args.workspace, repository=args.repository)
-        else:
+        elif args.action == "release-claim":
             output = release_stale_claim(
                 workspace=args.workspace,
                 repository=args.repository,
                 claim_id=args.claim_id,
+                worker_termination_confirmed=args.worker_termination_confirmed,
+            )
+        elif args.action == "show-attempt":
+            output = show_attempt(
+                workspace=args.workspace,
+                repository=args.repository,
+                graph_run_id=args.graph_run_id,
+                attempt_id=args.attempt_id,
+            )
+        else:
+            output = recover_interrupted_attempt(
+                workspace=args.workspace,
+                repository=args.repository,
+                graph_run_id=args.graph_run_id,
+                wave_id=args.wave_id,
+                node_id=args.node_id,
+                attempt_id=args.attempt_id,
                 worker_termination_confirmed=args.worker_termination_confirmed,
             )
     except (ValueError, RuntimeError, OSError) as exc:
