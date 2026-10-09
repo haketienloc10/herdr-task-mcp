@@ -238,3 +238,87 @@ def test_recover_one_attempt_keeps_wave_open_until_all_siblings_finish(tmp_path)
         assert db.execute(
             "SELECT count(*) FROM graph_attempt_recovery_audit"
         ).fetchone()[0] == 2
+
+def test_renaming_registry_entry_cannot_bypass_canonical_claim(tmp_path):
+    runtime = setup_workspace(tmp_path)
+    runtime._claim("backend", "turn:old-worker")
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n"
+        "  - name: renamed\n    path: backend\n"
+        "  - name: frontend\n    path: frontend\n"
+    )
+    renamed = DelegateRuntime(tmp_path)
+    with pytest.raises(RuntimeError, match="busy"):
+        renamed._claim("renamed", "turn:new-worker")
+    with renamed._connect() as db:
+        rows = db.execute(
+            "SELECT repository, repository_root FROM write_claims"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["repository"] == "backend"
+        assert rows[0]["repository_root"] == str((tmp_path / "backend").resolve())
+
+    # The currently registered alias can inspect/release the old holder only
+    # by matching the same canonical root and exact original claim ID.
+    assert show_claim(
+        workspace=tmp_path, repository="renamed"
+    )["claim_id"] == "turn:old-worker"
+    with pytest.raises(RuntimeError, match="claim_id mismatch"):
+        release_stale_claim(
+            workspace=tmp_path, repository="renamed",
+            claim_id="turn:not-old", worker_termination_confirmed=True,
+        )
+    release_stale_claim(
+        workspace=tmp_path, repository="renamed",
+        claim_id="turn:old-worker", worker_termination_confirmed=True,
+    )
+    renamed._claim("renamed", "turn:new-worker")
+    with renamed._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM write_claims").fetchone()[0] == 1
+        assert db.execute(
+            "SELECT repository FROM write_claims"
+        ).fetchone()[0] == "renamed"
+
+
+def test_unmapped_legacy_claim_blocks_writes_until_exact_manual_recovery(tmp_path):
+    runtime = setup_workspace(tmp_path)
+    # Model an active claim from the previous version, whose repository root
+    # was never recorded. A name may have changed since this row was written.
+    with runtime._connect() as db:
+        db.execute("DROP TABLE write_claims")
+        db.execute(
+            "CREATE TABLE write_claims (repository TEXT PRIMARY KEY, "
+            "claim_id TEXT NOT NULL, created_at_ns INTEGER NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO write_claims VALUES ('backend', 'turn:legacy', 1)"
+        )
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n"
+        "  - name: renamed\n    path: backend\n"
+        "  - name: frontend\n    path: frontend\n"
+    )
+    migrated = DelegateRuntime(tmp_path)
+    with migrated._connect() as db:
+        row = db.execute(
+            "SELECT repository_root FROM write_claims "
+            "WHERE repository = 'backend'"
+        ).fetchone()
+        assert row[0] is None
+
+    with pytest.raises(RuntimeError, match="unmapped legacy write claim"):
+        migrated._claim("renamed", "turn:new")
+    # Even unrelated repositories are held during ambiguous legacy state.
+    with pytest.raises(RuntimeError, match="unmapped legacy write claim"):
+        migrated._claim("frontend", "turn:other")
+    assert show_claim(
+        workspace=tmp_path, repository="backend"
+    )["claim_id"] == "turn:legacy"
+    release_stale_claim(
+        workspace=tmp_path, repository="backend",
+        claim_id="turn:legacy", worker_termination_confirmed=True,
+    )
+    migrated._claim("renamed", "turn:new")
+    with migrated._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM write_claims").fetchone()[0] == 1
+
