@@ -1,9 +1,11 @@
 """Standalone QiQi MCP tools: delegation and TaskGraph; no SLP/Supervisor."""
 from __future__ import annotations
 
+from functools import wraps
 from typing import Any, Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from qiqi_delegate.core import build_task_packet
 from qiqi_delegate.runtime import DelegateRuntime, workspace_root
@@ -74,10 +76,44 @@ mcp = MCPServer(
     ),
 )
 
+def _public_tool_errors(func):
+    """Expose actionable input/runtime failures instead of 'Error executing tool'."""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except ToolError:
+            raise
+        except (ValueError, RuntimeError) as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            lowered = detail.lower()
+            if "repos.yaml" in lowered or "repository" in lowered:
+                code = "repository_registry_invalid"
+                action = (
+                    "check repos.yaml paths against existing exact Git roots; "
+                    "paths inside the workspace or to registered sibling repos "
+                    "under the workspace parent are supported"
+                )
+            elif "route" in lowered or "agent-routing.yaml" in lowered:
+                code = "routing_invalid"
+                action = "check agent-routing.yaml for an exact supported route and CLI arguments"
+            elif "herdr" in lowered or "agent" in lowered:
+                code = "worker_runtime_failed"
+                action = "check the Herdr CLI, integration status, agent pane and runtime logs"
+            else:
+                code = "delegation_invalid"
+                action = "inspect the reported input, task state or runtime stage and retry"
+            raise ToolError(
+                f"code={code}; {detail[:1200]}; action={action}"
+            ) from exc
+    return wrapper
+
+
 def _to_packet(value: Packet):
     return build_task_packet(**value.model_dump(exclude_none=True))
 
 @mcp.tool()
+@_public_tool_errors
 async def delegate_repo_task(
     repository: Annotated[str, Field(description="Exact repos.yaml name")],
     route: str,
@@ -100,22 +136,26 @@ async def delegate_repo_task(
                                   packet=packet, session_id=session_id)
 
 @mcp.tool()
+@_public_tool_errors
 async def start_graph(graph: Graph) -> dict[str, Any]:
     """Validate and persist a dependency DAG. Does not launch any Peer."""
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
     return graph_runtime.start_graph(authored, repository_names=runtime.repos().keys())
 
 @mcp.tool()
+@_public_tool_errors
 async def get_graph(graph_run_id: str) -> dict[str, Any]:
     """Return compact TaskGraph state and exact review locators."""
     return graph_runtime.get_graph(graph_run_id)
 
 @mcp.tool()
+@_public_tool_errors
 async def get_node_review(graph_run_id: str, node_id: str, attempt_id: str) -> dict[str, Any]:
     """Load one exact attempt result only when it requires Lead review."""
     return graph_runtime.get_node_review(graph_run_id, node_id, attempt_id)
 
 @mcp.tool()
+@_public_tool_errors
 async def get_node_reviews(graph_run_id: str, reviews: list[dict[str, str]],
                            expected_revision: int | None = None) -> dict[str, Any]:
     """Load at most eight exact review locators in a single bounded call."""
@@ -131,6 +171,7 @@ async def _graph_execute(node: GraphNode, session_id: str | None = None) -> dict
                                   packet=node.task_packet, session_id=session_id)
 
 @mcp.tool()
+@_public_tool_errors
 async def delegate_next(graph_run_id: str) -> dict[str, Any]:
     """Execute one conflict-free wave; dependent nodes require ACCEPT."""
     async def start(node: GraphNode):
@@ -140,6 +181,7 @@ async def delegate_next(graph_run_id: str) -> dict[str, Any]:
     return await graph_runtime.delegate_next(graph_run_id, executor=start, resume_executor=resume)
 
 @mcp.tool()
+@_public_tool_errors
 async def submit_decisions(graph_run_id: str, decisions: list[Decision],
                            expected_revision: int) -> dict[str, Any]:
     """Record Lead ACCEPT/RETRY/REPLAN/BLOCK for exact attempts."""
@@ -175,6 +217,7 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
     )
 
 @mcp.tool()
+@_public_tool_errors
 async def reconcile_graph(graph_run_id: str, graph: Graph,
                           expected_revision: int) -> dict[str, Any]:
     """Apply a new explicit authored DAG with revision protection."""
@@ -185,6 +228,7 @@ async def reconcile_graph(graph_run_id: str, graph: Graph,
     )
 
 @mcp.tool()
+@_public_tool_errors
 async def release_write_claim(repository: str, claim_id: str,
                               worker_termination_confirmed: bool) -> dict[str, Any]:
     """Manual recovery only. Verify old Herdr Peer is stopped before releasing claim."""
