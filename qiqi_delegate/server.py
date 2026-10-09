@@ -102,7 +102,16 @@ def _public_tool_errors(func):
         except (ValueError, RuntimeError) as exc:
             detail = str(exc).strip() or type(exc).__name__
             lowered = detail.lower()
-            if "repos.yaml" in lowered or "repository" in lowered:
+            if "agent_not_ready" in lowered:
+                code = "agent_startup_blocked"
+                action = (
+                    "inspect the preserved Herdr startup pane using the exact "
+                    "agent name and workspace ID in the error; handle any "
+                    "interactive trust/auth prompt manually. After closing "
+                    "the workspace and confirming the worker stopped, release "
+                    "the recorded repository claim before retrying."
+                )
+            elif "repos.yaml" in lowered or "repository" in lowered:
                 code = "repository_registry_invalid"
                 action = (
                     "check repos.yaml paths against existing exact Git roots; "
@@ -141,7 +150,7 @@ def _check_graph_routes(authored) -> None:
 async def workspace_info() -> dict[str, Any]:
     """List registered repository names, agent route names and selected Herdr session.
 
-    Call this before start_graph or delegate_repo_task. Do not guess route names.
+    Call this before start_graph or delegate_repo_task. Pass exact route_names keys, never agent kinds.
     """
     repositories = runtime.repos()
     cfg = runtime._load_yaml("agent-routing.yaml")
@@ -155,6 +164,11 @@ async def workspace_info() -> dict[str, Any]:
     return {
         "repositories": sorted(repositories),
         "routes": summary,
+        "route_names": sorted(summary),
+        "route_usage": (
+            "Use a key from route_names as the route argument, "
+            "not an agent kind value from routes (for example, codex)."
+        ),
         "herdr_session": runtime.herdr_session or "inherited/default",
         "herdr_socket_env_present": bool(os.environ.get("HERDR_SOCKET_PATH")),
     }
