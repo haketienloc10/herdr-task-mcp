@@ -6,7 +6,7 @@ Python MCP độc lập để delegate Codex/Claude qua Herdr. Không cần agen
 
 Yêu cầu: Python >=3.10, Git, Herdr CLI có Codex/Claude integration.
 
-Chạy tại workspace cha chứa frontend/ và backend/:
+Chạy tại workspace điều phối (`herdr-delegate-lab`). Git repo đích có thể nằm bên trong workspace hoặc là thư mục cùng cấp:
 
 ```bash
 mkdir -p .tools
@@ -44,14 +44,33 @@ Installer giữ nguyên mọi byte trước/sau marker, kể cả CRLF và kho�
 Chỉnh `repos.yaml`:
 
 ```yaml
+# Ví dụ: e2e-workspace/{herdr-delegate-lab,frontend,backend}
 repositories:
   - name: frontend
-    path: frontend
+    path: ../frontend
   - name: backend
-    path: backend
+    path: ../backend
 ```
 
-`repository` là name trong registry. `path` tương đối với workspace root và phải trỏ tới Git root; không cần có file QiQi nào trong repo con.
+`repository` là name trong registry. `path` luôn tương đối với `herdr-delegate-lab`, không phải đường dẫn tương đối với vị trí gọi MCP client. Runtime hỗ trợ Git repo nằm trong workspace (`frontend`) hoặc cùng cấp (`../frontend`). Target phải là **exact Git root**; không chấp nhận absolute path hoặc đường dẫn thoát khỏi thư mục cha của workspace. Không cần có file QiQi nào trong repo đích.
+
+## Kiểm tra trước khi delegate
+
+Chạy tại `herdr-delegate-lab` sau khi cấu hình `repos.yaml`:
+
+```bash
+.tools/herdr-task-mcp/.venv/bin/python - <<'PY'
+from pathlib import Path
+from qiqi_delegate.runtime import DelegateRuntime
+runtime = DelegateRuntime(Path.cwd())
+for name, git_root in runtime.repos().items():
+    print(f"{name}: {git_root}")
+PY
+```
+
+Đầu ra phải có hai exact Git root `frontend` và `backend`. Nếu registry sai, MCP trả lỗi `code=repository_registry_invalid` kèm lý do và hướng sửa, không còn chỉ báo `Error executing tool`.
+
+Kiểm tra Herdr riêng: `herdr status server` và `herdr integration status`. Không cần sửa hoặc cài MCP vào repo đích. `start_graph` chỉ lưu TaskGraph; `delegate_next` mới khởi động Peer. Với bài khám phá độc lập, dùng hai node không có `depends_on` để chạy cùng wave, rồi review từng response.
 
 ## Route và tham số agent
 
