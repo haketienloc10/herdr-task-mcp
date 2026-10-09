@@ -347,6 +347,33 @@ def render_task_prompt(packet: TaskPacket) -> str:
     if packet.known_unknowns:
         sections.append(f"## Known unknowns\n\n{_bullet_lines(packet.known_unknowns)}")
 
+    # Output quality applies to every repository task, without hard-coding
+    # any project or requiring a fixed, verbose report for trivial requests.
+    sections.append(
+        "## Evidence and response quality\n\n"
+        "- Answer the objective completely and proportionately. Do not stop at "
+        "a generic technology-stack overview if the task asks for discovery, "
+        "analysis, review, or architecture.\n"
+        "- For findings about code or configuration, cite repository-relative "
+        "file paths and relevant line numbers (path:line) when available; "
+        "identify the function or symbol and distinguish observed behavior "
+        "from inference. Never invent citations.\n"
+        "- For discovery or analysis, trace applicable entry points, control "
+        "and data flow, public interfaces/contracts, validation and failure "
+        "paths, state/storage, and relevant run/test commands. Explain "
+        "significant documentation-versus-code discrepancies and operational "
+        "risks; omit categories that do not apply.\n"
+        "- Supply enough implementation detail for a reviewer who cannot "
+        "open this repository to understand and verify important claims. "
+        "Explain cause and effect rather than listing filenames.\n"
+        "- Explicitly label what was inspected, what remains uncertain, "
+        "and whether tests were run. Do not imply tests passed if not run. "
+        "Do not change files or run prohibited commands.\n"
+        "- Structure a multi-part report into focused sections, and include "
+        "a concise synthesis of verified findings and important caveats. "
+        "Do not add filler or repeat the same evidence."
+    )
+
     sections.append(
         "## Repository execution boundary\n\n"
         "- Operate only inside the current Git root. Do not read or write sibling "
