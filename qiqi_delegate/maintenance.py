@@ -131,6 +131,10 @@ def show_attempt(
         "repository": repository,
         "runtime_state": attempt["runtime_state"],
         "dispatch_state": attempt["dispatch_state"],
+        "retry_plan": (
+            json.loads(attempt["retry_plan_json"])
+            if attempt.get("retry_plan_json") else None
+        ),
         "active_wave_id": active["current_wave_id"] if active else None,
         "write_claim_id": holder["claim_id"] if holder else None,
     }
