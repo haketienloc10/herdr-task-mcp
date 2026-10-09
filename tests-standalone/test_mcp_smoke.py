@@ -346,10 +346,10 @@ def test_native_ambiguous_capture_flows_into_graph(tmp_path, monkeypatch):
     repo.mkdir()
     subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
     (tmp_path / "repos.yaml").write_text(
-        "repositories:\\n  - name: backend\\n    path: backend\\n"
+        "repositories:\n  - name: backend\n    path: backend\n"
     )
     (tmp_path / "agent-routing.yaml").write_text(
-        "routes:\\n  codex-balanced:\\n    agent: codex\\n    args: []\\n"
+        "routes:\n  codex-balanced:\n    agent: codex\n    args: []\n"
     )
     rt = DelegateRuntime(tmp_path)
     monkeypatch.setattr("qiqi_delegate.runtime.shutil.which", lambda _: "/bin/true")
