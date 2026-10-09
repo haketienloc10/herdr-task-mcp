@@ -54,6 +54,11 @@ class Graph(BaseModel):
     model_config = ConfigDict(extra="forbid")
     nodes: list[Node] = Field(min_length=1)
 
+class ReviewLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: str
+    attempt_id: str
+
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str
@@ -82,11 +87,11 @@ mcp = MCPServer(
         "Lead owns technical acceptance. Native result hooks are the only answer source. "
         "No terminal scraping, Supervisor, or sibling repository reads. "
         "Call workspace_info first for registered repositories and route names. "
-        "For multiple nodes: start_graph, delegate_next, get_node_review(s), submit_decisions. "
+        "For multiple nodes: start_graph, delegate_next, get_node_reviews, submit_decisions. "
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
         "For discovery, analysis or review, author acceptance criteria requiring relevant "
         "file:line evidence, implementation/data flow and limitations, not just a summary. "
-        "Before ACCEPT, read the exact captured Peer response via get_node_review(s), "
+        "Before ACCEPT, read the exact captured Peer response via get_node_reviews, "
         "check evidence against the criteria and RETRY with targeted feedback if shallow. "
         "In the final answer, preserve concrete findings and citations across Peer reports; "
         "do not replace them with a generic high-level paraphrase. "
@@ -114,8 +119,8 @@ def _public_tool_errors(func):
                     "inspect the preserved Herdr startup pane using the exact "
                     "agent name and workspace ID in the error; handle any "
                     "interactive trust/auth prompt manually. After closing "
-                    "the workspace and confirming the worker stopped, release "
-                    "the recorded repository claim before retrying."
+                    "the workspace and confirming the worker stopped, arrange "
+                    "operator-side claim cleanup before retrying."
                 )
             elif "repos.yaml" in lowered or "repository" in lowered:
                 code = "repository_registry_invalid"
@@ -218,16 +223,11 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @_public_tool_errors
-async def get_node_review(graph_run_id: str, node_id: str, attempt_id: str) -> dict[str, Any]:
-    """Load one exact attempt result only when it requires Lead review."""
-    return graph_runtime.get_node_review(graph_run_id, node_id, attempt_id)
-
-@mcp.tool()
-@_public_tool_errors
-async def get_node_reviews(graph_run_id: str, reviews: list[dict[str, str]],
+async def get_node_reviews(graph_run_id: str,
+                           reviews: Annotated[list[ReviewLocator], Field(min_length=1, max_length=8)],
                            expected_revision: int | None = None) -> dict[str, Any]:
     """Load at most eight exact review locators in a single bounded call."""
-    locators = [(item["node_id"], item["attempt_id"]) for item in reviews]
+    locators = [(item.node_id, item.attempt_id) for item in reviews]
     return graph_runtime.get_node_reviews(
         graph_run_id, locators, expected_revision=expected_revision
     )
@@ -300,15 +300,6 @@ async def reconcile_graph(graph_run_id: str, graph: Graph,
         graph_run_id, authored, repository_names=runtime.repos().keys(),
         expected_revision=expected_revision,
     )
-
-@mcp.tool()
-@_public_tool_errors
-async def release_write_claim(repository: str, claim_id: str,
-                              worker_termination_confirmed: bool) -> dict[str, Any]:
-    """Manual recovery only. Verify old Herdr Peer is stopped before releasing claim."""
-    if not worker_termination_confirmed:
-        raise ValueError("must confirm old writer has terminated or been abandoned")
-    return {"released": runtime.release_claim(repository, claim_id)}
 
 def main():
     mcp.run()
