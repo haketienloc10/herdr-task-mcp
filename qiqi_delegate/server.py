@@ -84,6 +84,12 @@ mcp = MCPServer(
         "Call workspace_info first for registered repositories and route names. "
         "For multiple nodes: start_graph, delegate_next, get_node_review(s), submit_decisions. "
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
+        "For discovery, analysis or review, author acceptance criteria requiring relevant "
+        "file:line evidence, implementation/data flow and limitations, not just a summary. "
+        "Before ACCEPT, read the exact captured Peer response via get_node_review(s), "
+        "check evidence against the criteria and RETRY with targeted feedback if shallow. "
+        "In the final answer, preserve concrete findings and citations across Peer reports; "
+        "do not replace them with a generic high-level paraphrase. "
         "If a Peer cannot start because Herdr is unavailable, review the runtime error "
         "and do not inspect or implement in the target repository directly. "
         "For block/replan decisions provide owner and return_checkpoint; "
@@ -246,7 +252,7 @@ async def delegate_next(graph_run_id: str) -> dict[str, Any]:
 @_public_tool_errors
 async def submit_decisions(graph_run_id: str, decisions: list[Decision],
                            expected_revision: int) -> dict[str, Any]:
-    """Record Lead decisions for exact attempts.
+    """Record Lead decisions after semantic review of exact captured Peer reports.
 
     For action='block' or 'replan', set owner and return_checkpoint.
     Only action='retry' permits feedback or resume_session.
