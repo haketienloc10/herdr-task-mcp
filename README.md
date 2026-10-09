@@ -78,6 +78,23 @@ Mặc định, MCP sử dụng Herdr session mà tiến trình Lead đang dùng:
 
 Không chạy `herdr session attach` từ một Codex/Claude đang ở trong Herdr; Herdr chặn nested TUI theo mặc định. Không bật `allow_nested` chỉ để khắc phục lỗi `server_not_running` của MCP. Khi muốn dùng một Herdr session riêng, có thể cấu hình rõ biến môi trường `QIQI_HERDR_SESSION` **ở MCP server**. Nếu không cấu hình, runtime sẽ dùng session hiện có. Khi lỗi khởi động kéo dài, kiểm tra `herdr status server`, đường dẫn socket và Herdr logs.
 
+## Chọn Herdr session theo workspace
+
+MCP chạy bên ngoài Herdr pane có thể không nhận `HERDR_SOCKET_PATH`. Khi Herdr sử dụng **named session**, không dùng socket default. Chỉ định session đang chạy trong cấu hình MCP thuộc workspace bằng installer, không sửa cấu hình global:
+
+```bash
+herdr --session <SESSION_NAME> status server
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.install \
+  --workspace "$PWD" --herdr-session <SESSION_NAME>
+```
+
+Ví dụ nếu Herdr server có socket `~/.config/herdr/sessions/qiqi-delegate/herdr.sock` thì `<SESSION_NAME>` là `qiqi-delegate`. Installer ghi `QIQI_HERDR_SESSION` vào `.codex/config.toml` và `.mcp.json` **của workspace**. Lần cài sau không truyền flag sẽ giữ lại tên session đã chọn. `AGENTS.md` chỉ được cập nhật trong marker do MCP quản lý. Không chạm vào repository đích.
+
+Khởi động lại MCP client sau khi đổi cấu hình. Kiểm tra tên session ở `.codex/config.toml` và xác minh `herdr --session <SESSION_NAME> status server`. Khi đã chọn session đúng, không cần mở nested Herdr hoặc bật `allow_nested`.
+
+## Danh sách repository và route
+
+Gọi MCP `workspace_info` **trước** `start_graph` hoặc `delegate_repo_task`. Tool này trả danh sách tên repository và route đã khai báo, cùng thông tin session Herdr. Không dùng tên route tự suy đoán. `start_graph` và `reconcile_graph` kiểm tra tất cả route trước khi ghi graph, nên route sai không tạo failed attempt.
 ## Decision contract và xử lý lỗi
 
 - `start_graph` chỉ tạo TaskGraph. `delegate_next` mới chạy một wave của Peer.
@@ -111,7 +128,7 @@ Human → Lead QiQi → TaskPacket / TaskGraph → qiqi_delegate → Herdr
 
 **Direct Delegation:** `delegate_repo_task` nhận `repository`, `route`, `objective`, `scope`, `acceptance_criteria` và các field tùy chọn. Không có `session_id` thì START; có exact `session_id` được sở hữu hợp lệ thì RESUME.
 
-**TaskGraph:** `start_graph` → `delegate_next` → `get_node_review` (hoặc `get_node_reviews`) → `submit_decisions`. Có thể dùng `get_graph` hoặc `reconcile_graph` khi cần. Downstream chỉ chạy sau khi upstream được Lead ACCEPT. Tối đa một writer cùng repo trong một wave.
+**TaskGraph:** `workspace_info` → `start_graph` → `delegate_next` → `get_node_review` (hoặc `get_node_reviews`) → `submit_decisions`. Có thể dùng `get_graph` hoặc `reconcile_graph` khi cần. Downstream chỉ chạy sau khi upstream được Lead ACCEPT. Tối đa một writer cùng repo trong một wave.
 
 **Native result:** mỗi delegated turn có sink/nonce riêng, lấy final response từ Stop/StopFailure hook thay vì Herdr screen. SQLite tại `.herdr-task-mcp/qiqi_delegate.sqlite3` giữ session, turn và write claim. Khi cleanup không xác nhận, claim còn hiệu lực và phải được giải phóng thủ công sau khi worker cũ đã dừng.
 
