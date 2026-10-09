@@ -118,20 +118,21 @@ herdr --session <SESSION_NAME> workspace close <WORKSPACE_ID>
 Sau khi đã **xác nhận agent cũ đã kết thúc** và workspace cũ đã đóng, người vận hành dùng CLI bảo trì riêng. **Không chạy lệnh này khi worker còn sống hoặc khi chưa xác minh được trạng thái worker.** Có thể xem claim đang giữ repository bằng:
 
 ```bash
-qiqi-delegate-admin show-claim --workspace /absolute/path/to/workspace --repository backend
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.maintenance \
+  show-claim --workspace "$PWD" --repository backend
 ```
 
 Sau khi đối chiếu đúng `claim_id` trong lỗi và xác nhận không còn Herdr worker đang ghi vào repository:
 
 ```bash
-qiqi-delegate-admin release-claim \
-  --workspace /absolute/path/to/workspace \
+.tools/herdr-task-mcp/.venv/bin/python -m qiqi_delegate.maintenance \
+  release-claim --workspace "$PWD" \
   --repository backend \
   --claim-id 'turn:<exact-id-from-error>' \
   --worker-termination-confirmed
 ```
 
-Có thể gọi `python -m qiqi_delegate.maintenance` với các tham số tương tự. CLI không nằm trong MCP; chỉ xóa đúng cặp `repository`/`claim_id`, từ chối claim không khớp và ghi audit vào SQLite khi giải phóng thành công. Cờ confirmation chỉ là xác nhận của người vận hành, **không tự chứng minh worker đã dừng**. Không xóa SQLite, không dùng claim ID phỏng đoán và không sửa repository đích để khắc phục lỗi hạ tầng. Sau khi xử lý an toàn mới điều phối task lại.
+Hai ví dụ trên chạy **tại workspace điều phối** và sử dụng đúng Python của virtualenv cài MCP; **không cần activate virtualenv**. Nếu chạy từ thư mục khác, dùng đường dẫn tuyệt đối tới `.tools/herdr-task-mcp/.venv/bin/python` và `--workspace` trỏ đến workspace điều phối. Thông báo lỗi `agent_not_ready` cũng in sẵn lệnh đầy đủ với Python interpreter đang chạy MCP, workspace, repository và claim ID thực tế (không tự động chạy). CLI không nằm trong MCP; chỉ xóa đúng cặp `repository`/`claim_id`, từ chối claim không khớp và ghi audit vào SQLite khi giải phóng thành công. Cờ confirmation chỉ là xác nhận của người vận hành, **không tự chứng minh worker đã dừng**. Không xóa SQLite, không dùng claim ID phỏng đoán và không sửa repository đích để khắc phục lỗi hạ tầng. Sau khi xử lý an toàn mới điều phối task lại.
 
 Nếu `agent_not_ready` xảy ra, `get_node_reviews` hiển thị `failure_detail` thay vì chỉ có `executor_exception`, giúp Lead báo chính xác blocker cho người dùng. Việc Herdr yêu cầu xác nhận trust/auth không thể được CI mock loại bỏ hoàn toàn: cần xác minh E2E trên môi trường Herdr thực.
 
