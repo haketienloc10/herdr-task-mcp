@@ -239,6 +239,32 @@ def test_registered_sibling_git_roots_are_supported_without_child_install(tmp_pa
     assert set(initial["runnable_nodes"]) == {"front", "back"}
 
 
+def test_repository_registry_rejects_duplicate_git_root_aliases(tmp_path: Path):
+    """Logical aliases must not permit concurrent writers to one worktree."""
+    workspace = tmp_path / "control"
+    workspace.mkdir()
+    repo = tmp_path / "frontend"
+    setup_git(repo)
+    # Both spellings point to the identical canonical Git root.
+    (workspace / "repos.yaml").write_text(
+        "repositories:\n"
+        "  - name: frontend\n    path: ../frontend\n"
+        "  - name: frontend-alias\n    path: .././frontend\n"
+    )
+    rt = DelegateRuntime(workspace)
+    with pytest.raises(ValueError, match="same Git root"):
+        rt.repos()
+    # A symlink inside the permitted parent boundary must also be rejected.
+    (tmp_path / "frontend-link").symlink_to(repo, target_is_directory=True)
+    (workspace / "repos.yaml").write_text(
+        "repositories:\n"
+        "  - name: frontend\n    path: ../frontend\n"
+        "  - name: frontend-link\n    path: ../frontend-link\n"
+    )
+    with pytest.raises(ValueError, match="same Git root"):
+        rt.repos()
+
+
 def test_repository_registry_rejects_parent_escape_and_symlink(tmp_path: Path):
     scope = tmp_path / "project"
     scope.mkdir()
