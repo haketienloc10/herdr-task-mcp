@@ -102,6 +102,9 @@ def test_tool_errors_include_registry_reason_and_repair_action(tmp_path):
     (tmp_path / "repos.yaml").write_text(
         "repositories:\n  - name: frontend\n    path: ../../forbidden\n"
     )
+    (tmp_path / "agent-routing.yaml").write_text(
+        "routes:\n  codex-balanced:\n    agent: codex\n    args: []\n"
+    )
     script = """
 import asyncio
 from mcp.server.mcpserver.exceptions import ToolError
