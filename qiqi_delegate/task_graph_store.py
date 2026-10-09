@@ -213,34 +213,54 @@ class GraphRuntimeStore:
                 WHERE runtime_state = 'running';
             """
         )
-        columns = {
-            row["name"] if isinstance(row, sqlite3.Row) else row[1]
-            for row in conn.execute("PRAGMA table_info(graph_node_states)").fetchall()
-        }
-        run_columns = {
-            row["name"] if isinstance(row, sqlite3.Row) else row[1]
-            for row in conn.execute("PRAGMA table_info(graph_runs)").fetchall()
-        }
-        if "graph_json" not in run_columns:
-            conn.execute("ALTER TABLE graph_runs ADD COLUMN graph_json TEXT")
-        attempt_columns = {
-            row["name"] if isinstance(row, sqlite3.Row) else row[1]
-            for row in conn.execute("PRAGMA table_info(graph_attempts)").fetchall()
-        }
-        if "retry_plan_json" not in attempt_columns:
-            conn.execute("ALTER TABLE graph_attempts ADD COLUMN retry_plan_json TEXT")
-        if "dispatch_state" not in attempt_columns:
-            # Pre-upgrade attempts may already have external workers; treat
-            # them as dispatched, never auto-recover them as unstarted.
-            conn.execute(
-                "ALTER TABLE graph_attempts ADD COLUMN dispatch_state TEXT NOT NULL "
-                "DEFAULT 'dispatched' CHECK (dispatch_state IN ('prepared', 'dispatched'))"
-            )
-        if "active" not in columns:
-            conn.execute(
-                "ALTER TABLE graph_node_states ADD COLUMN active INTEGER NOT NULL "
-                "DEFAULT 1 CHECK (active IN (0, 1))"
-            )
+        def column_names(table: str) -> set[str]:
+            return {
+                row["name"] if isinstance(row, sqlite3.Row) else row[1]
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+
+        # A fast path avoids a write lock on every normal read. During a
+        # rolling upgrade, multiple processes may see missing columns here.
+        # They must re-read the schema *after* obtaining the SQLite write lock.
+        required = (
+            ("graph_runs", "graph_json"),
+            ("graph_attempts", "retry_plan_json"),
+            ("graph_attempts", "dispatch_state"),
+            ("graph_node_states", "active"),
+        )
+        if all(column in column_names(table) for table, column in required):
+            return
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Locking before the second inspection serializes competing
+            # migrations, including processes which read the old schema
+            # just before the first migrator committed its ALTER TABLE.
+            run_columns = column_names("graph_runs")
+            if "graph_json" not in run_columns:
+                conn.execute("ALTER TABLE graph_runs ADD COLUMN graph_json TEXT")
+
+            attempt_columns = column_names("graph_attempts")
+            if "retry_plan_json" not in attempt_columns:
+                conn.execute("ALTER TABLE graph_attempts ADD COLUMN retry_plan_json TEXT")
+            if "dispatch_state" not in attempt_columns:
+                # Pre-upgrade attempts may have external workers; default to
+                # dispatched rather than risking accidental re-execution.
+                conn.execute(
+                    "ALTER TABLE graph_attempts ADD COLUMN dispatch_state TEXT NOT NULL "
+                    "DEFAULT 'dispatched' CHECK (dispatch_state IN ('prepared', 'dispatched'))"
+                )
+
+            if "active" not in column_names("graph_node_states"):
+                conn.execute(
+                    "ALTER TABLE graph_node_states ADD COLUMN active INTEGER NOT NULL "
+                    "DEFAULT 1 CHECK (active IN (0, 1))"
+                )
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
 
     def create_run(
         self,
