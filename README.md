@@ -72,6 +72,20 @@ PY
 
 Kiểm tra Herdr riêng: `herdr status server` và `herdr integration status`. Không cần sửa hoặc cài MCP vào repo đích. `start_graph` chỉ lưu TaskGraph; `delegate_next` mới khởi động Peer. Với bài khám phá độc lập, dùng hai node không có `depends_on` để chạy cùng wave, rồi review từng response.
 
+## Herdr server: phiên hiện tại và headless fallback
+
+Mặc định, MCP sử dụng Herdr session mà tiến trình Lead đang dùng: `HERDR_SOCKET_PATH` nếu có, hoặc `HERDR_SESSION`/default. MCP **không** tự tạo session `qiqi-<hash>` tách biệt nữa. Nếu Herdr server chưa chạy, runtime thử khởi động `herdr server` ở chế độ headless và đợi socket sẵn sàng trước khi tạo workspace. Đây không phải lệnh mở giao diện.
+
+Không chạy `herdr session attach` từ một Codex/Claude đang ở trong Herdr; Herdr chặn nested TUI theo mặc định. Không bật `allow_nested` chỉ để khắc phục lỗi `server_not_running` của MCP. Khi muốn dùng một Herdr session riêng, có thể cấu hình rõ biến môi trường `QIQI_HERDR_SESSION` **ở MCP server**. Nếu không cấu hình, runtime sẽ dùng session hiện có. Khi lỗi khởi động kéo dài, kiểm tra `herdr status server`, đường dẫn socket và Herdr logs.
+
+## Decision contract và xử lý lỗi
+
+- `start_graph` chỉ tạo TaskGraph. `delegate_next` mới chạy một wave của Peer.
+- `get_node_review(s)` cung cấp runtime state và evidence. `failed` vì hạ tầng không được xem là kết quả do Peer tạo; không ACCEPT.
+- `submit_decisions(action="block")` yêu cầu `owner` và `return_checkpoint`. **Không** truyền `feedback` cho `block`, vì `feedback` chỉ dùng cho `retry`.
+- `submit_decisions(action="retry")` cho phép `feedback` và `resume_session` để hướng dẫn lần chạy tiếp theo.
+- Nếu bị `blocked`, Lead chỉ định người xử lý và checkpoint. Khi hạ tầng phục hồi, Lead cần replan/reconcile đúng node trước khi dispatch lại. Không tự đọc source hoặc chạy test trong repository đích thay Peer.
+- Khi không có báo cáo Peer, phản hồi rõ lỗi và evidence hiện có; không trình bày kết quả tự khảo sát như kết quả delegation.
 ## Route và tham số agent
 
 Chỉnh `agent-routing.yaml`: 
