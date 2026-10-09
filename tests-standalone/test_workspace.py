@@ -143,6 +143,66 @@ def test_runtime_repo_registry_no_child_install(tmp_path: Path):
     assert not (tmp_path / "backend" / ".qiqi").exists()
     assert not (tmp_path / "frontend" / ".herdr-task-mcp").exists()
 
+def test_registered_sibling_git_roots_are_supported_without_child_install(tmp_path: Path):
+    """MCP's control workspace is a sibling of its execution Git roots."""
+    workspace = tmp_path / "herdr-delegate-lab"
+    workspace.mkdir()
+    frontend = tmp_path / "frontend"
+    backend = tmp_path / "backend"
+    setup_git(frontend)
+    setup_git(backend)
+    (workspace / "repos.yaml").write_text(
+        "repositories:\n  - name: frontend\n    path: ../frontend\n"
+        "  - name: backend\n    path: ../backend\n"
+    )
+    (workspace / "agent-routing.yaml").write_text(
+        "routes:\n  codex-balanced:\n    agent: codex\n    args: []\n"
+    )
+
+    rt = DelegateRuntime(workspace)
+    assert rt.repos() == {"frontend": frontend.resolve(), "backend": backend.resolve()}
+    assert rt.route("codex-balanced") == ("codex", [])
+    assert not (frontend / ".herdr-task-mcp").exists()
+    assert not (backend / ".herdr-task-mcp").exists()
+
+    from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
+    from qiqi_delegate.task_graph_store import GraphRuntimeStore
+    graph = task_graph_from_payload({"nodes": [
+        {"node_id": "front", "repository": "frontend", "route": "codex-balanced",
+         "task_packet": {"objective": "Read frontend", "scope": ["src"],
+                         "acceptance_criteria": ["Document verified findings"]}},
+        {"node_id": "back", "repository": "backend", "route": "codex-balanced",
+         "task_packet": {"objective": "Read backend", "scope": ["src"],
+                         "acceptance_criteria": ["Document verified findings"]}}
+    ]})
+    initial = GraphRuntime(GraphRuntimeStore(rt.db)).start_graph(
+        graph, repository_names=rt.repos().keys()
+    )
+    assert set(initial["runnable_nodes"]) == {"front", "back"}
+
+
+def test_repository_registry_rejects_parent_escape_and_symlink(tmp_path: Path):
+    scope = tmp_path / "project"
+    scope.mkdir()
+    workspace = scope / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    setup_git(outside)
+    (workspace / "repos.yaml").write_text(
+        "repositories:\n  - name: invalid\n    path: ../../outside\n"
+    )
+    rt = DelegateRuntime(workspace)
+    with pytest.raises(ValueError, match="escapes the workspace parent boundary"):
+        rt.repos()
+
+    (scope / "linked").symlink_to(outside, target_is_directory=True)
+    (workspace / "repos.yaml").write_text(
+        "repositories:\n  - name: invalid\n    path: ../linked\n"
+    )
+    with pytest.raises(ValueError, match="escapes the workspace parent boundary"):
+        rt.repos()
+
+
 def test_no_supervisor_modules_in_package():
     import qiqi_delegate
     root = Path(qiqi_delegate.__file__).parent
