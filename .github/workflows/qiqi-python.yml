@@ -1,0 +1,41 @@
+name: Standalone QiQi Python
+on:
+  push:
+    paths:
+      - "qiqi_delegate/**"
+      - "tests-standalone/**"
+      - "pyproject.toml"
+      - "setup.py"
+      - ".github/workflows/qiqi-python.yml"
+  pull_request:
+    paths:
+      - "qiqi_delegate/**"
+      - "tests-standalone/**"
+      - "pyproject.toml"
+      - "setup.py"
+      - ".github/workflows/qiqi-python.yml"
+jobs:
+  standalone:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install standalone package
+        run: python -m pip install -e '.[test]'
+      - name: Verify regular wheel install with legacy pip (Python 3.10)
+        if: matrix.python-version == '3.10'
+        run: |
+          python -m venv /tmp/qiqi-legacy-pip
+          /tmp/qiqi-legacy-pip/bin/python -m pip install "pip==21.2.4" "setuptools>=70" wheel
+          /tmp/qiqi-legacy-pip/bin/python -m pip install --no-deps .
+          cd /tmp
+          /tmp/qiqi-legacy-pip/bin/python -c "import qiqi_delegate; print(qiqi_delegate.__version__)"
+      - name: Compile source
+        run: python -m compileall -q qiqi_delegate
+      - name: Run tests
+        run: python -m pytest -q tests-standalone
