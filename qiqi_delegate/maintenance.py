@@ -12,7 +12,9 @@ from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 
 
-def _validated_runtime(workspace: Path, repository: str) -> DelegateRuntime:
+def _validated_runtime(
+    workspace: Path, repository: str, *, allow_legacy_claim: bool = False,
+) -> DelegateRuntime:
     if not repository or not repository.strip():
         raise ValueError("repository must be a registered non-empty name")
     if not workspace.is_dir():
@@ -20,17 +22,35 @@ def _validated_runtime(workspace: Path, repository: str) -> DelegateRuntime:
     runtime = DelegateRuntime(workspace)
     registered = runtime.repos()
     if repository not in registered:
-        raise ValueError(f"unregistered repository: {repository!r}")
+        if not allow_legacy_claim:
+            raise ValueError(f"unregistered repository: {repository!r}")
+        # Only permit old names for exact, unmapped claims retained during
+        # an upgrade. Do not turn this into arbitrary CLI repo targeting.
+        with runtime._connect() as db:
+            legacy = db.execute(
+                "SELECT 1 FROM write_claims "
+                "WHERE repository=? AND repository_root IS NULL",
+                (repository,),
+            ).fetchone()
+        if legacy is None:
+            raise ValueError(f"unregistered repository: {repository!r}")
     return runtime
 
 
 def show_claim(*, workspace: Path, repository: str) -> dict[str, Any]:
     """Read the exact current holder without modifying worker state."""
-    runtime = _validated_runtime(workspace, repository)
+    runtime = _validated_runtime(workspace, repository, allow_legacy_claim=True)
+    roots = runtime.repos()
+    canonical = str(roots[repository]) if repository in roots else None
     with runtime._connect() as db:
+        # A renamed registered alias looks up the claim by stable root. For
+        # pre-migration rows, only the original exact name is available.
         row = db.execute(
-            "SELECT claim_id, created_at_ns FROM write_claims WHERE repository = ?",
-            (repository,),
+            "SELECT repository, repository_root, claim_id, created_at_ns "
+            "FROM write_claims WHERE repository_root = ? "
+            "OR (repository = ? AND repository_root IS NULL) "
+            "ORDER BY repository_root IS NULL ASC LIMIT 1",
+            (canonical, repository),
         ).fetchone()
     return {
         "repository": repository,
@@ -58,20 +78,26 @@ def release_stale_claim(
         )
     if not isinstance(claim_id, str) or not claim_id.strip():
         raise ValueError("claim_id must be an exact non-empty value")
-    runtime = _validated_runtime(workspace, repository)
+    runtime = _validated_runtime(workspace, repository, allow_legacy_claim=True)
+    roots = runtime.repos()
+    canonical = str(roots[repository]) if repository in roots else None
     with runtime._connect() as db:
         db.execute("BEGIN IMMEDIATE")
         current = db.execute(
-            "SELECT claim_id FROM write_claims WHERE repository = ?",
-            (repository,),
-        ).fetchone()
-        if current is None:
+            "SELECT repository, repository_root, claim_id FROM write_claims "
+            "WHERE repository_root = ? OR "
+            "(repository = ? AND repository_root IS NULL)",
+            (canonical, repository),
+        ).fetchall()
+        if not current:
             raise RuntimeError(f"no write claim exists for repository {repository!r}")
-        if current["claim_id"] != claim_id:
+        matches = [row for row in current if row["claim_id"] == claim_id]
+        if len(matches) != 1:
             raise RuntimeError(
                 f"claim_id mismatch for repository {repository!r}; "
                 "refusing to release a different writer"
             )
+        holder = matches[0]
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS write_claim_recovery_audit (
@@ -83,8 +109,9 @@ def release_stale_claim(
             )
         """)
         released = db.execute(
-            "DELETE FROM write_claims WHERE repository = ? AND claim_id = ?",
-            (repository, claim_id),
+            "DELETE FROM write_claims WHERE repository = ? AND claim_id = ? "
+            "AND repository_root IS ?",
+            (holder["repository"], claim_id, holder["repository_root"]),
         )
         if released.rowcount != 1:
             raise RuntimeError("write claim changed during recovery")
@@ -92,7 +119,7 @@ def release_stale_claim(
             "INSERT INTO write_claim_recovery_audit "
             "(repository, claim_id, worker_termination_confirmed, released_at_ns) "
             "VALUES (?, ?, 1, ?)",
-            (repository, claim_id, time.time_ns()),
+            (holder["repository"], claim_id, time.time_ns()),
         )
     return {"repository": repository, "claim_id": claim_id, "released": True}
 
