@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -448,6 +449,16 @@ class DelegateRuntime:
             preserve_startup = True
             target = (f"{self.herdr_bin} --session {self.herdr_session}"
                       if self.herdr_session else self.herdr_bin)
+            # This stdio server is launched with the package's venv Python.
+            # Reuse that exact interpreter: operators are not required to
+            # activate the venv, and qiqi-delegate-admin is not on global PATH.
+            recovery = (
+                f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+                f"release-claim --workspace {shlex.quote(str(self.root))} "
+                f"--repository {shlex.quote(repository)} "
+                f"--claim-id {shlex.quote(claim_id)} "
+                "--worker-termination-confirmed"
+            )
             raise AgentStartupBlocked(
                 exc.agent_name, exc.pane_id,
                 f"workspace_id={workspace_id}; write_claim_id={claim_id}; "
@@ -456,9 +467,7 @@ class DelegateRuntime:
                 f"inspect startup UI: {target} agent read {exc.agent_name} "
                 f"--source visible --lines 30; "
                 f"recovery: close Herdr workspace {workspace_id} after inspection, "
-                "confirm agent termination, then use qiqi-delegate-admin "
-                "release-claim --workspace <workspace> --repository <repository> "
-                "--claim-id <claim_id> --worker-termination-confirmed. "
+                f"confirm agent termination, then run: {recovery}. "
                 "See README operator recovery instructions; do not send the "
                 f"delegated task prompt to the blocked agent manually. {exc}"
             ) from exc
