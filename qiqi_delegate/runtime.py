@@ -456,8 +456,8 @@ class DelegateRuntime:
                 f"inspect startup UI: {target} agent read {exc.agent_name} "
                 f"--source visible --lines 30; "
                 f"recovery: close Herdr workspace {workspace_id} after inspection, "
-                "confirm agent termination, then call release_write_claim "
-                "with this exact repository and claim ID. Do not send the "
+                "confirm agent termination, then arrange operator-side claim cleanup "
+                "using this exact repository and claim ID. Do not send the "
                 f"delegated task prompt to the blocked agent manually. {exc}"
             ) from exc
         finally:
