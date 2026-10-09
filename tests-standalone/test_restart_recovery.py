@@ -214,6 +214,152 @@ def test_restart_finishes_quiescent_wave_without_restarting_attempt(tmp_path):
     assert restarted.get_graph(run_id)["revision"] == current["revision"]
 
 
+def independent_graph():
+    payload = make_graph().as_dict()
+    payload["nodes"][1].pop("depends_on")
+    return task_graph_from_payload(payload)
+
+
+def test_concurrent_reconcile_is_rejected_before_stale_wave_dispatch(tmp_path, monkeypatch):
+    """No stale authored route/packet may execute after another server commits a DAG."""
+    path = tmp_path / "graph.sqlite3"
+    runtime_a = make_runtime(path)
+    original = independent_graph()
+    run_id = runtime_a.start_graph(
+        original, repository_names={"backend", "frontend"},
+    )["graph_run_id"]
+    runtime_b = make_runtime(path)
+    replacement_payload = original.as_dict()
+    replacement_payload["nodes"][0]["task_packet"]["objective"] = "New authoritative API"
+    replacement = task_graph_from_payload(replacement_payload)
+    select = runtime_a._select_wave_nodes
+
+    def reconcile_between_snapshot_and_claim(graph_run_id, candidates):
+        selected = select(graph_run_id, candidates)
+        revision = runtime_b.get_graph(run_id)["revision"]
+        runtime_b.reconcile_graph(
+            run_id, replacement,
+            repository_names={"backend", "frontend"},
+            expected_revision=revision,
+        )
+        return selected
+
+    monkeypatch.setattr(runtime_a, "_select_wave_nodes", reconcile_between_snapshot_and_claim)
+    executions = []
+
+    async def run_worker(node):
+        executions.append(node.node_id)
+        return await settled(node)
+
+    with pytest.raises(RuntimeError, match="stale graph snapshot revision"):
+        asyncio.run(runtime_a.delegate_next(run_id, executor=run_worker))
+    assert executions == []
+    assert runtime_b.store.load_graph(run_id) == replacement
+    assert runtime_b.store.get_run(run_id)["current_wave_id"] is None
+    assert runtime_b.store.list_attempts(run_id, "B1") == []
+    assert runtime_b.store.list_attempts(run_id, "F1") == []
+
+
+def test_multi_retry_wave_claim_rolls_back_if_second_node_fails(tmp_path):
+    """Failure injecting the second INSERT never loses the first node's retry plan."""
+    path = tmp_path / "graph.sqlite3"
+    runtime = make_runtime(path)
+    run_id = runtime.start_graph(
+        independent_graph(), repository_names={"backend", "frontend"},
+    )["graph_run_id"]
+    first = asyncio.run(runtime.delegate_next(run_id, executor=settled))
+    assert {x["node_id"] for x in first["results"]} == {"B1", "F1"}
+    decided = runtime.submit_decisions(
+        run_id,
+        decisions_from_payload([
+            {"node_id": "B1", "action": "retry", "feedback": ["Check API tests"]},
+            {"node_id": "F1", "action": "retry", "feedback": ["Check UI tests"]},
+        ]),
+        expected_revision=first["revision"],
+    )
+    assert set(decided["runnable_nodes"]) == {"B1", "F1"}
+    expected_plans = runtime.store.get_retry_plans(run_id)
+    assert set(expected_plans) == {"B1", "F1"}
+    with sqlite3.connect(path) as conn:
+        conn.execute("""
+            CREATE TRIGGER fail_second_wave_node
+            BEFORE INSERT ON graph_attempts
+            WHEN NEW.node_id = 'F1' AND NEW.attempt_number = 2
+            BEGIN SELECT RAISE(ABORT, 'injected failure on second claim'); END;
+        """)
+    executions = []
+
+    async def run_worker(node):
+        executions.append(node.node_id)
+        return await settled(node)
+
+    with pytest.raises(sqlite3.IntegrityError, match="second claim"):
+        asyncio.run(make_runtime(path).delegate_next(run_id, executor=run_worker))
+    assert executions == []
+    restored = make_runtime(path)
+    assert restored.store.get_retry_plans(run_id) == expected_plans
+    assert restored.store.get_run(run_id)["current_wave_id"] is None
+    assert restored.get_graph(run_id)["graph_state"] == "ready"
+    for node_id in ("B1", "F1"):
+        assert len(restored.store.list_attempts(run_id, node_id)) == 1
+        assert restored.get_graph(run_id)["nodes"][0 if node_id == "B1" else 1]["retry_pending"]
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER fail_second_wave_node")
+    result = asyncio.run(make_runtime(path).delegate_next(run_id, executor=run_worker))
+    assert set(executions) == {"B1", "F1"}
+    assert {x["node_id"] for x in result["results"]} == {"B1", "F1"}
+    assert restored.store.get_retry_plans(run_id) == {}
+    assert all(
+        restored.store.list_attempts(run_id, n)[-1]["dispatch_state"] == "dispatched"
+        for n in ("B1", "F1")
+    )
+
+
+def test_prepared_restart_retains_retry_plan_and_fails_closed(tmp_path):
+    """Crash after atomic claim but before dispatch cannot delete retry context."""
+    path = tmp_path / "graph.sqlite3"
+    runtime = make_runtime(path)
+    run_id = runtime.start_graph(
+        independent_graph(), repository_names={"backend", "frontend"},
+    )["graph_run_id"]
+    first = asyncio.run(runtime.delegate_next(run_id, executor=settled))
+    decided = runtime.submit_decisions(
+        run_id,
+        decisions_from_payload([{
+            "node_id": "B1", "action": "retry", "resume_session": True,
+            "feedback": ["Rerun exactly in native session"],
+        }]),
+        expected_revision=first["revision"],
+    )
+    plan = runtime.store.get_retry_plans(run_id)["B1"]
+    (attempt_id,) = runtime.store.start_wave(
+        run_id, "pre-dispatch-crash",
+        expected_revision=decided["revision"],
+        attempts=({
+            "node_id": "B1", "resume_session": True,
+            "session_id": "session_B1", "retry_plan": plan,
+        },),
+    )
+    fresh_process = make_runtime(path)
+    assert fresh_process.get_graph(run_id)["graph_state"] == "running"
+    assert fresh_process.store.get_retry_plans(run_id)["B1"] == plan
+    attempt = fresh_process.store.get_attempt(attempt_id)
+    assert attempt["runtime_state"] == "running"
+    assert attempt["dispatch_state"] == "prepared"
+    assert attempt["retry_plan_json"] is not None
+    with pytest.raises(RuntimeError, match="not ready"):
+        asyncio.run(fresh_process.delegate_next(run_id, executor=settled))
+    # Dispatch transition is durable and consumes the pending plan exactly once.
+    fresh_process.store.mark_attempt_dispatched(attempt_id)
+    assert fresh_process.store.get_retry_plans(run_id) == {}
+    after = fresh_process.store.get_attempt(attempt_id)
+    assert after["dispatch_state"] == "dispatched"
+    assert after["retry_plan_json"] == attempt["retry_plan_json"]
+    with pytest.raises(RuntimeError, match="already dispatched"):
+        fresh_process.store.mark_attempt_dispatched(attempt_id)
+
+
 def test_corrupt_or_legacy_graph_definition_fails_closed(tmp_path):
     path = tmp_path / "graph.sqlite3"
     runtime = make_runtime(path)
