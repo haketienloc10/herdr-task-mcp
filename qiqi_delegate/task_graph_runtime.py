@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from qiqi_delegate.core import TaskPacket, build_task_packet
+from qiqi_delegate.runtime import AgentStartupBlocked
 from qiqi_delegate.task_graph import GraphNode, TaskGraph
 from qiqi_delegate.task_graph_scheduler import (
     REVIEWABLE_RUNTIME_STATES,
@@ -868,7 +869,13 @@ class GraphRuntime:
                     "state": "failed",
                     "agent_response": None,
                     "failure_type": "executor_exception",
-                    "failure_detail": str(exc)[-2400:],
+                    # The Lead may need the precise operator command after restart.
+                    # For startup blockers, preserve it beyond generic tail truncation.
+                    "failure_detail": (
+                        exc.actionable_detail()
+                        if isinstance(exc, AgentStartupBlocked)
+                        else str(exc)[-2400:]
+                    ),
                 },
             )
             raise
