@@ -140,8 +140,10 @@ class TaskRequestStore:
                     db.execute(f"ALTER TABLE task_discoveries ADD COLUMN {name} {field_type}")
         self.recover_abandoned_discoveries()
 
-    def _recover_abandoned_locked(self, db: sqlite3.Connection,
-                                  request_id: str | None = None) -> int:
+    def _recover_abandoned_locked(
+        self, db: sqlite3.Connection, request_id: str | None = None,
+        *, operator_confirmed_discovery_id: str | None = None,
+    ) -> int:
         """Reconcile dead-owner reservations with native captures atomically.
 
         Runtime assigns the native turn ID to the Discovery BEFORE launching
@@ -159,14 +161,18 @@ class TaskRequestStore:
         if request_id is not None:
             sql += " AND request_id=?"
             params = (request_id,)
+        if operator_confirmed_discovery_id is not None:
+            sql += " AND discovery_id=?"
+            params += (operator_confirmed_discovery_id,)
         recovered = 0
         for row in db.execute(sql, params).fetchall():
             # An ownerless legacy row is *not* evidence that the old worker
             # stopped: a pre-migration MCP may still be running Discovery.
             # Only explicit operator recovery can release such reservations.
             if row["owner_pid"] is None:
-                continue
-            if _owner_alive(row["owner_pid"], row["owner_start_token"]):
+                if row["discovery_id"] != operator_confirmed_discovery_id:
+                    continue
+            elif _owner_alive(row["owner_pid"], row["owner_start_token"]):
                 continue
 
             if row["state"] == "attaching":
@@ -261,6 +267,66 @@ class TaskRequestStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             return self._recover_abandoned_locked(db)
+
+    def inspect_discovery(self, discovery_id: str) -> dict[str, Any]:
+        """Operator inspection of an exact persisted Discovery, without side effects."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT discovery_id, request_id, state, turn_id, "
+                "owner_pid, owner_start_token, detail "
+                "FROM task_discoveries WHERE discovery_id=?",
+                (_text(discovery_id, "discovery_id"),),
+            ).fetchone()
+        if row is None:
+            raise ValueError("unknown Discovery ID")
+        return dict(row)
+
+    def recover_ownerless_discovery(
+        self, discovery_id: str, *, worker_termination_confirmed: bool,
+    ) -> dict[str, Any]:
+        """Operator-only recovery of one ownerless legacy Discovery.
+
+        Caller must verify the pre-migration MCP worker/Herdr task has stopped.
+        A successful native capture is preserved by normal recovery logic.
+        """
+        if worker_termination_confirmed is not True:
+            raise ValueError(
+                "verify the legacy Discovery worker has terminated before "
+                "passing --worker-termination-confirmed"
+            )
+        discovery_id = _text(discovery_id, "discovery_id")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT state, owner_pid FROM task_discoveries "
+                "WHERE discovery_id=?", (discovery_id,),
+            ).fetchone()
+            if (row is None or row["owner_pid"] is not None
+                    or row["state"] not in {"requested", "attaching"}):
+                raise ValueError(
+                    "Discovery must be an ownerless in-flight legacy reservation"
+                )
+            recovered = self._recover_abandoned_locked(
+                db, operator_confirmed_discovery_id=discovery_id,
+            )
+            if recovered != 1:
+                raise RuntimeError("legacy Discovery recovery failed; no state changed")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS task_discovery_recovery_audit (
+                    recovery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discovery_id TEXT NOT NULL,
+                    worker_termination_confirmed INTEGER NOT NULL
+                        CHECK (worker_termination_confirmed=1),
+                    recovered_at_ns INTEGER NOT NULL
+                )
+            """)
+            db.execute(
+                "INSERT INTO task_discovery_recovery_audit "
+                "(discovery_id, worker_termination_confirmed, recovered_at_ns) "
+                "VALUES (?, 1, ?)",
+                (discovery_id, time.time_ns()),
+            )
+        return self.inspect_discovery(discovery_id)
 
     def _connect(self):
         db = sqlite3.connect(self.database, timeout=30)
