@@ -340,7 +340,7 @@ async def delegate_discovery(
         raise ValueError("Discovery questions must be nonempty")
     context_lines = [
         f"User request (verbatim): {current['user_request']}",
-        *_source_context_lines(current["sources"]),
+        *_source_context_lines(current["sources"], assessment["requirements"]),
     ]
     packet = _contextual_packet(
         objective="Investigate unanswered questions for the user request; do not implement.",
