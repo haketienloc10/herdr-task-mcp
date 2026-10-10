@@ -268,3 +268,124 @@ def test_snapshot_drift_includes_dirty_and_untracked_changes(tmp_path):
     (roots["backend"] / "new_contract.py").write_text("VERSION = 2\n")
     third = manifest_digest(inspect_roots(roots))
     assert second != third
+
+
+
+def test_abandoned_native_capture_is_restored_after_restart(tmp_path):
+    from qiqi_delegate.final_eval_store import FinalEvaluationStore
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    graph = graph_rt.get_graph(gid)
+    binding = requests.graph_binding(gid)
+    manifest = inspect_roots(runtime.repos())
+    eid, created = coordinator.store.reserve(
+        gid, graph["revision"], binding["request_id"],
+        binding["request_revision"], "codex-evaluator",
+        manifest, manifest_digest(manifest),
+    )
+    assert created
+    evaluation_id = eid["evaluation_id"]
+    coordinator.store.bind_turn(evaluation_id, "recovery-capture")
+    body = json.dumps(report(manifest))
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("recovery-capture", "native-session", "backend",
+             "codex-evaluator", "settled", body, 123),
+        )
+        db.execute(
+            "UPDATE final_evaluations SET owner_pid=?, owner_start_token=? "
+            "WHERE evaluation_id=?", (987654321, "dead-process", evaluation_id),
+        )
+
+    restarted = FinalEvaluationStore(runtime.db)
+    restored = restarted.get(evaluation_id)
+    assert restored["status"] == "passed"
+    assert restored["turn_id"] == "recovery-capture"
+    assert restored["raw_response"] == body
+    assert restored["report"]["verdict"] == "pass"
+    assert restarted.recover_abandoned() == 0
+    assert coordinator.finalize(gid, evaluation_id, graph["revision"])[
+        "finalized_at_ns"
+    ]
+
+
+def test_unproven_old_worker_requires_operator_clearance(tmp_path):
+    from qiqi_delegate.final_eval_store import FinalEvaluationStore
+    from qiqi_delegate.maintenance import recover_final_evaluation
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    binding = requests.graph_binding(gid)
+    rev = graph_rt.get_graph(gid)["revision"]
+    manifest = inspect_roots(runtime.repos())
+    created, _ = coordinator.store.reserve(
+        gid, rev, binding["request_id"], binding["request_revision"],
+        "codex-evaluator", manifest, manifest_digest(manifest),
+    )
+    eid = created["evaluation_id"]
+    coordinator.store.bind_turn(eid, "no-native-capture")
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "UPDATE final_evaluations SET owner_pid=?, owner_start_token=? "
+            "WHERE evaluation_id=?", (987654321, "dead-process", eid),
+        )
+    fresh = FinalEvaluationStore(runtime.db)
+    assert fresh.get(eid)["status"] == "interrupted"
+    with pytest.raises(RuntimeError, match="operator"):
+        fresh.reserve(
+            gid, rev, binding["request_id"], binding["request_revision"],
+            "codex-evaluator", manifest, manifest_digest(manifest),
+        )
+    with pytest.raises(ValueError, match="termination"):
+        recover_final_evaluation(
+            workspace=runtime.root, evaluation_id=eid,
+            worker_termination_confirmed=False,
+        )
+    recovered = recover_final_evaluation(
+        workspace=runtime.root, evaluation_id=eid,
+        worker_termination_confirmed=True,
+    )
+    assert recovered["status"] == "errored"
+    new, actually_created = fresh.reserve(
+        gid, rev, binding["request_id"], binding["request_revision"],
+        "codex-evaluator", manifest, manifest_digest(manifest),
+    )
+    assert actually_created and new["evaluation_id"] != eid
+
+
+def test_duplicate_active_evaluation_does_not_dispatch_again(tmp_path, monkeypatch):
+    runtime, _reqs, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    calls = []
+
+    async def fake_delegate(**kwargs):
+        calls.append(kwargs)
+        coordinator.store.bind_turn(kwargs["evaluation_id"], "once-native")
+        started.set()
+        await finish.wait()
+        state = coordinator.store.get(kwargs["evaluation_id"])
+        body = json.dumps(report(state["manifest"]))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("once-native", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", body, 333),
+            )
+        return {"state": "settled", "turn_id": "once-native",
+                "agent_response": body}
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    async def run():
+        revision = graph_rt.get_graph(gid)["revision"]
+        first = asyncio.create_task(
+            coordinator.start(gid, "codex-evaluator", revision),
+        )
+        await started.wait()
+        second = await coordinator.start(gid, "codex-evaluator", revision)
+        assert second["already_active"] is True
+        assert second["status"] == "evaluating"
+        finish.set()
+        return await first, second
+    first, second = asyncio.run(run())
+    assert len(calls) == 1
+    assert first["status"] == "passed"
+    assert first["evaluation_id"] == second["evaluation_id"]
