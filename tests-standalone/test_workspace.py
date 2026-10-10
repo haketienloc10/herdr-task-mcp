@@ -92,6 +92,32 @@ def test_install_workspace_preserves_unrelated_agent_rules_and_mcp(tmp_path: Pat
     assert tuple((root / "frontend").rglob("*")) == previous_front
     assert "repositories: []" in (root / "repos.yaml").read_text()
 
+def test_installer_enables_default_agent_flags_without_overwriting_existing_routes(tmp_path: Path):
+    """A new workspace receives both defaults; rerunning preserves user overrides."""
+    asyncio.run(install_workspace(tmp_path))
+    rt = DelegateRuntime(tmp_path)
+    assert rt.route("codex-balanced") == ("codex", ["--yolo"])
+    assert rt.route("claude-balanced") == (
+        "claude", ["--permission-mode", "auto"]
+    )
+
+    routing = tmp_path / "agent-routing.yaml"
+    custom = (
+        "routes:\n"
+        "  codex-balanced:\n"
+        "    agent: codex\n"
+        "    args: []\n"
+        "  claude-balanced:\n"
+        "    agent: claude\n"
+        "    args: []\n"
+    )
+    routing.write_text(custom)
+    asyncio.run(install_workspace(tmp_path))
+    assert routing.read_text() == custom
+    assert rt.route("codex-balanced") == ("codex", [])
+    assert rt.route("claude-balanced") == ("claude", [])
+
+
 def test_installer_preserves_uv_venv_python_symlink_and_repairs_prior_config(tmp_path: Path):
     """A venv Python symlink must not be resolved to uv's base interpreter."""
     venv_bin = tmp_path / "tools" / "qiqi-venv" / "bin"
