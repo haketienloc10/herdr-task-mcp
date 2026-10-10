@@ -42,6 +42,33 @@ def _git_paths(root: Path, *args: str) -> set[str]:
     }
 
 
+def _reject_gitlinks(root: Path, head: str | None) -> None:
+    """Fail closed for Git submodules instead of interpreting dirs as deletions.
+
+    Git records a submodule as mode 160000 (a gitlink). The submodule's
+    populated working tree and its own dirty changes are outside the normal
+    ls-files manifest; a digest would otherwise falsely remain unchanged.
+    Check BOTH the index and HEAD so staged removal also fails closed.
+    """
+    for label, payload in [
+        ("index", _git(root, "ls-files", "--stage", "-z")),
+        ("HEAD", _git(root, "ls-tree", "-r", "-z", head) if head else b""),
+    ]:
+        for entry in payload.split(b"\0"):
+            if not entry:
+                continue
+            if b"\t" not in entry:
+                raise ValueError("invalid Git tree/index entry")
+            metadata, raw_path = entry.split(b"\t", 1)
+            if metadata.startswith(b"160000 "):
+                path = raw_path.decode("utf-8")
+                raise ValueError(
+                    "evaluation snapshot cannot safely capture Git "
+                    f"submodule/gitlink from {label}: {path}; "
+                    "remove the submodule or implement recursive source capture"
+                )
+
+
 def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
     """List current files *and* tracked paths removed from the worktree.
 
@@ -49,6 +76,7 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
     vanish from the index. Include HEAD, index and untracked paths so both
     forms of deletion (and renames) are represented in the final manifest.
     """
+    _reject_gitlinks(root, head)
     tracked = _git_paths(root, "ls-files", "--cached", "-z")
     if head is not None:
         tracked.update(_git_paths(
