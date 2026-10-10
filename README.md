@@ -327,8 +327,11 @@ including cross-module contracts, before delivery is finalized.
    `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
    Report evidence must reference real repository/path/SHA256 values from the
    isolated `.qiqi-evaluation-manifest.json`; all original requirements must
-   be covered. A bare LLM "PASS" without corroborating file evidence is
-   rejected. A native settled response alone is NOT an accepted evaluation.
+   be covered. For multi-repo PASS, **each** integration check must cite
+   at least two distinct repository sources, while the complete set of
+   integration checks must cover every participating repository. Separate
+   module-only checks never suffice. A bare LLM "PASS" without corroborating
+   file evidence is rejected; a native settled response alone is not a PASS.
 6. On FAIL or INCONCLUSIVE, Lead fixes/replans through existing graph tools,
    then reruns one whole-product evaluation after the updated graph is complete.
 7. Call `finalize_graph(graph_run_id, evaluation_id, expected_revision)` only
@@ -340,8 +343,11 @@ including cross-module contracts, before delivery is finalized.
 
 **Limits and security boundaries:** Snapshots use verified registered Git roots,
 a strict file allowlist, symlink/path protections, file hashing before/after
-copy and deterministic manifests, with defaults 3,000 files/repo, 1 MB/file
-and 24 MB total. Snapshots are temporary and separate from original trees.
+copy and deterministic manifests. Tracked paths deleted from the worktree,
+including staged deletions and staged/unstaged renames, are preserved as
+`deleted_paths` tombstones. They are not copied or treated as missing-file
+errors; restoring one changes the manifest digest and invalidates a prior PASS.
+Default bounds are 3,000 files/repo, 1 MB/file and 24 MB total. Snapshots are temporary and separate from original trees.
 `--add-dir` grants additional directory access: **it is not a sandbox**.
 The route is only allowed with explicit Codex `--sandbox read-only`.
 The feature does not execute arbitrary verification commands from reports or
