@@ -129,8 +129,15 @@ def test_one_fresh_cross_repo_evaluation_and_finalize(tmp_path, monkeypatch):
         assert kwargs["session_id"] if "session_id" in kwargs else True
         coordinator.store.bind_turn(kwargs["evaluation_id"], "final-native-turn")
         capture = coordinator.store.get(kwargs["evaluation_id"])
+        body = json.dumps(report(capture["manifest"]))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("final-native-turn", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", body, 123),
+            )
         return {"state": "settled", "turn_id": "final-native-turn",
-                "agent_response": json.dumps(report(capture["manifest"]))}
+                "agent_response": body}
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
     revision = graph_rt.get_graph(gid)["revision"]
@@ -158,8 +165,15 @@ def test_snapshots_include_untracked_work_and_stale_pass_cannot_finalize(tmp_pat
         state = coordinator.store.get(kwargs["evaluation_id"])
         assert any(f["path"] == "draft_untracked.py"
                    for f in state["manifest"]["frontend"]["files"])
+        body = json.dumps(report(state["manifest"]))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("captured-native", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", body, 124),
+            )
         return {"state": "settled", "turn_id": "captured-native",
-                "agent_response": json.dumps(report(state["manifest"]))}
+                "agent_response": body}
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
     revision = graph_rt.get_graph(gid)["revision"]
     outcome = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
