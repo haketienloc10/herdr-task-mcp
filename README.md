@@ -366,8 +366,13 @@ including cross-module contracts, before delivery is finalized.
 a strict file allowlist, symlink/path protections, file hashing before/after
 copy and deterministic manifests. Tracked paths deleted from the worktree,
 including staged deletions and staged/unstaged renames, are preserved as
-`deleted_paths` tombstones. They are not copied or treated as missing-file
-errors; restoring one changes the manifest digest and invalidates a prior PASS.
+`deleted_paths` tombstones **only when that path exists in HEAD** (a real
+previously committed file). Missing index-only additions—such as a
+`git add -N` intent-to-add file or a staged new file subsequently deleted
+from the worktree—fail closed rather than becoming fake deletion evidence.
+Present index-only additions are captured and hashed normally. Verified
+HEAD deletions are not copied; restoring one changes the manifest digest
+and invalidates a prior PASS.
 Default bounds are 3,000 files/repo, 1 MB/file and 24 MB total.
 Snapshots are temporary and separate from original trees. Repository
 files or directories colliding with reserved evaluator metadata paths
