@@ -383,6 +383,22 @@ once the new request-to-graph binding is updated. Startup-blocked agents
 whose Herdr workspace
 is preserved remain `interrupted` and block further evaluator launches until
 an operator confirms worker termination using `recover-final-evaluation`.
+**Operator recovery for preserved Evaluator workspaces:** The Herdr Evaluator
+runs inside a disposable snapshot, but its write claim records the stable
+canonical root registered under the primary repository in `repos.yaml`.
+This deliberate separation makes `show-claim --repository <primary-repo>`
+and `release-claim --repository <primary-repo> --claim-id 'turn:<id>'
+--worker-termination-confirmed` usable even **after the snapshot directory
+has been deleted**. On `AgentStartupBlocked` or an unconfirmed workspace
+close, inspect/close the actual Herdr workspace, verify that the external
+worker stopped, then use the operator-only `show-claim` and exact-ID
+`release-claim` commands shown below. For an `interrupted` Final Evaluation,
+also use `show-final-evaluation` followed by `recover-final-evaluation
+--evaluation-id <id> --worker-termination-confirmed`. Releasing the write
+claim alone does not clear an interrupted evaluation reservation; these
+are separate, audited recoveries. Never release a still-running worker's
+claim.
+
 Finalization checks graph/request revisions and the live multi-repository
 manifest digest. **After SQLite commits**, it reloads `repos.yaml`, resolves
 the current Graph repository names to their canonical Git roots, rechecks
