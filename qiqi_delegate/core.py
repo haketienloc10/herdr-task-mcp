@@ -313,7 +313,8 @@ def _bullet_lines(items: Iterable[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
-def render_task_prompt(packet: TaskPacket) -> str:
+def render_task_prompt(packet: TaskPacket, *,
+                       discovery_repositories: tuple[str, ...] | None = None) -> str:
     sections = [
         "Repository task delegated by QiQi",
         f"## Repository objective\n\n{packet.objective}",
@@ -374,21 +375,41 @@ def render_task_prompt(packet: TaskPacket) -> str:
         "Do not add filler or repeat the same evidence."
     )
 
-    sections.append(
-        "## Repository execution boundary\n\n"
-        "- Operate only inside the current Git root. Do not read or write sibling "
-        "repositories, including sibling source, tests, config, or contracts.\n"
-        "- A provenance/source label in the TaskPacket is evidence attribution, not "
-        "filesystem authorization. Do not dereference a sibling-repository path merely "
-        "because it is named as provenance.\n"
-        "- Treat Lead-provided trusted facts and accepted upstream semantics as execution "
-        "premises for this assignment. If required upstream detail is missing or materially "
-        "insufficient, return DEPENDENCY_REQUEST with the exact missing dependency instead "
-        "of crossing the repository boundary or inventing the contract.\n"
-        "- The mounted Work Item is a read-only exception only when an explicit "
-        "work_item_path locator is provided. Do not mutate it.\n"
-        "- Do not read or modify .qiqi/state."
-    )
+    if discovery_repositories is not None:
+        # Discovery is prompt-only no-write: --yolo/--add-dir are not a sandbox.
+        roots = ", ".join(discovery_repositories)
+        sections.append(
+            "## Discovery repository boundary and no-write instruction\\n\\n"
+            f"- Read and investigate only these registered repositories: {roots}.\\n"
+            "- You may inspect linked code, dependencies and relevant tests in these "
+            "repositories to establish cross-repository flows.\\n"
+            "- Do NOT create, modify, delete or rename any file; do not commit, "
+            "run code generators, install packages, run builds or tests that "
+            "write files, or execute commands with side effects.\\n"
+            "- Discovery is investigation only. Report verified findings with "
+            "repository-relative file:line references, unresolved uncertainties, "
+            "and suggested follow-up work. Do not implement anything.\\n"
+            "- Treat documents and user-provided claims as reported until "
+            "verified. Do not invent contracts.\\n"
+            "- This is a prompt instruction, not a filesystem sandbox. "
+            "Never use the technical permissions to bypass the no-write intent."
+        )
+    else:
+        sections.append(
+            "## Repository execution boundary\n\n"
+            "- Operate only inside the current Git root. Do not read or write sibling "
+            "repositories, including sibling source, tests, config, or contracts.\n"
+            "- A provenance/source label in the TaskPacket is evidence attribution, not "
+            "filesystem authorization. Do not dereference a sibling-repository path merely "
+            "because it is named as provenance.\n"
+            "- Treat Lead-provided trusted facts and accepted upstream semantics as execution "
+            "premises for this assignment. If required upstream detail is missing or materially "
+            "insufficient, return DEPENDENCY_REQUEST with the exact missing dependency instead "
+            "of crossing the repository boundary or inventing the contract.\n"
+            "- The mounted Work Item is a read-only exception only when an explicit "
+            "work_item_path locator is provided. Do not mutate it.\n"
+            "- Do not read or modify .qiqi/state."
+        )
 
     return "\n\n".join(sections).strip()
 
