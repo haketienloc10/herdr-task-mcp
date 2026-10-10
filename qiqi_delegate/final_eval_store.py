@@ -220,15 +220,27 @@ class FinalEvaluationStore:
             ).fetchone()
         return self.get(row["evaluation_id"]) if row else None
 
-    def latest_finalized(self, graph_run_id: str) -> dict[str, Any] | None:
-        """Return the most recent finalized attempt for separate delivery projection."""
+    def matching_finalized(
+        self, graph_run_id: str, graph_revision: int,
+        request_id: str, request_revision: int, digest: str,
+    ) -> dict[str, Any] | None:
+        """Select a finalized PASS for the exact current delivery identity.
+
+        A graph can have several historical finalized product snapshots. The
+        newest is not necessarily current after a worktree revert (A→B→A).
+        Match the same full identity used by reserve() before projecting
+        delivery, rather than selecting by finalized timestamp alone.
+        """
         with self._connect() as db:
             row = db.execute(
                 "SELECT evaluation_id FROM final_evaluations "
                 "WHERE graph_run_id=? AND status='passed' "
-                "AND finalized_at_ns IS NOT NULL "
+                "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
+                "AND request_id=? AND request_revision=? "
+                "AND manifest_digest=? "
                 "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
-                (graph_run_id,),
+                (graph_run_id, graph_revision, request_id,
+                 request_revision, digest),
             ).fetchone()
         return self.get(row["evaluation_id"]) if row else None
 
