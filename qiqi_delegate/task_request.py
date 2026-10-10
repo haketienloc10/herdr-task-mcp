@@ -437,7 +437,13 @@ class TaskRequestStore:
             db.execute("BEGIN IMMEDIATE")
             # Recovery may attach a native capture, increment revision and
             # invalidate readiness. Never base an append on pre-recovery state.
-            self._recover_abandoned_locked(db, request_id)
+            recovered = self._recover_abandoned_locked(db, request_id)
+            if recovered:
+                # Recovery is authoritative even if the caller supplied an
+                # outdated revision. Commit it before a stale-request error
+                # can roll back its durable native capture.
+                db.commit()
+                db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT sources_json, revision FROM task_requests WHERE request_id=?",
                 (request_id,),
@@ -555,7 +561,13 @@ class TaskRequestStore:
             # same transaction snapshot. Recovery may attach a captured Peer
             # result, increment revision and invalidate the assessment.
             db.execute("BEGIN IMMEDIATE")
-            self._recover_abandoned_locked(db, request_id)
+            recovered = self._recover_abandoned_locked(db, request_id)
+            if recovered:
+                # Recovery is authoritative even if the caller supplied an
+                # outdated revision. Commit it before a stale-request error
+                # can roll back its durable native capture.
+                db.commit()
+                db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT sources_json, revision, assessment_json "
                 "FROM task_requests WHERE request_id=?",
