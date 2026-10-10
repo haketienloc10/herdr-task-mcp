@@ -107,7 +107,7 @@ def _reject_sparse_checkout(root: Path) -> None:
             )
         if value != b"false":
             raise RuntimeError("unrecognized Git sparse-checkout configuration")
-    for record in _git(root, "ls-files", "-t", "-z").split(b"\\0"):
+    for record in _git(root, "ls-files", "-t", "-z").split(b"\0"):
         if not record:
             continue
         if len(record) < 3 or record[1:2] != b" ":
