@@ -114,11 +114,16 @@ def test_a_b_a_revert_matches_only_identical_task_request_binding(
         "rationale": "New user request specifies new contract",
     })
     assert assessed["revision"] == requests.get(original_request_id)["revision"]
-    requests.bind_graph(
-        gid, new_request["request_id"], assessed["revision"],
-        list(original_binding["requirement_map"]),
-        original_binding["requirement_map"], replace=True,
-    )
+    # Public bind_graph() intentionally forbids switching Task Request IDs.
+    # Simulate a persistence import/manual database edit in this *adversarial*
+    # test only. The Final Gate must reject the historical PASS even if a
+    # different request has an identical numeric revision and worktree hash.
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "UPDATE task_graph_bindings SET request_id=?, request_revision=? "
+            "WHERE graph_run_id=?",
+            (new_request["request_id"], assessed["revision"], gid),
+        )
     # Same Git files, graph revision and request revision; different request ID.
     assert coordinator.read(gid, first["evaluation_id"])["is_current"] is False
     assert coordinator.graph_status(gid)["delivery_status"] == "not_finalized"
@@ -129,12 +134,13 @@ def test_a_b_a_revert_matches_only_identical_task_request_binding(
     assert coordinator.graph_status(gid)["final_evaluation_id"] == newer["evaluation_id"]
 
     # Rebind original request; only its own original PASS is eligible again.
-    requests.bind_graph(
-        gid, original_request_id,
-        requests.get(original_request_id)["revision"],
-        list(original_binding["requirement_map"]),
-        original_binding["requirement_map"], replace=True,
-    )
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "UPDATE task_graph_bindings SET request_id=?, request_revision=? "
+            "WHERE graph_run_id=?",
+            (original_request_id,
+             requests.get(original_request_id)["revision"], gid),
+        )
     status = coordinator.graph_status(gid)
     assert status["delivery_status"] == "finalized"
     assert status["final_evaluation_id"] == first["evaluation_id"]
