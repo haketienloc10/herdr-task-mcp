@@ -62,7 +62,7 @@ qiqi-control/
 - `agent-routing.yaml` khai báo route đến Codex hoặc Claude.
 - `.herdr-task-mcp/` giữ dữ liệu chạy. SQLite được tạo khi runtime khởi động.
 
-Installer giữ nội dung ngoài vùng do nó quản lý trong `AGENTS.md` và cấu hình Codex. Installer từ chối marker hoặc cấu hình không hợp lệ thay vì ghi đè tùy ý.
+Installer chỉ thay vùng marker trong `AGENTS.md`. Với Codex, installer giữ cấu hình không liên quan và có thể bổ sung `features.code_mode.direct_only_tool_namespaces`. Installer từ chối marker hoặc cấu hình không hợp lệ thay vì ghi đè tùy ý.
 
 Muốn dùng một Herdr session cụ thể, thêm tùy chọn khi cài:
 
@@ -347,6 +347,7 @@ Các workflow CI nằm trong `.github/workflows/ci.yml` và `.github/workflows/q
 | `qiqi_delegate/install.py` | Cài MCP và cập nhật cấu hình workspace |
 | `qiqi_delegate/server.py` | Định nghĩa công cụ MCP Python |
 | `qiqi_delegate/core.py` | Kiểm tra TaskPacket và xử lý native capture |
+| `qiqi_delegate/result_hook.py` | Ghi sự kiện native Stop vào vùng capture |
 | `qiqi_delegate/runtime.py` | Gọi Herdr, quản lý session và write claim |
 | `qiqi_delegate/task_graph_scheduler.py` | Tính trạng thái và dependency |
 | `qiqi_delegate/task_graph_runtime.py` | Điều phối wave, review và quyết định Lead |
