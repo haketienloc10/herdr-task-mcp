@@ -176,8 +176,10 @@ def test_unsafe_route_and_unbound_graph_cannot_start(tmp_path):
     with pytest.raises(ValueError, match="requires Codex route"):
         asyncio.run(coordinator.start(gid, "codex-balanced", revision))
     assert coordinator.store.latest(gid) is None
+    other = tmp_path / "other"
+    other.mkdir()
     _, _, graph_rt2, coordinator2, gid2 = setup_graph(
-        tmp_path / "other", with_request=False,
+        other, with_request=False,
     )
     with pytest.raises(ValueError, match="ineligible_missing_user_intent"):
         asyncio.run(coordinator2.start(
