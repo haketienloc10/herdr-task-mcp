@@ -284,6 +284,36 @@ class FinalEvaluationCoordinator:
                                     ) else "errored", detail=str(exc))
                 raise
             raw = response.get("agent_response")
+            # Herdr may finish native capture but fail to confirm workspace
+            # termination. A still-running worker and write claim are not
+            # compatible with a final PASS, even if the captured report says
+            # PASS. Preserve exact operator-recovery locators in SQLite.
+            cleanup_state = response.get("cleanup_state")
+            if cleanup_state is not None:
+                cleanup = {
+                    key: value for key in (
+                        "cleanup_state", "workspace_id", "write_claim_id",
+                        "write_claim_repository", "recovery_action",
+                    )
+                    if isinstance((value := response.get(key)), str)
+                }
+                # A malformed cleanup signal must also fail closed. Do not
+                # require metadata to be perfect to retain INTERRUPTED.
+                detail = (
+                    "Native Evaluator workspace close not confirmed; "
+                    "verify worker termination and release the exact write "
+                    "claim with operator-only maintenance, then recover the "
+                    "interrupted evaluation ID before retry. "
+                    "Captured PASS is NOT finalization authority."
+                )
+                self.store.complete(
+                    eid, raw_response=raw if isinstance(raw, str) else None,
+                    report=None, status="interrupted", detail=detail,
+                    turn_id=response.get("turn_id"), cleanup=cleanup or {
+                        "cleanup_state": "unknown_unconfirmed_cleanup",
+                    },
+                )
+                return self.read(graph_run_id, eid)
             report = None
             status = "inconclusive"
             detail = None
