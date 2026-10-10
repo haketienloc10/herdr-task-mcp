@@ -243,3 +243,122 @@ def test_discovery_keeps_yolo_and_constructs_add_dir_from_registry(tmp_path, mon
             repository="backend", route="codex-balanced", packet=packet,
             discovery_repositories=("backend", "unregistered"),
         ))
+
+
+
+def test_discovery_audit_survives_restart(tmp_path):
+    runtime, store = workspace(tmp_path)
+    request = store.create("Investigate the duplicate order bug")
+    assessed = store.assess(
+        request["request_id"], 1,
+        assessment(decision="targeted_discovery",
+                   unknowns=["Is idempotency already implemented?"]),
+    )
+    ident = store.begin_discovery(
+        request["request_id"], "targeted_discovery",
+        ["backend", "frontend"], ["Inspect idempotency"], "codex-balanced",
+    )
+    store.finish_discovery(ident, "settled", turn_id="captured-turn")
+    resumed = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
+    item = resumed.get(request["request_id"])
+    assert item["revision"] == assessed["revision"]
+    assert item["discoveries"][0]["questions"] == ["Inspect idempotency"]
+    assert item["discoveries"][0]["turn_id"] == "captured-turn"
+
+
+def test_accepted_graph_node_is_a_traced_source(tmp_path):
+    runtime, store = workspace(tmp_path)
+    graph = task_graph_from_payload({"nodes": [{
+        "node_id": "discover", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {
+            "objective": "Inspect contract", "scope": ["src"],
+            "acceptance_criteria": ["File:line evidence"]
+        }
+    }]})
+    gr = GraphRuntime(GraphRuntimeStore(runtime.db))
+    started = gr.start_graph(graph, repository_names=runtime.repos().keys())
+    gid = started["graph_run_id"]
+
+    async def execute(node):
+        return {"state": "settled", "session_id": "native",
+                "turn_id": "turn-accepted",
+                "agent_response": "Observed contract at backend/api.py:24"}
+    completed = asyncio.run(gr.delegate_next(gid, executor=execute))
+    from qiqi_delegate.task_graph_runtime import decisions_from_payload
+    gr.submit_decisions(
+        gid, decisions_from_payload([{"node_id": "discover", "action": "accept"}]),
+        expected_revision=completed["revision"],
+        lead_dispositions=[{
+            "turn_id": "turn-accepted", "action": "accept",
+            "reason": "Evidence reviewed", "node_id": "discover",
+        }],
+    )
+    req = store.create("Implement accepted contract", sources=[
+        {"kind": "accepted_graph_node", "graph_run_id": gid, "node_id": "discover"}
+    ])
+    src = req["sources"][0]
+    assert src["verification"] == "accepted_peer_evidence"
+    assert "backend/api.py:24" in src["content"]
+
+
+def test_graph_peer_prompt_carries_request_and_accepted_upstream(tmp_path, monkeypatch):
+    runtime, store = workspace(tmp_path)
+    request = store.create("Inspect contract then implement API client")
+    assessment_payload = {
+        "requirements": [
+            {"id": "R1", "text": "Inspect API contract", "evidence_refs": ["request:current"]},
+            {"id": "R2", "text": "Implement client", "evidence_refs": ["request:current"]},
+        ],
+        "blocking_unknowns": [], "decision": "direct",
+        "rationale": "Two actionable tasks with explicit ordering",
+    }
+    current = store.assess(request["request_id"], 1, assessment_payload)
+    graph = task_graph_from_payload({"nodes": [
+        {
+            "node_id": "A", "repository": "backend", "route": "codex-balanced",
+            "task_packet": {"objective": "Inspect contract", "scope": ["src"],
+                            "acceptance_criteria": ["Capture contract with file:line"]}
+        },
+        {
+            "node_id": "B", "repository": "frontend", "route": "codex-balanced",
+            "depends_on": ["A"],
+            "task_packet": {"objective": "Implement client", "scope": ["src"],
+                            "acceptance_criteria": ["Pass client tests"]}
+        }
+    ]})
+    gr = GraphRuntime(GraphRuntimeStore(runtime.db),
+                      readiness_guard=store.assert_graph_ready)
+    gid = gr.start_graph(graph, repository_names=runtime.repos().keys())["graph_run_id"]
+    store.bind_graph(gid, request["request_id"], current["revision"],
+                     ["A", "B"], {"A": ["R1"], "B": ["R2"]})
+    async def execute(node):
+        return {"state": "settled", "session_id": "native-" + node.node_id,
+                "turn_id": "turn-" + node.node_id,
+                "agent_response": "POST /orders response from backend/api.py:24"}
+    executed = asyncio.run(gr.delegate_next(gid, executor=execute))
+    from qiqi_delegate.task_graph_runtime import decisions_from_payload
+    gr.submit_decisions(
+        gid, decisions_from_payload([{"node_id": "A", "action": "accept"}]),
+        expected_revision=executed["revision"],
+        lead_dispositions=[{
+            "turn_id": "turn-A", "action": "accept", "reason": "Reviewed", "node_id": "A",
+        }],
+    )
+
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(runtime.root))
+    import importlib
+    server = importlib.import_module("qiqi_delegate.server")
+    monkeypatch.setattr(server, "task_requests", store)
+    monkeypatch.setattr(server, "graph_runtime", gr)
+    captured = {}
+    async def fake_delegate(**kwargs):
+        captured["packet"] = kwargs["packet"]
+        return {"state": "settled"}
+    monkeypatch.setattr(server.runtime, "delegate", fake_delegate)
+    node = next(n for n in graph.nodes if n.node_id == "B")
+    asyncio.run(server._graph_execute(gid, node))
+    prompt = render_task_prompt(captured["packet"])
+    assert "Original user request (verbatim): Inspect contract then implement API client" in prompt
+    assert "Requirements for this node: Implement client" in prompt
+    assert "Accepted upstream Peer report (A;" in prompt
+    assert "backend/api.py:24" in prompt
