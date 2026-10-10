@@ -384,11 +384,15 @@ whose Herdr workspace
 is preserved remain `interrupted` and block further evaluator launches until
 an operator confirms worker termination using `recover-final-evaluation`.
 Finalization checks graph/request revisions and the live multi-repository
-manifest digest, then re-checks it AFTER SQLite commits. A source mutation
-during finalization revokes the delivered flag with an audit record and
-returns an error, not a successful delivery. Subsequent source changes
-also stale any prior PASS on reads. SQLite alone cannot prevent arbitrary
-external filesystem writes after the final freshness check.
+manifest digest. **After SQLite commits**, it reloads `repos.yaml`, resolves
+the current Graph repository names to their canonical Git roots, rechecks
+Graph/Task Request eligibility, and recomputes the manifest against **those
+freshly registered paths**. Repository remaps/removals, malformed registry
+configuration, or changed worktree contents revoke the delivered flag with
+a durable audit record and return an error—not successful delivery. Later
+registry or source changes also stale any previous PASS on reads. SQLite
+alone cannot prevent external filesystem/registry writes after the final
+freshness check.
 
 ## Native capture và trạng thái lỗi
 
