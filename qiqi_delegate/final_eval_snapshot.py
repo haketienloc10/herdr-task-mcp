@@ -119,20 +119,24 @@ def _reject_sparse_checkout(root: Path) -> None:
             )
 
 
-def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
+def _files(root: Path, head: str | None) -> tuple[list[str], set[str], set[str]]:
     """List current files *and* tracked paths removed from the worktree.
 
     Git's cached index retains unstaged deletions, whereas staged deletions
-    vanish from the index. Include HEAD, index and untracked paths so both
-    forms of deletion (and renames) are represented in the final manifest.
+    vanish from the index. Include HEAD, index and untracked paths to capture
+    current files, but accept deletions ONLY for paths present in HEAD.
+    Index-only absent paths (intent-to-add or a staged addition subsequently
+    removed from the worktree) have no previous committed content and must
+    never become trusted deletion evidence.
     """
     _reject_gitlinks(root, head)
     _reject_sparse_checkout(root)
     tracked = _git_paths(root, "ls-files", "--cached", "-z")
-    if head is not None:
-        tracked.update(_git_paths(
-            root, "ls-tree", "-r", "--name-only", "-z", head,
-        ))
+    head_paths = (
+        _git_paths(root, "ls-tree", "-r", "--name-only", "-z", head)
+        if head is not None else set()
+    )
+    tracked.update(head_paths)
     others = _git_paths(
         root, "ls-files", "--others", "--exclude-standard", "-z",
     )
@@ -152,7 +156,7 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
                 Path(name).name in FORBIDDEN_BASENAMES or
                 (Path(name).name.startswith(".env.") and Path(name).name != ".env.example")):
             raise ValueError("unsafe or sensitive file in evaluation snapshot: " + name)
-    return names, tracked
+    return names, tracked, head_paths
 
 
 def _file_present(root: Path, relative: str) -> bool:
@@ -222,7 +226,7 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
             head = None
         entries = []
         deleted_paths = []
-        names, tracked = _files(root, head)
+        names, tracked, head_paths = _files(root, head)
         for relative in names:
             if not _file_present(root, relative):
                 if relative not in tracked:
@@ -231,6 +235,14 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
                     # hide from the manifest.
                     raise RuntimeError(
                         "untracked evaluation file disappeared: " + relative
+                    )
+                if relative not in head_paths:
+                    # Intent-to-add and staged new files have no committed
+                    # previous content. Classifying their absence as a
+                    # deletion would allow fabricated deletion-only PASS.
+                    raise ValueError(
+                        "evaluation snapshot refuses missing index-only path "
+                        "without HEAD history: " + relative
                     )
                 deleted_paths.append(relative)
                 continue
