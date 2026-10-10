@@ -389,3 +389,68 @@ def test_duplicate_active_evaluation_does_not_dispatch_again(tmp_path, monkeypat
     assert len(calls) == 1
     assert first["status"] == "passed"
     assert first["evaluation_id"] == second["evaluation_id"]
+
+
+
+def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
+    tmp_path, monkeypatch,
+):
+    import qiqi_delegate.runtime as runtime_module
+    from qiqi_delegate.core import build_task_packet
+
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    repos = runtime.repos()
+    binding = requests.graph_binding(gid)
+    graph_revision = graph_rt.get_graph(gid)["revision"]
+    from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot
+    with EvaluationSnapshot(repos) as snap:
+        reserved, _created = coordinator.store.reserve(
+            gid, graph_revision, binding["request_id"],
+            binding["request_revision"], "codex-evaluator",
+            snap.manifest, snap.digest,
+        )
+        eid = reserved["evaluation_id"]
+        captured = {}
+        monkeypatch.setattr(runtime_module.shutil, "which", lambda _: "/usr/bin/herdr")
+        async def ensure():
+            return None
+        async def fake_json(*args, **_kw):
+            assert args[:3] == ("workspace", "create", "--cwd")
+            captured["cwd"] = args[3]
+            return {"workspace": {"workspace_id": "test-workspace"},
+                    "root_pane": {"pane_id": "test-pane"}}
+        async def fake_start(pane_id, adapter, argv):
+            captured["adapter"] = adapter
+            captured["argv"] = argv
+            # The association MUST already be committed before the agent starts.
+            bound = coordinator.store.get(eid)
+            assert bound["status"] == "evaluating"
+            assert bound["turn_id"]
+            raise RuntimeError("captured evaluator arguments without launching")
+        async def fake_run(*args, **kw):
+            assert args[:2] == ("workspace", "close")
+            return (0, "", "")
+        monkeypatch.setattr(runtime, "_ensure_herdr_server", ensure)
+        monkeypatch.setattr(runtime, "_json", fake_json)
+        monkeypatch.setattr(runtime, "_start_agent", fake_start)
+        monkeypatch.setattr(runtime, "_run", fake_run)
+        with pytest.raises(RuntimeError, match="without launching"):
+            asyncio.run(runtime.delegate(
+                repository="backend", route="codex-evaluator",
+                packet=build_task_packet(
+                    objective="Independent review",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Validate data contract"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id=eid,
+            ))
+        assert captured["cwd"] == str(snap.paths["backend"])
+        assert captured["cwd"] != str(repos["backend"])
+        argv = captured["argv"]
+        assert argv[argv.index("--add-dir") + 1] == str(snap.paths["frontend"])
+        assert str(repos["frontend"]) not in argv
+        assert "--sandbox" in argv
+        assert argv[argv.index("--sandbox") + 1] == "read-only"
+        assert "--yolo" not in argv
