@@ -466,6 +466,43 @@ class FinalEvaluationStore:
                 raise RuntimeError("concurrent final evaluation transition")
         return self.get(evaluation_id)
 
+    def revoke_finalization(self, evaluation_id: str, *, reason: str) -> None:
+        """Compensate a committed finalize when the live source moves mid-call.
+
+        This is intentionally independent of the current manifest/graph state:
+        the coordinator may be unable to inspect the source after mutation.
+        Retain PASS as historical evidence, but remove delivery authorization
+        and durably audit why the previously set finalized flag was revoked.
+        """
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT finalized_at_ns FROM final_evaluations "
+                "WHERE evaluation_id=?", (evaluation_id,),
+            ).fetchone()
+            if row is None or row["finalized_at_ns"] is None:
+                raise RuntimeError("cannot revoke non-finalized evaluation")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS final_evaluation_revocations (
+                    evaluation_id TEXT NOT NULL,
+                    previous_finalized_at_ns INTEGER NOT NULL,
+                    revoked_at_ns INTEGER NOT NULL,
+                    reason TEXT NOT NULL
+                )
+            """)
+            updated = db.execute(
+                "UPDATE final_evaluations SET finalized_at_ns=NULL, "
+                "detail=?, updated_at_ns=? "
+                "WHERE evaluation_id=? AND finalized_at_ns=?",
+                (reason, time.time_ns(), evaluation_id, row["finalized_at_ns"]),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("concurrent final evaluation revocation")
+            db.execute(
+                "INSERT INTO final_evaluation_revocations VALUES (?, ?, ?, ?)",
+                (evaluation_id, row["finalized_at_ns"], time.time_ns(), reason),
+            )
+
     def finalize(
         self, evaluation_id: str, graph_revision: int,
         request_revision: int, manifest_digest: str,
