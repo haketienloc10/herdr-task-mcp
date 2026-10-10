@@ -22,6 +22,13 @@ FORBIDDEN_BASENAMES = {".env", ".env.local", ".env.production", ".npmrc",
                        ".pypirc", "id_rsa", "id_ed25519", "credentials.json"}
 FORBIDDEN_PATH_PARTS = {".git", ".herdr-task-mcp", ".qiqi", ".ssh", ".aws",
                         ".venv", "node_modules", "__pycache__"}
+# Generated metadata is placed inside isolated repository copies. Collision
+# with a real tracked/untracked product file would silently overwrite bytes
+# while leaving the original SHA256 recorded in the evaluation manifest.
+RESERVED_EVALUATION_PATHS = {
+    ".qiqi-evaluation-manifest.json",
+    ".qiqi-final-task-sources",
+}
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -90,6 +97,11 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
         raise ValueError("evaluation snapshot has no files or exceeds file-count limit")
     for name in names:
         parts = Path(name).parts
+        if any(name == reserved or name.startswith(reserved + "/")
+               for reserved in RESERVED_EVALUATION_PATHS):
+            raise ValueError(
+                "evaluation snapshot reserved metadata path collision: " + name
+            )
         if (Path(name).is_absolute() or not parts or
                 any(part in {"", ".", ".."} for part in parts) or
                 any(part in FORBIDDEN_PATH_PARTS for part in parts) or
