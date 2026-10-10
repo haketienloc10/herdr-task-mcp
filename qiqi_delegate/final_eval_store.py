@@ -375,6 +375,16 @@ class FinalEvaluationStore:
         if verdict == "pass" and (
             (len(manifest) > 1 and (
                 not checks or
+                # Every successful integration check must genuinely compare
+                # evidence from two or more distinct repositories. Merely
+                # covering them in separate single-module checks is not an
+                # independent cross-module verification.
+                any(
+                    len({e["repository"] for e in check["evidence"]}) < 2
+                    for check in checks
+                ) or
+                # Multiple cross-repo checks are allowed, but collectively
+                # they must cover every repository in the TaskGraph.
                 set(manifest) - {
                     e["repository"]
                     for check in checks
