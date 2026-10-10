@@ -191,7 +191,7 @@ QiQi phân biệt phần `completed` và `remaining`, đối chiếu chỉ dẫn
   python -m qiqi_delegate.maintenance recover-ownerless-discovery --workspace /path/to/control-workspace --discovery-id UUID --worker-termination-confirmed
   ```
 
-  Không đặt cờ xác nhận khi worker còn chạy. Lệnh không mở qua MCP Lead, chỉ xử lý record ownerless đúng ID và ghi audit. Nếu đã có native captured turn hợp lệ, recovery giữ nguyên full evidence và gắn vào context; nếu chưa, chuyển sang `interrupted` để giải phóng slot.
+  Không đặt cờ xác nhận khi worker còn chạy. Lệnh không mở qua MCP Lead, chỉ xử lý record ownerless đúng ID và ghi audit. `show-discovery` chỉ đọc đúng record yêu cầu và **không chạy recovery toàn cục**; `recover-ownerless-discovery` chỉ được thay đổi đúng Discovery ID đã xác nhận. Cơ chế recovery tự động khi khởi động MCP server thông thường vẫn được duy trì. Nếu đã có native captured turn hợp lệ, recovery giữ nguyên full evidence và gắn vào context; nếu chưa, chuyển sang `interrupted` để giải phóng slot.
 - **Discovery no-write chỉ bằng prompt.** Route Codex có thể giữ `--yolo`; `--add-dir` không phải sandbox read-only. Agent vẫn có thể ghi vào repo bổ sung dù instruction cấm, write claim không bao phủ hết các repo này. Chỉ sử dụng trên repository đáng tin cậy.
 - Runtime chỉ kiểm tra cấu trúc, refs, digest và revision; không đảm bảo tuyệt đối suy luận ngữ nghĩa của QiQi. Cần execution trace thật để kiểm chứng LLM có tuân thủ.
 
