@@ -90,7 +90,9 @@ def _read_file(root: Path, path: str) -> tuple[str, str]:
 
 class TaskRequestStore:
     def __init__(self, database: Path, workspace: Path,
-                 repos: Callable[[], dict[str, Path]]):
+                 repos: Callable[[], dict[str, Path]], *,
+                 recover_on_startup: bool = True):
+        """Initialize storage; maintenance callers can opt out of global recovery."""
         self.database, self.workspace, self.repos = database, workspace, repos
         with self._connect() as db:
             db.executescript("""
@@ -138,7 +140,10 @@ class TaskRequestStore:
             ):
                 if name not in columns:
                     db.execute(f"ALTER TABLE task_discoveries ADD COLUMN {name} {field_type}")
-        self.recover_abandoned_discoveries()
+        # Regular MCP startup reconciles abandoned workers. Operator-facing
+        # inspection and exact-ID recovery must never mutate unrelated tasks.
+        if recover_on_startup:
+            self.recover_abandoned_discoveries()
 
     def _recover_abandoned_locked(
         self, db: sqlite3.Connection, request_id: str | None = None,
