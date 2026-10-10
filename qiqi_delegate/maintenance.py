@@ -10,6 +10,7 @@ from typing import Any
 
 from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
+from qiqi_delegate.task_request import TaskRequestStore
 
 
 def _validated_runtime(
@@ -194,6 +195,33 @@ def recover_interrupted_attempt(
     )
 
 
+def _task_request_store(workspace: Path) -> TaskRequestStore:
+    if not workspace.is_dir():
+        raise ValueError(f"workspace directory does not exist: {workspace}")
+    runtime = DelegateRuntime(workspace)
+    return TaskRequestStore(runtime.db, runtime.root, runtime.repos)
+
+
+def show_discovery(*, workspace: Path, discovery_id: str) -> dict[str, Any]:
+    """Inspect one Discovery reservation without requiring repo access."""
+    return _task_request_store(workspace).inspect_discovery(discovery_id)
+
+
+def recover_ownerless_discovery(
+    *, workspace: Path, discovery_id: str,
+    worker_termination_confirmed: bool,
+) -> dict[str, Any]:
+    """Release ONLY an exact legacy ownerless Discovery after operator confirmation."""
+    if worker_termination_confirmed is not True:
+        raise ValueError(
+            "verify the legacy Discovery worker has terminated before "
+            "passing --worker-termination-confirmed"
+        )
+    return _task_request_store(workspace).recover_ownerless_discovery(
+        discovery_id, worker_termination_confirmed=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Operator-only QiQi maintenance; not an MCP tool",
@@ -239,6 +267,24 @@ def main(argv: list[str] | None = None) -> int:
         help="I verified the old worker stopped and released any repository write claim",
     )
 
+    show_discovery_action = actions.add_parser(
+        "show-discovery",
+        help="Inspect one exact Discovery record, including legacy ownerless reservations",
+    )
+    show_discovery_action.add_argument("--workspace", required=True, type=Path)
+    show_discovery_action.add_argument("--discovery-id", required=True)
+
+    legacy_recovery = actions.add_parser(
+        "recover-ownerless-discovery",
+        help="Recover an exact ownerless legacy Discovery after verifying worker termination",
+    )
+    legacy_recovery.add_argument("--workspace", required=True, type=Path)
+    legacy_recovery.add_argument("--discovery-id", required=True)
+    legacy_recovery.add_argument(
+        "--worker-termination-confirmed", action="store_true",
+        help="I have verified the old MCP/Herdr Discovery worker has stopped",
+    )
+
     args = parser.parse_args(argv)
     try:
         if args.action == "show-claim":
@@ -248,6 +294,15 @@ def main(argv: list[str] | None = None) -> int:
                 workspace=args.workspace,
                 repository=args.repository,
                 claim_id=args.claim_id,
+                worker_termination_confirmed=args.worker_termination_confirmed,
+            )
+        elif args.action == "show-discovery":
+            output = show_discovery(
+                workspace=args.workspace, discovery_id=args.discovery_id,
+            )
+        elif args.action == "recover-ownerless-discovery":
+            output = recover_ownerless_discovery(
+                workspace=args.workspace, discovery_id=args.discovery_id,
                 worker_termination_confirmed=args.worker_termination_confirmed,
             )
         elif args.action == "show-attempt":
