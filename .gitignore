@@ -1,7 +1,20 @@
-node_modules/
+# Python environments and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
 dist/
-*.tsbuildinfo
+
+# Test and local runtime state
+.pytest_cache/
+.coverage
+htmlcov/
+.herdr-task-mcp/
 *.sqlite*
+
+# Local secrets and editor files
 .env
-coverage/
+.env.*
 .DS_Store
