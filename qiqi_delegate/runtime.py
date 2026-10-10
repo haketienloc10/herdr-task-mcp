@@ -526,7 +526,8 @@ class DelegateRuntime:
 
     async def delegate(self, *, repository: str, route: str, packet: TaskPacket,
                        session_id: str | None = None,
-                       discovery_repositories: tuple[str, ...] | None = None) -> dict:
+                       discovery_repositories: tuple[str, ...] | None = None,
+                       discovery_id: str | None = None) -> dict:
         repos = self.repos()
         if repository not in repos:
             raise ValueError(f"unknown repository: {repository}; available: {', '.join(repos)}")
@@ -554,6 +555,22 @@ class DelegateRuntime:
             if row is None or row["repository"] != repository or row["adapter"] != adapter:
                 raise ValueError("unknown session or session owned by another repository/agent")
         turn_id = str(uuid.uuid4())
+        if discovery_id is not None:
+            if discovery_repositories is None:
+                raise ValueError("discovery_id may only be used for Discovery")
+            # Establish the association BEFORE launching an agent; native
+            # capture and the reservation use one durable SQLite database.
+            # A crash after persisting the turn but before the MCP caller
+            # attaches its source can now recover the complete result.
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                bound = db.execute(
+                    "UPDATE task_discoveries SET turn_id=? "
+                    "WHERE discovery_id=? AND state='requested' AND turn_id IS NULL",
+                    (turn_id, discovery_id),
+                )
+                if bound.rowcount != 1:
+                    raise RuntimeError("Discovery reservation missing or already bound")
         claim_id = "turn:" + turn_id
         self._claim(repository, claim_id, repository_root=repos[repository])
         workspace_id = None
