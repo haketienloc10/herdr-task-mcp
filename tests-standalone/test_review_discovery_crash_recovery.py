@@ -151,3 +151,120 @@ def test_pre_migration_unowned_reservation_recovers(tmp_path):
     assert len(new_store.append(
         rid, 2, {"kind": "inline", "text": "unblocked"},
     )["sources"]) == 16
+
+
+
+def test_restart_recovers_settled_turn_captured_before_source_append(tmp_path):
+    """The last review's crash window: turns INSERT committed, append not called."""
+    runtime, store = workspace(tmp_path)
+    rid = _request(store)
+    did = _reserve(store, rid)
+    long_result = "E" * 130_000 + " CRITICAL_CONTRACT: Idempotency-Key"
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("native-just-finished", "session-n", "backend", "codex-balanced",
+             "settled", long_result, 1234),
+        )
+        db.execute(
+            "UPDATE task_discoveries SET turn_id=? WHERE discovery_id=?",
+            ("native-just-finished", did),
+        )
+    # Crash happens here: runtime.delegate committed the turn but the server
+    # did not get to task_requests.append() or finish_discovery().
+    _simulate_process_exit(runtime.db, did)
+    restarted = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
+    request = restarted.get(rid)
+    assert request["revision"] == 3
+    assert request["assessment"] is None
+    assert request["discoveries"][0]["state"] == "settled"
+    assert request["discoveries"][0]["turn_id"] == "native-just-finished"
+    assert len(request["sources"]) == 16
+    source = request["sources"][-1]
+    assert source["kind"] == "peer_turn"
+    assert source["turn_id"] == "native-just-finished"
+    assert source["content"] == long_result
+    assert source["content"].endswith("CRITICAL_CONTRACT: Idempotency-Key")
+
+    # Idempotent recovery: source isn't added a second time.
+    restarted_again = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
+    assert restarted_again.get(rid)["revision"] == 3
+    assert len(restarted_again.get(rid)["sources"]) == 16
+
+
+def test_live_owner_turn_does_not_get_recovered_prematurely(tmp_path):
+    runtime, store = workspace(tmp_path)
+    rid = _request(store)
+    did = _reserve(store, rid)
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("live-unattached", "session-n", "backend", "codex-balanced",
+             "settled", "source:line contract", 1234),
+        )
+        db.execute(
+            "UPDATE task_discoveries SET turn_id=? WHERE discovery_id=?",
+            ("live-unattached", did),
+        )
+    another_store = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
+    request = another_store.get(rid)
+    assert request["revision"] == 2
+    assert request["discoveries"][0]["state"] == "requested"
+    assert len(request["sources"]) == 15
+    with pytest.raises(ValueError, match="reserved"):
+        another_store.append(rid, 2, {"kind": "inline", "text": "must wait"})
+
+
+def test_crash_before_native_turn_commit_marks_interrupted(tmp_path):
+    runtime, store = workspace(tmp_path)
+    rid = _request(store)
+    did = _reserve(store, rid)
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "UPDATE task_discoveries SET turn_id=? WHERE discovery_id=?",
+            ("turn-never-captured", did),
+        )
+    _simulate_process_exit(runtime.db, did)
+    recovered = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
+    request = recovered.get(rid)
+    assert request["revision"] == 2
+    assert request["discoveries"][0]["state"] == "interrupted"
+    assert request["discoveries"][0]["turn_id"] == "turn-never-captured"
+    assert len(request["sources"]) == 15
+    assert recovered.append(
+        rid, 2, {"kind": "inline", "text": "retry possible"}
+    )["revision"] == 3
+
+
+def test_runtime_binds_discovery_turn_id_before_launch(tmp_path, monkeypatch):
+    import qiqi_delegate.runtime as runtime_module
+    from qiqi_delegate.core import build_task_packet
+
+    runtime, store = workspace(tmp_path)
+    rid = _request(store)
+    did = _reserve(store, rid)
+    monkeypatch.setattr(runtime_module.shutil, "which", lambda _: "/bin/herdr")
+
+    def intercept_claim(repository, claim_id, *, repository_root):
+        # The invocation has not launched Herdr, but there already is a durable
+        # Discovery association with the turn allocated for this dispatch.
+        with sqlite3.connect(runtime.db) as db:
+            saved = db.execute(
+                "SELECT turn_id, state FROM task_discoveries WHERE discovery_id=?",
+                (did,),
+            ).fetchone()
+        assert saved[1] == "requested"
+        assert saved[0] and claim_id == "turn:" + saved[0]
+        raise RuntimeError("stop before Herdr launch")
+
+    monkeypatch.setattr(runtime, "_claim", intercept_claim)
+    packet = build_task_packet(
+        objective="Inspect flow", scope=["backend"],
+        acceptance_criteria=["Report file:line"],
+    )
+    with pytest.raises(RuntimeError, match="stop before Herdr launch"):
+        asyncio.run(runtime.delegate(
+            repository="backend", route="codex-balanced", packet=packet,
+            discovery_repositories=("backend",), discovery_id=did,
+        ))
+    assert store.get(rid)["discoveries"][0]["turn_id"] is not None
