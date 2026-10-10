@@ -220,6 +220,18 @@ class FinalEvaluationStore:
             ).fetchone()
         return self.get(row["evaluation_id"]) if row else None
 
+    def latest_finalized(self, graph_run_id: str) -> dict[str, Any] | None:
+        """Return the most recent finalized attempt for separate delivery projection."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT evaluation_id FROM final_evaluations "
+                "WHERE graph_run_id=? AND status='passed' "
+                "AND finalized_at_ns IS NOT NULL "
+                "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
+                (graph_run_id,),
+            ).fetchone()
+        return self.get(row["evaluation_id"]) if row else None
+
     def reserve(
         self, graph_run_id: str, graph_revision: int, request_id: str,
         request_revision: int, route: str,
@@ -244,6 +256,28 @@ class FinalEvaluationStore:
                     binding is None or binding["request_id"] != request_id or
                     binding["request_revision"] != request_revision):
                 raise RuntimeError("stale graph/request binding for final evaluation")
+            # A verified, already-finalized identical product has no work
+            # left to dispatch. Resolve this inside the same IMMEDIATE
+            # transaction as active-attempt reservation to avoid the race
+            # between two callers starting/finishing concurrently.
+            finalized = db.execute(
+                "SELECT evaluation_id FROM final_evaluations "
+                "WHERE graph_run_id=? AND status='passed' "
+                "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
+                "AND request_id=? AND request_revision=? "
+                "AND manifest_digest=? "
+                "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
+                (graph_run_id, graph_revision, request_id,
+                 request_revision, digest),
+            ).fetchone()
+            if finalized is not None:
+                return_id = finalized["evaluation_id"]
+                created = False
+                # Stop here: do not accidentally process older interrupted
+                # attempts or allocate a fresh ID for an unchanged deliverable.
+                # The coordinator rechecks live eligibility/freshness before
+                # presenting the finalized result.
+                return self.get(return_id), created
             interrupted = db.execute(
                 "SELECT evaluation_id FROM final_evaluations "
                 "WHERE graph_run_id=? AND status='interrupted' LIMIT 1",
@@ -325,19 +359,34 @@ class FinalEvaluationStore:
             if not isinstance(items, list) or (mandatory and not items):
                 raise ValueError("evaluation evidence is absent")
             for item in items:
-                if not isinstance(item, dict) or set(item) != {
-                    "repository", "path", "sha256", "locator"
-                }:
-                    raise ValueError("evidence needs repository, path, sha256, locator")
-                if (not isinstance(item["locator"], str)
-                        or not item["locator"].strip()
-                        or not all(isinstance(item[k], str) for k in (
-                            "repository", "path", "sha256"
+                if not isinstance(item, dict):
+                    raise ValueError("evaluation evidence must be an object")
+                # Existing file evidence is unchanged. For a deliberate
+                # tracked deletion, use a *disjoint* tagged representation:
+                # {kind: "deleted", repository, path, locator}. SHA256 is
+                # invalid for absent files, and a fabricated tombstone fails
+                # membership against manifest.deleted_paths.
+                deletion = item.get("kind") == "deleted"
+                expected_fields = (
+                    {"kind", "repository", "path", "locator"} if deletion
+                    else {"repository", "path", "sha256", "locator"}
+                )
+                if set(item) != expected_fields:
+                    raise ValueError("malformed file or deletion evidence fields")
+                if (any(not isinstance(item[k], str) or not item[k].strip()
+                        for k in ("repository", "path", "locator"))
+                        or (not deletion and (
+                            not isinstance(item["sha256"], str)
+                            or not item["sha256"].strip()
                         ))
                         or not evidence_is_in_manifest(
-                            manifest, item["repository"], item["path"], item["sha256"]
+                            manifest, item["repository"], item["path"],
+                            None if deletion else item["sha256"],
+                            kind="deleted" if deletion else "file",
                         )):
-                    raise ValueError("evidence does not match captured repository manifest")
+                    raise ValueError(
+                        "evidence does not match captured repository manifest"
+                    )
         for item in requirements:
             if not isinstance(item, dict) or set(item) != {
                 "requirement_id", "status", "evidence", "rationale"
