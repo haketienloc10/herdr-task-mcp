@@ -93,17 +93,19 @@ Sửa `../qiqi-control/agent-routing.yaml`:
 routes:
   codex-balanced:
     agent: codex
-    args: []
+    args: ["--yolo"]
   claude-balanced:
     agent: claude
-    args: []
+    args: ["--permission-mode", "auto"]
 ~~~
 
 Trong lời gọi MCP, truyền **tên route** như `codex-balanced`. Không truyền `codex` thay cho tên route.
 
 `args` chứa tham số CLI của agent. Runtime tự cấu hình native result hook. Không ghi đè thiết lập hook qua `args`.
 
-**CAUTION:** Chỉ bật tùy chọn bỏ qua approval khi đã kiểm tra quyền ghi của Peer. Peer có thể sửa file trong Git root được giao.
+**CAUTION:** `--yolo` cho phép Codex bỏ qua approval và sandbox thông thường. `--permission-mode auto` chọn chế độ quyền tự động của Claude. Chỉ sử dụng các mặc định này trong workspace và Git repository mà bạn tin cậy.
+
+Muốn giữ chế độ yêu cầu xác nhận, sửa `args: []` cho từng route. Installer chỉ tạo `agent-routing.yaml` khi file chưa tồn tại; chạy lại installer không ghi đè cấu hình hiện có.
 
 ## Bắt đầu giao việc
 
