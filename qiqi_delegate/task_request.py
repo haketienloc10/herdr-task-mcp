@@ -435,6 +435,9 @@ class TaskRequestStore:
         resolved = self._resolve_source(source)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            # Recovery may attach a native capture, increment revision and
+            # invalidate readiness. Never base an append on pre-recovery state.
+            self._recover_abandoned_locked(db, request_id)
             row = db.execute(
                 "SELECT sources_json, revision FROM task_requests WHERE request_id=?",
                 (request_id,),
@@ -442,7 +445,6 @@ class TaskRequestStore:
             if row is None or row["revision"] != expected_revision:
                 raise RuntimeError("stale task context revision")
             sources = json.loads(row["sources_json"])
-            self._recover_abandoned_locked(db, request_id)
             pending = db.execute(
                 "SELECT discovery_id FROM task_discoveries "
                 "WHERE request_id=? AND state='requested'",
@@ -462,12 +464,14 @@ class TaskRequestStore:
                     raise ValueError("Discovery reservation accepts only captured Peer evidence")
                 if len(sources) + len(reserved) > MAX_CONTEXT_SOURCES:
                     raise ValueError("Discovery source reservation capacity exhausted")
-            db.execute(
+            changed_request = db.execute(
                 "UPDATE task_requests SET revision=revision+1, sources_json=?, "
                 "assessment_json=NULL WHERE request_id=? AND revision=?",
                 (json.dumps(sources + [resolved], ensure_ascii=False),
                  request_id, expected_revision),
             )
+            if changed_request.rowcount != 1:
+                raise RuntimeError("concurrent task request revision update")
             if discovery_id is not None:
                 # Reservation is consumed atomically with the source append;
                 # finish_discovery will finalize this captured result afterward.
@@ -547,16 +551,28 @@ class TaskRequestStore:
             raise ValueError("Discovery requires matching readiness decision")
         discovery_id = str(uuid.uuid4())
         with self._connect() as db:
-            # Serialize against ordinary source appends and other Discovery
-            # reservations. Reject at capacity before any Peer is started.
+            # Recover first, then verify readiness and count capacity from the
+            # same transaction snapshot. Recovery may attach a captured Peer
+            # result, increment revision and invalidate the assessment.
             db.execute("BEGIN IMMEDIATE")
+            self._recover_abandoned_locked(db, request_id)
             row = db.execute(
-                "SELECT sources_json, revision FROM task_requests WHERE request_id=?",
+                "SELECT sources_json, revision, assessment_json "
+                "FROM task_requests WHERE request_id=?",
                 (request_id,),
             ).fetchone()
             if row is None or row["revision"] != current["revision"]:
-                raise RuntimeError("stale task context revision")
-            self._recover_abandoned_locked(db, request_id)
+                raise RuntimeError(
+                    "task context changed during Discovery recovery; "
+                    "reload and reassess before dispatch"
+                )
+            latest = (json.loads(row["assessment_json"])
+                      if row["assessment_json"] is not None else None)
+            if (latest is None or latest["decision"] != mode or
+                    not latest["blocking_unknowns"]):
+                raise ValueError(
+                    "Discovery readiness invalidated by recovery; reassess before dispatch"
+                )
             pending = db.execute(
                 "SELECT COUNT(*) FROM task_discoveries "
                 "WHERE request_id=? AND state='requested'",
@@ -589,11 +605,17 @@ class TaskRequestStore:
         # attaching). Other terminal outcomes release an unused reservation.
         previous = "attaching" if state == "settled" and turn_id else "requested"
         with self._connect() as db:
+            # On cancellation the runtime might have *already* stored its
+            # native settled turn, but the caller has no response/turn_id.
+            # Preserve the pre-launch binding instead of replacing it with NULL.
+            # An explicit turn must also match the one already bound.
             result = db.execute(
-                "UPDATE task_discoveries SET state=?, turn_id=?, detail=? "
-                "WHERE discovery_id=? AND state=?",
+                "UPDATE task_discoveries "
+                "SET state=?, turn_id=COALESCE(turn_id, ?), detail=? "
+                "WHERE discovery_id=? AND state=? "
+                "AND (? IS NULL OR turn_id IS NULL OR turn_id=?)",
                 (state, turn_id, detail[:1000] if detail else None,
-                 discovery_id, previous),
+                 discovery_id, previous, turn_id, turn_id),
             )
             if result.rowcount != 1:
                 raise ValueError("unknown or completed Discovery")
