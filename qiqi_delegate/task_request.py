@@ -123,6 +123,10 @@ class TaskRequestStore:
                     owner_start_token TEXT
                 );
             """)
+            # Serialize the read/ALTER cycle across concurrently starting MCP
+            # processes. executescript() commits before returning, so the lock
+            # must be acquired AFTER table creation but BEFORE PRAGMA.
+            db.execute("BEGIN IMMEDIATE")
             # Backward-compatible migration of databases written by Issue #6
             # before Discovery process ownership was tracked.
             columns = {
@@ -157,6 +161,11 @@ class TaskRequestStore:
             params = (request_id,)
         recovered = 0
         for row in db.execute(sql, params).fetchall():
+            # An ownerless legacy row is *not* evidence that the old worker
+            # stopped: a pre-migration MCP may still be running Discovery.
+            # Only explicit operator recovery can release such reservations.
+            if row["owner_pid"] is None:
+                continue
             if _owner_alive(row["owner_pid"], row["owner_start_token"]):
                 continue
 
