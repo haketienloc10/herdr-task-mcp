@@ -405,8 +405,10 @@ class GraphRuntime:
         store: GraphRuntimeStore,
         *,
         repository_key: Callable[[str], str] | None = None,
+        readiness_guard: Callable[[str], None] | None = None,
     ):
         self.store = store
+        self.readiness_guard = readiness_guard
         # The MCP runtime supplies canonical Git-root identities. Standalone
         # scheduler tests may use logical names when no workspace exists.
         self.repository_key = repository_key or (lambda name: name)
@@ -959,6 +961,8 @@ class GraphRuntime:
         wave is closed only after every claimed attempt reaches a terminal runtime state.
         """
 
+        if self.readiness_guard is not None:
+            self.readiness_guard(graph_run_id)
         _, snapshot, revision = self._snapshot(graph_run_id)
         graph_state = derive_graph_state(snapshot)
         if graph_state != "ready":

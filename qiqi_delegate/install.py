@@ -22,12 +22,17 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 
 - Lead không tự đọc, sửa, chạy lệnh, kiểm thử hoặc commit trong repository đích. Giao mọi công việc repository-scoped cho Peer qua MCP `qiqi_delegate`.
 - Lead chịu trách nhiệm lập TaskPacket, chọn repository và route, quản lý dependency, review evidence và quyết định ACCEPT/RETRY/REPLAN/BLOCK.
+- Trước khi giao implementation task mới, Lead giữ nguyên user request bằng prepare_task_request, resolve context nguồn tùy chọn và submit_context_assessment. Tài liệu/handoff KHÔNG bắt buộc.
+- Chỉ gọi Discovery khi thiếu thông tin ảnh hưởng đến kế hoạch. Nếu yêu cầu đủ rõ thì giao DIRECT; nếu thiếu một fact thì targeted_discovery; nếu chưa hiểu hệ thống thì full_discovery; nếu user intent mơ hồ thì báo blocker hoặc hỏi lại.
+- Với workflow mới, chỉ tạo graph khi assessment DIRECT và ánh xạ node với requirement IDs; với workflow cũ không có task_request_id phải coi là legacy_unassessed, không tuyên bố đã qua gate.
+- Discovery được phép điều tra nhiều Git root đã đăng ký thông qua delegate_discovery/--add-dir; đây là ngoại lệ CHỈ để đọc. Cấm sửa/tạo/xóa file, commit, chạy command gây side effect. Với --yolo, cấm ghi bằng prompt KHÔNG phải sandbox.
+- Nguồn được nhắc đến (spec, handoff, inline, Peer evidence) là optional. Tách user instruction, claim từ tài liệu, evidence do Peer báo cáo và unknown. Không tự coi label source là xác minh nội dung.
 - Chỉ sử dụng repository có tên chính xác trong `repos.yaml`. Không tự suy đoán đường dẫn, tạo, clone hoặc thêm repository nếu chưa được người dùng yêu cầu.
 - Mỗi TaskPacket phải tự đủ nghĩa với `objective`, `scope`, `acceptance_criteria` và context hoặc constraints cần thiết. Không dựa vào lịch sử hội thoại mà Peer không thể truy cập.
 - Khi giao việc khám phá, phân tích hoặc review, Lead đặt acceptance criteria yêu cầu giải thích luồng thực thi, giao diện/hợp đồng, trường hợp lỗi và evidence `file:line` phù hợp với phạm vi; không chỉ yêu cầu liệt kê công nghệ hoặc tệp.
 - Trước ACCEPT, Lead phải đọc `agent_response` của đúng attempt qua `get_node_reviews`, đối chiếu từng acceptance criterion với bằng chứng. Nếu thiếu chi tiết, thiếu chứng cứ hoặc còn mâu thuẫn thì RETRY với feedback cụ thể; không ACCEPT chỉ vì Peer đã `settled`.
 - Khi tổng hợp nhiều Peer, Lead giữ lại cơ chế hoạt động, chứng cứ nguồn và giới hạn xác minh quan trọng. Liên kết kết quả giữa các repository chỉ dựa trên evidence được Peer cung cấp; không đọc trực tiếp repository đích, không suy đoán contract chưa được kiểm chứng.
-- Peer chỉ làm việc trong Git root và phạm vi được giao. Không đọc hoặc sửa repository khác; không tự điều phối Peer khác.
+- Implementation Peer chỉ làm việc trong Git root và phạm vi được giao. Discovery Peer chỉ được đọc những Git root được cấp rõ ràng trong --add-dir; không sửa bất kỳ repo nào. Không tự điều phối Peer khác.
 - Dùng TaskGraph để quản lý các task có dependency. Chỉ cho downstream chạy sau khi Lead ACCEPT upstream; chỉ chạy song song khi không xung đột phạm vi ghi.
 - Dùng native captured response và evidence làm căn cứ review. Không đọc Herdr terminal để suy đoán final response; trạng thái `settled` không đồng nghĩa với ACCEPT.
 - Khi Peer báo lỗi hoặc blocker, Lead xem evidence rồi quyết định RETRY, REPLAN hoặc BLOCK. Không retry vô hạn hoặc tự tiếp quản công việc của Peer.

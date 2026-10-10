@@ -525,11 +525,27 @@ class DelegateRuntime:
         raise RuntimeError("native result hook did not capture final response; no screen fallback")
 
     async def delegate(self, *, repository: str, route: str, packet: TaskPacket,
-                       session_id: str | None = None) -> dict:
+                       session_id: str | None = None,
+                       discovery_repositories: tuple[str, ...] | None = None,
+                       discovery_id: str | None = None) -> dict:
         repos = self.repos()
         if repository not in repos:
             raise ValueError(f"unknown repository: {repository}; available: {', '.join(repos)}")
         adapter, args = self.route(route)
+        if discovery_repositories is not None:
+            if session_id is not None:
+                raise ValueError("Discovery RESUME is not supported in this workflow")
+            if not discovery_repositories or len(set(discovery_repositories)) != len(discovery_repositories):
+                raise ValueError("Discovery repositories must be unique and nonempty")
+            if repository not in discovery_repositories:
+                raise ValueError("Primary repository must be included in Discovery repositories")
+            if any(name not in repos for name in discovery_repositories):
+                raise ValueError("Discovery references an unregistered repository")
+            # All paths come from the checked repos.yaml registry, not agent-supplied args.
+            extra_roots = [str(repos[name]) for name in discovery_repositories
+                           if name != repository]
+            for path in extra_roots:
+                args += ["--add-dir", path]
         if not shutil.which(self.herdr_bin):
             raise RuntimeError(f"Herdr CLI not found: {self.herdr_bin}")
         if session_id:
@@ -539,6 +555,22 @@ class DelegateRuntime:
             if row is None or row["repository"] != repository or row["adapter"] != adapter:
                 raise ValueError("unknown session or session owned by another repository/agent")
         turn_id = str(uuid.uuid4())
+        if discovery_id is not None:
+            if discovery_repositories is None:
+                raise ValueError("discovery_id may only be used for Discovery")
+            # Establish the association BEFORE launching an agent; native
+            # capture and the reservation use one durable SQLite database.
+            # A crash after persisting the turn but before the MCP caller
+            # attaches its source can now recover the complete result.
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                bound = db.execute(
+                    "UPDATE task_discoveries SET turn_id=? "
+                    "WHERE discovery_id=? AND state='requested' AND turn_id IS NULL",
+                    (turn_id, discovery_id),
+                )
+                if bound.rowcount != 1:
+                    raise RuntimeError("Discovery reservation missing or already bound")
         claim_id = "turn:" + turn_id
         self._claim(repository, claim_id, repository_root=repos[repository])
         workspace_id = None
@@ -561,7 +593,7 @@ class DelegateRuntime:
                     agent_args += (["resume", session_id] if adapter == "codex"
                                    else ["--resume", session_id])
                 name, agent = await self._start_agent(pane_id, adapter, agent_args)
-                prompt = render_task_prompt(packet)
+                prompt = render_task_prompt(packet, discovery_repositories=discovery_repositories)
                 status, agent = await self._prompt(name, prompt, adapter)
                 native = self._native_id(agent, adapter)
                 if native is None:
