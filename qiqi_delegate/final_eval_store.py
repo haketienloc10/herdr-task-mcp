@@ -39,6 +39,7 @@ class FinalEvaluationStore:
                     raw_response TEXT,
                     report_json TEXT,
                     detail TEXT,
+                    cleanup_json TEXT,
                     owner_pid INTEGER NOT NULL,
                     owner_start_token TEXT,
                     created_at_ns INTEGER NOT NULL,
@@ -60,6 +61,10 @@ class FinalEvaluationStore:
             if "owner_start_token" not in columns:
                 db.execute(
                     "ALTER TABLE final_evaluations ADD COLUMN owner_start_token TEXT"
+                )
+            if "cleanup_json" not in columns:
+                db.execute(
+                    "ALTER TABLE final_evaluations ADD COLUMN cleanup_json TEXT"
                 )
         self.recover_abandoned()
 
@@ -172,6 +177,10 @@ class FinalEvaluationStore:
         result["manifest"] = json.loads(result.pop("manifest_json"))
         result["report"] = (json.loads(result.pop("report_json"))
                             if result["report_json"] else None)
+        result["cleanup"] = (
+            json.loads(result.pop("cleanup_json"))
+            if result["cleanup_json"] else None
+        )
         if result["turn_id"]:
             # Read-only recovery locator: even if cancellation happened after
             # native persistence but before returning to the coordinator, the
@@ -405,9 +414,18 @@ class FinalEvaluationStore:
         self, evaluation_id: str, *, raw_response: str | None,
         report: dict[str, Any] | None, status: str, detail: str | None = None,
         turn_id: str | None = None,
+        cleanup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if status not in FINISHED:
             raise ValueError("invalid terminal final evaluation state")
+        if cleanup is not None:
+            if status != "interrupted" or not isinstance(cleanup, dict):
+                raise ValueError("unconfirmed evaluator cleanup must be interrupted")
+            if not cleanup or any(
+                not isinstance(k, str) or not isinstance(v, str)
+                for k, v in cleanup.items()
+            ):
+                raise ValueError("invalid persisted evaluator cleanup metadata")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -488,11 +506,13 @@ class FinalEvaluationStore:
                     raise ValueError("PASS status conflicts with validated report")
             updated = db.execute(
                 "UPDATE final_evaluations SET status=?, raw_response=?, "
-                "report_json=?, detail=?, turn_id=COALESCE(turn_id, ?), "
+                "report_json=?, detail=?, cleanup_json=?, "
+                "turn_id=COALESCE(turn_id, ?), "
                 "updated_at_ns=? WHERE evaluation_id=? AND status IN "
                 "('requested','evaluating')",
                 (status, raw_response, json.dumps(report) if report else None,
-                 detail, turn_id, time.time_ns(), evaluation_id),
+                 detail, json.dumps(cleanup, sort_keys=True) if cleanup else None,
+                 turn_id, time.time_ns(), evaluation_id),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("concurrent final evaluation transition")
