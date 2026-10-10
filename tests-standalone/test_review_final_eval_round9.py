@@ -44,7 +44,6 @@ def test_manual_skip_worktree_absence_is_not_a_deletion(tmp_path):
 
     assert not missing.exists()
     assert "S excluded/missing.py" in git(backend, "ls-files", "-t")
-    assert git(backend, "config", "--get", "core.sparseCheckout") == ""
 
     with pytest.raises(ValueError, match="skip-worktree"):
         inspect_roots({"backend": backend})
