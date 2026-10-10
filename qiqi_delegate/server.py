@@ -368,20 +368,48 @@ async def delegate_discovery(
             discovery_id, "failed", detail=str(exc),
         )
         raise
-    task_requests.finish_discovery(
-        discovery_id, response.get("state", "failed"),
-        turn_id=response.get("turn_id"),
-    )
     updated = None
+    attachment_error = None
     if response.get("state") == "settled" and response.get("turn_id"):
-        updated = task_requests.append(
-            request_id, current["revision"],
-            {"kind": "peer_turn", "turn_id": response["turn_id"]},
+        try:
+            updated = task_requests.append(
+                request_id, current["revision"],
+                {"kind": "peer_turn", "turn_id": response["turn_id"]},
+                discovery_id=discovery_id,
+            )
+        except (ValueError, RuntimeError) as exc:
+            # The captured turn is already durable. Never hide that result
+            # behind a source-attachment error; the Lead may recover by
+            # adding its turn_id to a new request if necessary.
+            attachment_error = str(exc)
+            task_requests.finish_discovery(
+                discovery_id, "failed", turn_id=response["turn_id"],
+                detail="captured result not attached: " + attachment_error,
+            )
+        else:
+            task_requests.finish_discovery(
+                discovery_id, "settled", turn_id=response["turn_id"],
+            )
+            updated = task_requests.get(request_id)
+    else:
+        state = response.get("state", "failed")
+        if state == "settled":
+            state = "failed"
+            attachment_error = "settled Discovery response lacks a captured turn_id"
+        task_requests.finish_discovery(
+            discovery_id, state, turn_id=response.get("turn_id"),
+            detail=attachment_error,
         )
     return {
         "discovery_id": discovery_id, "result": response,
         "task_request": updated,
-        "next_step": "Review evidence and submit a new readiness assessment",
+        "attachment_error": attachment_error,
+        "next_step": (
+            "Review the captured result; if attachment failed, use the turn_id "
+            "as a source in a new request, otherwise submit a fresh readiness assessment"
+            if attachment_error else
+            "Review evidence and submit a new readiness assessment"
+        ),
     }
 
 
