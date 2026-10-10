@@ -357,22 +357,35 @@ class FinalEvaluationCoordinator:
         persisted = self.store.finalize(
             evaluation_id, graph["revision"], task["revision"], current_digest,
         )
-        # SQLite protects graph/request state, but cannot hold a transaction
-        # across arbitrary filesystem writers. Reinspect AFTER the finalization
-        # commit; if sources changed while it committed, revoke the finalized
-        # flag and fail closed instead of handing Lead a successful delivery.
+        # SQLite protects graph/request state, but cannot lock repos.yaml or
+        # external filesystem writers. Re-resolve the COMPLETE eligible graph
+        # and its registered repository roots after commit; using the cached
+        # roots would incorrectly approve a remapped/deleted registration.
         try:
-            still_current = (
-                manifest_digest(inspect_roots(roots)) == current_digest
+            (fresh_graph, _fresh_authored, _fresh_binding, fresh_task,
+             fresh_names, fresh_roots) = self._eligible(
+                graph_run_id, expected_revision,
             )
-        except (OSError, RuntimeError, ValueError):
+            still_current = (
+                fresh_graph["revision"] == graph["revision"]
+                and fresh_task["revision"] == task["revision"]
+                and fresh_names == _names
+                and fresh_roots == roots
+                and manifest_digest(inspect_roots(fresh_roots)) == current_digest
+            )
+        except Exception:
+            # Missing/invalid repos.yaml, registry remaps, unavailable Git
+            # roots, stale request/graph, or snapshot read errors all fail
+            # closed. An inconclusive freshness check cannot authorize
+            # final delivery.
             still_current = False
         if not still_current:
             self.store.revoke_finalization(
-                evaluation_id, reason="repository changed during finalization",
+                evaluation_id,
+                reason="repository registry, graph/request or source changed during finalization",
             )
             raise RuntimeError(
-                "repository changed during finalization; "
-                "delivery was revoked and requires reevaluation"
+                "repository registry, graph/request or source changed during "
+                "finalization; delivery was revoked and requires reevaluation"
             )
         return persisted
