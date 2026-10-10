@@ -322,6 +322,12 @@ including cross-module contracts, before delivery is finalized.
    **one fresh native Evaluator session** with snapshot CWD + `--add-dir`
    for additional module roots. It passes the original request, requirements,
    current TaskGraph and all node acceptance criteria, not Peer report claims.
+   The primary snapshot also contains `.qiqi-final-task-sources/index.json`:
+   it indexes every original Task Request source (including unreferenced
+   sources that may reveal omitted requirements). All full source contents
+   are available as separate read-only files: no prompt-size truncation of
+   attached specifications or native captures. Missing/tampered sources block
+   evaluation before launch.
 5. Inspect `get_final_evaluation(graph_run_id, evaluation_id?)`. The durable
    structured report has `verdict`, `requirement_results`,
    `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
@@ -347,7 +353,11 @@ copy and deterministic manifests. Tracked paths deleted from the worktree,
 including staged deletions and staged/unstaged renames, are preserved as
 `deleted_paths` tombstones. They are not copied or treated as missing-file
 errors; restoring one changes the manifest digest and invalidates a prior PASS.
-Default bounds are 3,000 files/repo, 1 MB/file and 24 MB total. Snapshots are temporary and separate from original trees.
+Default bounds are 3,000 files/repo, 1 MB/file and 24 MB total.
+Snapshots are temporary and separate from original trees. Git submodules
+(gitlink mode 160000 in HEAD or index) are rejected rather than incorrectly
+recorded as deletions: recursively snapshotting submodule worktrees is not
+supported yet.
 `--add-dir` grants additional directory access: **it is not a sandbox**.
 The route is only allowed with explicit Codex `--sandbox read-only`.
 The feature does not execute arbitrary verification commands from reports or
@@ -360,10 +370,15 @@ A model finding no errors cannot prove mathematical correctness.
 **Crash/concurrency semantics:** Store evaluation IDs and native turn bindings
 before launch. Duplicate active requests do not dispatch a second agent.
 Failed/ambiguous/cancelled runs never PASS; diagnostic and native capture
-association remain auditable. Finalization checks graph/request revisions and
-the live multi-repository manifest digest inside the persisted gate operation.
-Operator must inspect uncertain external Herdr worker state before retrying
-an interrupted evaluator.
+association remain auditable. Startup-blocked agents whose Herdr workspace
+is preserved remain `interrupted` and block further evaluator launches until
+an operator confirms worker termination using `recover-final-evaluation`.
+Finalization checks graph/request revisions and the live multi-repository
+manifest digest, then re-checks it AFTER SQLite commits. A source mutation
+during finalization revokes the delivered flag with an audit record and
+returns an error, not a successful delivery. Subsequent source changes
+also stale any prior PASS on reads. SQLite alone cannot prevent arbitrary
+external filesystem writes after the final freshness check.
 
 ## Native capture và trạng thái lỗi
 
