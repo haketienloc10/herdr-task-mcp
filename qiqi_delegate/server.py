@@ -15,6 +15,7 @@ from qiqi_delegate.task_graph_runtime import (
 )
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_graph import GraphNode
+from qiqi_delegate.task_request import TaskRequestStore
 
 class Fact(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -54,6 +55,28 @@ class Graph(BaseModel):
     model_config = ConfigDict(extra="forbid")
     nodes: list[Node] = Field(min_length=1)
 
+class RequestSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["inline", "repo_file", "workspace_file", "peer_turn"]
+    text: str | None = None
+    label: str | None = None
+    repository: str | None = None
+    path: str | None = None
+    turn_id: str | None = None
+
+class RequirementInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    text: str
+    evidence_refs: list[str]
+
+class ReadinessAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    requirements: list[RequirementInput]
+    blocking_unknowns: list[str]
+    decision: Literal["direct", "targeted_discovery", "full_discovery", "blocked"]
+    rationale: str
+
 class ReviewLocator(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str
@@ -78,9 +101,11 @@ class Decision(BaseModel):
     )
 
 runtime = DelegateRuntime(workspace_root())
+task_requests = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
 graph_runtime = GraphRuntime(
     GraphRuntimeStore(runtime.db),
     repository_key=lambda name: str(runtime.repos()[name]),
+    readiness_guard=task_requests.assert_graph_ready,
 )
 mcp = MCPServer(
     "QiQi Delegate (standalone)",
@@ -90,6 +115,11 @@ mcp = MCPServer(
         "Lead owns technical acceptance. Native result hooks are the only answer source. "
         "No terminal scraping, Supervisor, or sibling repository reads. "
         "Call workspace_info first for registered repositories and route names. "
+        "For new work, register the user request and optional sources using "
+        "prepare_task_request; assess readiness before implementation. "
+        "Use direct delegation when requirements are actionable, and "
+        "targeted/full Discovery only for blocking unknowns. "
+        "A document or handoff is never required. "
         "For multiple nodes: start_graph, delegate_next, get_node_reviews, submit_decisions. "
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
         "For discovery, analysis or review, author acceptance criteria requiring relevant "
@@ -196,6 +226,109 @@ async def workspace_info() -> dict[str, Any]:
 
 @mcp.tool()
 @_public_tool_errors
+async def prepare_task_request(
+    user_request: str,
+    sources: list[RequestSource] | None = None,
+) -> dict[str, Any]:
+    """Preserve raw user intent and optional context sources without Discovery."""
+    return task_requests.create(
+        user_request, [source.model_dump(exclude_none=True) for source in (sources or [])]
+    )
+
+
+@mcp.tool()
+@_public_tool_errors
+async def get_task_request(request_id: str) -> dict[str, Any]:
+    """Read intent, source snapshots, assessment and current staleness."""
+    return task_requests.get(request_id)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def add_task_source(
+    request_id: str, expected_revision: int, source: RequestSource,
+) -> dict[str, Any]:
+    """Append an explicit source; invalidate previous readiness assessment."""
+    return task_requests.append(
+        request_id, expected_revision, source.model_dump(exclude_none=True),
+    )
+
+
+@mcp.tool()
+@_public_tool_errors
+async def submit_context_assessment(
+    request_id: str, expected_revision: int, assessment: ReadinessAssessment,
+) -> dict[str, Any]:
+    """Record evidence-linked readiness, not LLM self-confidence."""
+    return task_requests.assess(
+        request_id, expected_revision, assessment.model_dump(),
+    )
+
+
+@mcp.tool()
+@_public_tool_errors
+async def delegate_discovery(
+    request_id: str,
+    repository_names: list[str],
+    route: str,
+    questions: list[str],
+    mode: Literal["targeted_discovery", "full_discovery"] = "targeted_discovery",
+) -> dict[str, Any]:
+    """One prompt-only no-write Discovery Peer across registered roots.
+
+    No enforced read-only sandbox. Codex --yolo remains supported.
+    """
+    current = task_requests.get(request_id)
+    assessment = current["assessment"]
+    if (assessment is None or assessment["decision"] != mode or
+            not assessment["blocking_unknowns"]):
+        raise ValueError("Discovery requires a matching readiness assessment with blockers")
+    if not repository_names or len(set(repository_names)) != len(repository_names):
+        raise ValueError("Discovery needs a unique nonempty repository list")
+    roots = runtime.repos()
+    if any(name not in roots for name in repository_names):
+        raise ValueError("Discovery repository must be registered in repos.yaml")
+    if not questions or any(not isinstance(q, str) or not q.strip() for q in questions):
+        raise ValueError("Discovery questions must be nonempty")
+    context_lines = [
+        f"User request (verbatim): {current['user_request']}",
+        *[
+            f"Source {src['id']} ({src['kind']}; {src['verification']}): "
+            + src["content"][:6000]
+            for src in current["sources"][:8]
+        ],
+    ]
+    packet = build_task_packet(
+        objective="Investigate unanswered questions for the user request; do not implement.",
+        scope=[f"Registered repository: {name}" for name in repository_names],
+        acceptance_criteria=[
+            "Answer discovery questions with evidence and repository-relative path:line.",
+            "Separate verified code findings, reported claims and unresolved unknowns.",
+            "List implementation tasks as proposals, not instructions to implement.",
+            "Report whether any files changed unexpectedly.",
+        ],
+        constraints=["No writing, file edits, commits, installs, test runs that write files, "
+                     "or other side effects.", *context_lines],
+        known_unknowns=questions,
+    )
+    response = await runtime.delegate(
+        repository=repository_names[0], route=route, packet=packet,
+        discovery_repositories=tuple(repository_names),
+    )
+    updated = None
+    if response.get("state") == "settled" and response.get("turn_id"):
+        updated = task_requests.append(
+            request_id, current["revision"],
+            {"kind": "peer_turn", "turn_id": response["turn_id"]},
+        )
+    return {
+        "result": response, "task_request": updated,
+        "next_step": "Review evidence and submit a new readiness assessment",
+    }
+
+
+@mcp.tool()
+@_public_tool_errors
 async def delegate_repo_task(
     repository: Annotated[str, Field(description="Exact repos.yaml name")],
     route: str,
@@ -207,8 +340,23 @@ async def delegate_repo_task(
     constraints: list[str] | None = None,
     known_unknowns: list[str] | None = None,
     session_id: str | None = None,
+    task_request_id: str | None = None,
+    task_request_revision: int | None = None,
+    requirement_refs: list[str] | None = None,
 ) -> dict[str, Any]:
-    """START or RESUME an interactive Codex/Claude Peer in one repository."""
+    """START/RESUME Peer; no request_id means explicit legacy unassessed behavior."""
+    if task_request_id is not None:
+        current = task_requests.assert_ready(task_request_id, task_request_revision)
+        required = {r["id"] for r in current["assessment"]["requirements"]}
+        if not requirement_refs or any(r not in required for r in requirement_refs):
+            raise ValueError("delegate_repo_task needs valid requirement_refs")
+        constraints = list(constraints or []) + [
+            "Original user request: " + current["user_request"],
+            "Resolved requirements: " + " | ".join(
+                r["text"] for r in current["assessment"]["requirements"]
+                if r["id"] in requirement_refs
+            ),
+        ]
     packet = build_task_packet(
         objective=objective, scope=scope, acceptance_criteria=acceptance_criteria,
         out_of_scope=out_of_scope, constraints=constraints, known_unknowns=known_unknowns,
@@ -219,17 +367,46 @@ async def delegate_repo_task(
 
 @mcp.tool()
 @_public_tool_errors
-async def start_graph(graph: Graph) -> dict[str, Any]:
-    """Validate and persist a dependency DAG. Does not launch any Peer."""
+async def start_graph(
+    graph: Graph,
+    task_request_id: str | None = None,
+    task_request_revision: int | None = None,
+    requirement_map: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Validate DAG; bound runs require direct readiness and requirement mapping."""
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
     _check_graph_routes(authored)
-    return graph_runtime.start_graph(authored, repository_names=runtime.repos().keys())
+    if task_request_id is not None:
+        current = task_requests.assert_ready(task_request_id, task_request_revision)
+        if requirement_map is None:
+            raise ValueError("bound graph requires requirement_map")
+        task_requests._check_map(
+            current, [node.node_id for node in authored.nodes], requirement_map,
+        )
+    elif task_request_revision is not None or requirement_map is not None:
+        raise ValueError("task_request_id is required for context-bound graph")
+    result = graph_runtime.start_graph(
+        authored, repository_names=runtime.repos().keys(),
+    )
+    if task_request_id is not None:
+        task_requests.bind_graph(
+            result["graph_run_id"], task_request_id, current["revision"],
+            [node.node_id for node in authored.nodes], requirement_map,
+        )
+        result["task_request_binding"] = task_requests.graph_binding(result["graph_run_id"])
+    else:
+        result["task_readiness_policy"] = "legacy_unassessed"
+    return result
 
 @mcp.tool()
 @_public_tool_errors
 async def get_graph(graph_run_id: str) -> dict[str, Any]:
     """Return compact TaskGraph state and exact review locators."""
-    return graph_runtime.get_graph(graph_run_id)
+    result = graph_runtime.get_graph(graph_run_id)
+    result["task_request_binding"] = task_requests.graph_binding(graph_run_id)
+    if result["task_request_binding"] is None:
+        result["task_readiness_policy"] = "legacy_unassessed"
+    return result
 
 @mcp.tool()
 @_public_tool_errors
@@ -306,15 +483,35 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
 
 @mcp.tool()
 @_public_tool_errors
-async def reconcile_graph(graph_run_id: str, graph: Graph,
-                          expected_revision: int) -> dict[str, Any]:
-    """Apply a new explicit authored DAG with revision protection."""
+async def reconcile_graph(
+    graph_run_id: str, graph: Graph, expected_revision: int,
+    requirement_map: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Replace DAG while preserving request provenance and requirement mappings."""
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
     _check_graph_routes(authored)
-    return graph_runtime.reconcile_graph(
+    binding = task_requests.graph_binding(graph_run_id)
+    if binding is not None:
+        if requirement_map is None:
+            raise ValueError("reconcile_graph requires refreshed requirement_map")
+        current = task_requests.assert_ready(
+            binding["request_id"], binding["request_revision"],
+        )
+        task_requests._check_map(
+            current, [node.node_id for node in authored.nodes], requirement_map,
+        )
+    elif requirement_map is not None:
+        raise ValueError("cannot attach requirement_map to legacy unassessed graph")
+    result = graph_runtime.reconcile_graph(
         graph_run_id, authored, repository_names=runtime.repos().keys(),
         expected_revision=expected_revision,
     )
+    if binding is not None:
+        task_requests.bind_graph(
+            graph_run_id, binding["request_id"], current["revision"],
+            [node.node_id for node in authored.nodes], requirement_map, replace=True,
+        )
+    return result
 
 def main():
     mcp.run()
