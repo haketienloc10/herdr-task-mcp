@@ -1,19 +1,7 @@
-name: Standalone QiQi Python
+name: QiQi Python CI
 on:
   push:
-    paths:
-      - "qiqi_delegate/**"
-      - "tests-standalone/**"
-      - "pyproject.toml"
-      - "setup.py"
-      - ".github/workflows/qiqi-python.yml"
   pull_request:
-    paths:
-      - "qiqi_delegate/**"
-      - "tests-standalone/**"
-      - "pyproject.toml"
-      - "setup.py"
-      - ".github/workflows/qiqi-python.yml"
 jobs:
   standalone:
     runs-on: ubuntu-latest
