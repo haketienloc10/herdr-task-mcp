@@ -3,6 +3,7 @@ import asyncio
 import importlib
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 from test_task_readiness import workspace
 from qiqi_delegate.core import build_task_packet, render_task_prompt
@@ -132,7 +133,8 @@ def test_downstream_receives_full_accepted_upstream_report(tmp_path, monkeypatch
 def test_oversize_referenced_source_rejected_without_dispatch(tmp_path, monkeypatch):
     server, _, store, _, seen = _server(tmp_path, monkeypatch)
     request = _request(store, "Z" * 99_000 + " REQUIRED_AT_END")
-    with pytest.raises(ValueError, match="Nothing was truncated"):
+    # Public MCP decorators convert validation errors into actionable ToolError.
+    with pytest.raises(ToolError, match="Nothing was truncated"):
         asyncio.run(server.delegate_repo_task(
             "backend", "codex-balanced", "Implement orders", ["src"],
             ["Matches the contract"], constraints=["padding" * 2000],
