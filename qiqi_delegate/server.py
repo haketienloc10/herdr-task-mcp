@@ -57,12 +57,14 @@ class Graph(BaseModel):
 
 class RequestSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["inline", "repo_file", "workspace_file", "peer_turn"]
+    kind: Literal["inline", "repo_file", "workspace_file", "peer_turn", "accepted_graph_node"]
     text: str | None = None
     label: str | None = None
     repository: str | None = None
     path: str | None = None
     turn_id: str | None = None
+    graph_run_id: str | None = None
+    node_id: str | None = None
 
 class RequirementInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -311,9 +313,22 @@ async def delegate_discovery(
                      "or other side effects.", *context_lines],
         known_unknowns=questions,
     )
-    response = await runtime.delegate(
-        repository=repository_names[0], route=route, packet=packet,
-        discovery_repositories=tuple(repository_names),
+    discovery_id = task_requests.begin_discovery(
+        request_id, mode, repository_names, questions, route,
+    )
+    try:
+        response = await runtime.delegate(
+            repository=repository_names[0], route=route, packet=packet,
+            discovery_repositories=tuple(repository_names),
+        )
+    except BaseException as exc:
+        task_requests.finish_discovery(
+            discovery_id, "failed", detail=str(exc),
+        )
+        raise
+    task_requests.finish_discovery(
+        discovery_id, response.get("state", "failed"),
+        turn_id=response.get("turn_id"),
     )
     updated = None
     if response.get("state") == "settled" and response.get("turn_id"):
@@ -322,7 +337,8 @@ async def delegate_discovery(
             {"kind": "peer_turn", "turn_id": response["turn_id"]},
         )
     return {
-        "result": response, "task_request": updated,
+        "discovery_id": discovery_id, "result": response,
+        "task_request": updated,
         "next_step": "Review evidence and submit a new readiness assessment",
     }
 
