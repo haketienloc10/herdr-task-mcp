@@ -134,7 +134,7 @@ def test_pid_reuse_token_mismatch_reclaims_reservation(tmp_path):
     assert recovered.get(rid)["discoveries"][0]["state"] == "interrupted"
 
 
-def test_pre_migration_unowned_reservation_recovers(tmp_path):
+def test_pre_migration_unowned_reservation_is_not_auto_recovered(tmp_path):
     runtime, store = workspace(tmp_path)
     rid = _request(store)
     with sqlite3.connect(runtime.db) as db:
@@ -147,10 +147,42 @@ def test_pre_migration_unowned_reservation_recovers(tmp_path):
              '["backend"]', '["Inspect"]', "codex-balanced", "requested", 1),
         )
     new_store = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
-    assert new_store.get(rid)["discoveries"][0]["state"] == "interrupted"
+    assert new_store.get(rid)["discoveries"][0]["state"] == "requested"
+    with pytest.raises(ValueError, match="reserved"):
+        new_store.append(rid, 2, {"kind": "inline", "text": "cannot steal slot"})
+    with pytest.raises(ValueError, match="no free context source slot"):
+        new_store.begin_discovery(
+            rid, "targeted_discovery", ["backend"], ["Inspect"], "codex-balanced",
+        )
+
+    # A legacy row might represent an old MCP process that is still running;
+    # only an operator with explicit worker-termination confirmation may
+    # release it, never another MCP server at startup.
+    from qiqi_delegate.maintenance import (
+        show_discovery, recover_ownerless_discovery,
+    )
+    assert show_discovery(
+        workspace=runtime.root, discovery_id="legacy-reservation",
+    )["owner_pid"] is None
+    with pytest.raises(ValueError, match="worker has terminated"):
+        recover_ownerless_discovery(
+            workspace=runtime.root, discovery_id="legacy-reservation",
+            worker_termination_confirmed=False,
+        )
+    released = recover_ownerless_discovery(
+        workspace=runtime.root, discovery_id="legacy-reservation",
+        worker_termination_confirmed=True,
+    )
+    assert released["state"] == "interrupted"
     assert len(new_store.append(
-        rid, 2, {"kind": "inline", "text": "unblocked"},
+        rid, 2, {"kind": "inline", "text": "unblocked after operator action"},
     )["sources"]) == 16
+    with sqlite3.connect(runtime.db) as db:
+        record = db.execute(
+            "SELECT discovery_id, worker_termination_confirmed "
+            "FROM task_discovery_recovery_audit"
+        ).fetchone()
+    assert record == ("legacy-reservation", 1)
 
 
 
