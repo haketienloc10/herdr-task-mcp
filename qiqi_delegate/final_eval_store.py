@@ -92,7 +92,22 @@ class FinalEvaluationStore:
                 report = None
                 status = "interrupted"
                 detail = "Owner exited before verifiable native completion; operator recovery required"
-                if response:
+                # A settled native capture may have been committed *before*
+                # a failed/unconfirmed Herdr close. If a repository claim for
+                # this exact native turn is still held, worker termination is
+                # unproven: never auto-restore a PASS on process restart.
+                retained_claim = db.execute(
+                    "SELECT repository, claim_id FROM write_claims "
+                    "WHERE claim_id=? LIMIT 1",
+                    ("turn:" + row["turn_id"],),
+                ).fetchone() if row["turn_id"] else None
+                if retained_claim is not None:
+                    detail = (
+                        "Recovered native capture with an unresolved Herdr "
+                        "write claim; verify workspace/worker termination and "
+                        "release claim before operator recovery"
+                    )
+                elif response:
                     try:
                         assessment = db.execute(
                             "SELECT assessment_json FROM task_requests WHERE request_id=?",
