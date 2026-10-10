@@ -570,21 +570,26 @@ async def reconcile_graph(
     if binding is not None:
         if requirement_map is None:
             raise ValueError("reconcile_graph requires refreshed requirement_map")
-        current = task_requests.assert_ready(
-            binding["request_id"], binding["request_revision"],
-        )
+        # A revised task request may legitimately replan a bound graph. Allow
+        # reconciliation at the CURRENT ready revision, but invalidate every
+        # existing task when the global request/context has changed.
+        current = task_requests.assert_ready(binding["request_id"])
         task_requests._check_map(
             current, [node.node_id for node in authored.nodes], requirement_map,
         )
-        # Changing only the requirement mapping must not silently preserve
-        # an already-satisfied node whose authored task was never revised.
         previous_nodes = {
             node.node_id: node for node in graph_runtime._graph_for_run(graph_run_id).nodes
         }
+        changed_context = current["revision"] != binding["request_revision"]
         for node in authored.nodes:
-            if (node.node_id in previous_nodes and
-                    binding["requirement_map"].get(node.node_id) != requirement_map[node.node_id] and
-                    previous_nodes[node.node_id] == node):
+            if node.node_id not in previous_nodes:
+                continue
+            if changed_context and previous_nodes[node.node_id] == node:
+                raise ValueError(
+                    f"updated task request requires a revised task packet for {node.node_id!r}"
+                )
+            if (binding["requirement_map"].get(node.node_id) != requirement_map[node.node_id]
+                    and previous_nodes[node.node_id] == node):
                 raise ValueError(
                     f"changed requirements for {node.node_id!r} require a revised task packet"
                 )
