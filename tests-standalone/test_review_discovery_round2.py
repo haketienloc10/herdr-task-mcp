@@ -93,8 +93,8 @@ def test_discovery_can_run_without_optional_sources(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("response", [
-    "E" * 160_000 + " CRITICAL_EVIDENCE_AT_END",
-    "多" * 120_000 + " CONTRACT_IN_UTF8_TAIL",
+    pytest.param("E" * 160_000 + " CRITICAL_EVIDENCE_AT_END", id="large-ascii"),
+    pytest.param("多" * 120_000 + " CONTRACT_IN_UTF8_TAIL", id="large-utf8"),
 ])
 def test_oversized_native_discovery_output_is_persisted_in_full(
     tmp_path, monkeypatch, response,
