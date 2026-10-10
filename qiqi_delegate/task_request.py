@@ -77,6 +77,18 @@ class TaskRequestStore:
                     request_revision INTEGER NOT NULL,
                     requirement_map_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS task_discoveries (
+                    discovery_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    repository_names_json TEXT NOT NULL,
+                    questions_json TEXT NOT NULL,
+                    route TEXT NOT NULL,
+                    turn_id TEXT,
+                    state TEXT NOT NULL,
+                    detail TEXT,
+                    created_at_ns INTEGER NOT NULL
+                );
             """)
 
     def _connect(self):
@@ -89,13 +101,15 @@ class TaskRequestStore:
         if not isinstance(raw, dict):
             raise ValueError("source must be an object")
         kind = _text(raw.get("kind"), "source.kind")
-        if kind not in {"inline", "repo_file", "workspace_file", "peer_turn"}:
+        if kind not in {"inline", "repo_file", "workspace_file", "peer_turn",
+                        "accepted_graph_node"}:
             raise ValueError(f"unsupported source kind: {kind}")
         permitted = {
             "inline": {"kind", "text", "label"},
             "repo_file": {"kind", "repository", "path"},
             "workspace_file": {"kind", "path"},
             "peer_turn": {"kind", "turn_id"},
+            "accepted_graph_node": {"kind", "graph_run_id", "node_id"},
         }[kind]
         if set(raw) - permitted:
             raise ValueError(f"unexpected {kind} source fields: {sorted(set(raw)-permitted)}")
@@ -115,10 +129,31 @@ class TaskRequestStore:
                 entry["repository"] = repository
             else:
                 root = self.workspace
+                target = _checked_relative_file(root, path)
+                if any(target.is_relative_to(p) for p in self.repos().values()):
+                    raise ValueError("workspace_file cannot bypass registered repository boundary")
             data, digest = _read_file(root, path)
             entry["path"] = path
             entry["sha256"] = digest
             entry["verification"] = "reported"
+        elif kind == "accepted_graph_node":
+            from qiqi_delegate.task_graph_store import GraphRuntimeStore
+            graph_id = _text(raw.get("graph_run_id"), "source.graph_run_id")
+            node_id = _text(raw.get("node_id"), "source.node_id")
+            graph_store = GraphRuntimeStore(self.database)
+            node = graph_store.get_node(graph_id, node_id)
+            if not node or node.get("semantic_state") != "satisfied":
+                raise ValueError("accepted graph node source requires semantic ACCEPT")
+            attempt_id = node.get("current_attempt_id")
+            attempt = graph_store.get_attempt(attempt_id) if attempt_id else None
+            result = (attempt or {}).get("result")
+            if (not isinstance(result, dict) or result.get("state") != "settled"
+                    or not isinstance(result.get("agent_response"), str)
+                    or not result["agent_response"].strip()):
+                raise ValueError("accepted graph source lacks captured evidence")
+            data = result["agent_response"]
+            entry.update(graph_run_id=graph_id, node_id=node_id,
+                         attempt_id=attempt_id, verification="accepted_peer_evidence")
         else:
             turn_id = _text(raw.get("turn_id"), "source.turn_id")
             with self._connect() as db:
@@ -172,10 +207,25 @@ class TaskRequestStore:
                     stale.append(source["id"])
             except (ValueError, KeyError, OSError):
                 stale.append(source["id"])
+        with self._connect() as db:
+            discovery_rows = db.execute(
+                "SELECT * FROM task_discoveries WHERE request_id=? ORDER BY created_at_ns",
+                (request_id,),
+            ).fetchall()
+        discoveries = [
+            {
+                "discovery_id": item["discovery_id"], "mode": item["mode"],
+                "repository_names": json.loads(item["repository_names_json"]),
+                "questions": json.loads(item["questions_json"]),
+                "route": item["route"], "state": item["state"],
+                "turn_id": item["turn_id"], "detail": item["detail"],
+            }
+            for item in discovery_rows
+        ]
         return {
             "request_id": row["request_id"], "user_request": row["user_request"],
             "revision": row["revision"], "sources": sources,
-            "stale_sources": stale,
+            "stale_sources": stale, "discoveries": discoveries,
             "assessment": json.loads(row["assessment_json"]) if row["assessment_json"] else None,
         }
 
@@ -268,6 +318,37 @@ class TaskRequestStore:
         if used.intersection(current["stale_sources"]):
             raise ValueError("implementation blocked by stale source")
         return current
+
+    def begin_discovery(self, request_id: str, mode: str,
+                        repositories: list[str], questions: list[str],
+                        route: str) -> str:
+        current = self.get(request_id)
+        if (mode not in {"targeted_discovery", "full_discovery"} or
+                not current["assessment"] or
+                current["assessment"]["decision"] != mode):
+            raise ValueError("Discovery requires matching readiness decision")
+        discovery_id = str(uuid.uuid4())
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO task_discoveries VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)",
+                (discovery_id, request_id, mode, json.dumps(repositories),
+                 json.dumps(questions), route, "requested", time.time_ns()),
+            )
+        return discovery_id
+
+    def finish_discovery(self, discovery_id: str, state: str,
+                         turn_id: str | None = None,
+                         detail: str | None = None) -> None:
+        if state not in {"settled", "failed", "blocked", "capture_ambiguous"}:
+            raise ValueError("invalid discovery state")
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE task_discoveries SET state=?, turn_id=?, detail=? "
+                "WHERE discovery_id=? AND state='requested'",
+                (state, turn_id, detail[:1000] if detail else None, discovery_id),
+            )
+            if result.rowcount != 1:
+                raise ValueError("unknown or completed Discovery")
 
     def _check_map(self, current: dict[str, Any], node_ids: list[str],
                    requirement_map: dict[str, list[str]]) -> None:
