@@ -76,6 +76,49 @@ def _reject_gitlinks(root: Path, head: str | None) -> None:
                 )
 
 
+def _reject_sparse_checkout(root: Path) -> None:
+    """Fail closed when tracked omissions cannot be distinguished from deletions.
+
+    Sparse checkout intentionally excludes paths that are still part of the
+    product. Git represents those index entries with the skip-worktree flag.
+    Do not issue deletion tombstones for them: the original source was never
+    inspected, and a deletion-only report could otherwise receive false PASS.
+    Both checks matter: manual --skip-worktree can be set without sparse mode,
+    and sparse mode may hide an entire sparse-index directory or a staged
+    deletion may have removed an entry from the index.
+    """
+    try:
+        mode = subprocess.run(
+            ["git", "-C", str(root), "config", "--bool", "--get",
+             "core.sparseCheckout"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("unable to verify Git sparse-checkout state") from exc
+    if mode.returncode not in (0, 1):
+        raise RuntimeError("unable to verify Git sparse-checkout configuration")
+    if mode.returncode == 0:
+        value = mode.stdout.strip()
+        if value == b"true":
+            raise ValueError(
+                "evaluation snapshot refuses sparse checkout: materialize "
+                "the full working tree before final evaluation"
+            )
+        if value != b"false":
+            raise RuntimeError("unrecognized Git sparse-checkout configuration")
+    for record in _git(root, "ls-files", "-t", "-z").split(b"\\0"):
+        if not record:
+            continue
+        if len(record) < 3 or record[1:2] != b" ":
+            raise RuntimeError("cannot verify tracked Git index flags")
+        if record[:1] == b"S":
+            raise ValueError(
+                "evaluation snapshot refuses skip-worktree tracked path: "
+                + record[2:].decode("utf-8")
+            )
+
+
 def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
     """List current files *and* tracked paths removed from the worktree.
 
@@ -84,6 +127,7 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
     forms of deletion (and renames) are represented in the final manifest.
     """
     _reject_gitlinks(root, head)
+    _reject_sparse_checkout(root)
     tracked = _git_paths(root, "ls-files", "--cached", "-z")
     if head is not None:
         tracked.update(_git_paths(
