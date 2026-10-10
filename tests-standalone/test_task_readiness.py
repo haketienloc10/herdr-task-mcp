@@ -154,7 +154,7 @@ def test_bound_graph_guards_dispatch_and_maps_requirements(tmp_path):
                       readiness_guard=store.assert_graph_ready)
     started = gr.start_graph(graph, repository_names=runtime.repos().keys())
     gid = started["graph_run_id"]
-    with pytest.raises(ValueError, match="all resolved"):
+    with pytest.raises(ValueError, match="invalid graph requirement refs"):
         store.bind_graph(gid, req["request_id"], 2, ["implement"],
                          {"implement": ["R-not-present"]})
     store.bind_graph(gid, req["request_id"], ready["revision"],
