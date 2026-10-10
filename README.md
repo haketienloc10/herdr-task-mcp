@@ -333,9 +333,16 @@ including cross-module contracts, before delivery is finalized.
 5. Inspect `get_final_evaluation(graph_run_id, evaluation_id?)`. The durable
    structured report has `verdict`, `requirement_results`,
    `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
-   Report evidence must reference real repository/path/SHA256 values from the
-   isolated `.qiqi-evaluation-manifest.json`; all original requirements must
-   be covered. For multi-repo PASS, **each** integration check must cite
+   Report evidence must match each repository's captured
+   `.qiqi-evaluation-manifest.json`. Existing file evidence has fields
+   `{repository, path, sha256, locator}`. A tracked file deleted during
+   implementation has **no current content SHA256** and may instead provide
+   `{kind: "deleted", repository, path, locator}`; its path must exist in
+   that manifest's `deleted_paths` tombstones. This permits legitimate
+   deletion-only requirements to PASS without inventing file hashes.
+   Untracked/missing paths and fake deletion references are rejected.
+   All original requirements must be covered. For multi-repo PASS,
+   **each** integration check must cite
    at least two distinct repository sources, while the complete set of
    integration checks must cover every participating repository. Separate
    module-only checks never suffice. A bare LLM "PASS" without corroborating
@@ -347,7 +354,13 @@ including cross-module contracts, before delivery is finalized.
    graph/request/repository snapshot. `get_graph` separately reports
    `graph_state`, `final_evaluation_status`, `evaluation_is_current` and
    `delivery_status`. Changes to untracked/tracked files or graph/request
-   revision invalidate the previous PASS.
+   revision invalidate the previous PASS. Repeating
+   `start_final_evaluation` on an already finalized **unchanged**
+   graph/request/snapshot reuses the existing result (`already_finalized=true`)
+   without dispatching another native Evaluator or clearing delivery.
+   `get_graph` continues to report `delivery_status="finalized"` for a
+   current approved snapshot, even if a newer attempt record exists.
+   A changed snapshot never reuses the old PASS and must be evaluated again.
 
 **Limits and security boundaries:** Snapshots use verified registered Git roots,
 a strict file allowlist, symlink/path protections, file hashing before/after
