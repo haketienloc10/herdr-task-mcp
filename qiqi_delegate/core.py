@@ -314,7 +314,8 @@ def _bullet_lines(items: Iterable[str]) -> str:
 
 
 def render_task_prompt(packet: TaskPacket, *,
-                       discovery_repositories: tuple[str, ...] | None = None) -> str:
+                       discovery_repositories: tuple[str, ...] | None = None,
+                       evaluation_repositories: tuple[str, ...] | None = None) -> str:
     sections = [
         "Repository task delegated by QiQi",
         f"## Repository objective\n\n{packet.objective}",
@@ -375,7 +376,29 @@ def render_task_prompt(packet: TaskPacket, *,
         "Do not add filler or repeat the same evidence."
     )
 
-    if discovery_repositories is not None:
+    if evaluation_repositories is not None:
+        sections.append(
+            "## Independent final cross-repository evaluation\n\n"
+            "You are an independent final Evaluator, NOT the Lead or a Peer. "
+            "Verify the original user request and TaskGraph requirements "
+            "against actual final source across these snapshot roots: "
+            + ", ".join(evaluation_repositories) + ". "
+            "All roots are isolated copies accessible through --add-dir. "
+            "Trace cross-repository API/data/schema contracts in ONE session. "
+            "Do not trust Peer reports or Lead ACCEPT as evidence. "
+            "Inspect code/files yourself, distinguish verified evidence from "
+            "assumptions, and do not change source files or launch deployments. "
+            "Your final response MUST be exactly one JSON object with fields "
+            "verdict, requirement_results, cross_repository_checks, "
+            "verification_runs, findings, unknowns. "
+            "Requirement result objects contain requirement_id, status, "
+            "evidence, rationale. Evidence entries contain repository, path, "
+            "sha256 (file hash from supplied manifest), locator. "
+            "Verification runs contain command, cwd_repo, exit_code, artifact_ref. "
+            "Do not claim tests ran unless execution evidence exists. "
+            "When uncertain, answer inconclusive, never invent PASS evidence."
+        )
+    elif discovery_repositories is not None:
         # Discovery is prompt-only no-write: --yolo/--add-dir are not a sandbox.
         roots = ", ".join(discovery_repositories)
         sections.append(
