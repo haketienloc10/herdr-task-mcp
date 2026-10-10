@@ -89,7 +89,11 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
     for name, root in sorted(roots.items()):
         if not root.is_dir() or root != root.resolve():
             raise ValueError("evaluation repository root must be canonical")
-        head = _git(root, "rev-parse", "HEAD").decode().strip()
+        # Newly initialized Git worktrees may have no commit yet.
+        try:
+            head = _git(root, "rev-parse", "--verify", "HEAD").decode().strip()
+        except RuntimeError:
+            head = None
         entries = []
         for relative in _files(root):
             data, mode = _read_file(root, relative)
