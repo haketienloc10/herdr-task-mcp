@@ -34,10 +34,30 @@ def _git(root: Path, *args: str) -> bytes:
         raise RuntimeError("unable to produce verified Git evaluation snapshot") from exc
 
 
-def _files(root: Path) -> list[str]:
-    # --cached includes staged deletions; absence on disk will fail closed.
-    payload = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
-    names = sorted({part.decode("utf-8") for part in payload.split(b"\0") if part})
+def _git_paths(root: Path, *args: str) -> set[str]:
+    return {
+        part.decode("utf-8")
+        for part in _git(root, *args).split(b"\0")
+        if part
+    }
+
+
+def _files(root: Path, head: str | None) -> tuple[list[str], set[str]]:
+    """List current files *and* tracked paths removed from the worktree.
+
+    Git's cached index retains unstaged deletions, whereas staged deletions
+    vanish from the index. Include HEAD, index and untracked paths so both
+    forms of deletion (and renames) are represented in the final manifest.
+    """
+    tracked = _git_paths(root, "ls-files", "--cached", "-z")
+    if head is not None:
+        tracked.update(_git_paths(
+            root, "ls-tree", "-r", "--name-only", "-z", head,
+        ))
+    others = _git_paths(
+        root, "ls-files", "--others", "--exclude-standard", "-z",
+    )
+    names = sorted(tracked | others)
     if not names or len(names) > MAX_FILES:
         raise ValueError("evaluation snapshot has no files or exceeds file-count limit")
     for name in names:
@@ -48,7 +68,29 @@ def _files(root: Path) -> list[str]:
                 Path(name).name in FORBIDDEN_BASENAMES or
                 (Path(name).name.startswith(".env.") and Path(name).name != ".env.example")):
             raise ValueError("unsafe or sensitive file in evaluation snapshot: " + name)
-    return names
+    return names, tracked
+
+
+def _file_present(root: Path, relative: str) -> bool:
+    """Distinguish legitimate tracked deletion from unsafe symlink traversal."""
+    path = root
+    components = Path(relative).parts
+    for index, component in enumerate(components):
+        path = path / component
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        if stat.S_ISLNK(mode):
+            raise ValueError("evaluation snapshot refuses symlink: " + relative)
+        if stat.S_ISDIR(mode):
+            # A directory replacing an old tracked file is a deletion of
+            # that file; any new children appear as untracked source files.
+            if index == len(components) - 1:
+                return False
+        elif index != len(components) - 1:
+            return False
+    return True
 
 
 def _read_file(root: Path, relative: str) -> tuple[bytes, int]:
@@ -95,8 +137,25 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
         except RuntimeError:
             head = None
         entries = []
-        for relative in _files(root):
-            data, mode = _read_file(root, relative)
+        deleted_paths = []
+        names, tracked = _files(root, head)
+        for relative in names:
+            if not _file_present(root, relative):
+                if relative not in tracked:
+                    # A previously untracked path disappearing after Git
+                    # discovery is a concurrent mutation, not a deletion to
+                    # hide from the manifest.
+                    raise RuntimeError(
+                        "untracked evaluation file disappeared: " + relative
+                    )
+                deleted_paths.append(relative)
+                continue
+            try:
+                data, mode = _read_file(root, relative)
+            except (FileNotFoundError, NotADirectoryError) as exc:
+                raise RuntimeError(
+                    "evaluation file disappeared during snapshot: " + relative
+                ) from exc
             total += len(data)
             if total > MAX_TOTAL_BYTES:
                 raise ValueError("evaluation snapshot exceeds aggregate byte limit")
@@ -104,7 +163,10 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
                 "path": relative, "sha256": hashlib.sha256(data).hexdigest(),
                 "size": len(data), "mode": mode,
             })
-        manifest[name] = {"root": str(root), "head": head, "files": entries}
+        manifest[name] = {
+            "root": str(root), "head": head,
+            "files": entries, "deleted_paths": deleted_paths,
+        }
     return manifest
 
 
@@ -154,6 +216,7 @@ class EvaluationSnapshot:
                     json.dumps({
                         "repository": name, "head": info["head"],
                         "files": info["files"],
+                        "deleted_paths": info["deleted_paths"],
                     }, ensure_ascii=False, sort_keys=True),
                     encoding="utf-8",
                 )
