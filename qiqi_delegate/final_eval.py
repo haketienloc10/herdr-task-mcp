@@ -367,6 +367,7 @@ class FinalEvaluationCoordinator:
             graph, _authored, _binding, task, _names, roots = self._eligible(graph_run_id)
             current = (
                 graph["revision"] == row["graph_revision"] and
+                task["request_id"] == row["request_id"] and
                 task["revision"] == row["request_revision"] and
                 manifest_digest(inspect_roots(roots)) == row["manifest_digest"]
             )
@@ -381,14 +382,26 @@ class FinalEvaluationCoordinator:
 
     def graph_status(self, graph_run_id: str) -> dict[str, Any]:
         row = self.read(graph_run_id)
-        # A repeated/overlapping evaluation must not hide an already
-        # finalized, still-current deliverable in get_graph. Select a
-        # matching approved snapshot independently of "latest attempt".
-        finalized = self.store.latest_finalized(graph_run_id)
-        if finalized is not None:
-            verified = self.read(graph_run_id, finalized["evaluation_id"])
-            if verified.get("is_current"):
-                row = verified
+        # Do not take the newest finalized row by timestamp. After A→B→A
+        # the historical finalized A is authoritative again even though B
+        # was finalized more recently. Compute current identity from LIVE
+        # registered worktrees and query for that exact graph/request/digest.
+        # If eligibility/inspection fails, fail closed to not_finalized.
+        try:
+            graph, _authored, _binding, task, _names, roots = self._eligible(
+                graph_run_id,
+            )
+            digest = manifest_digest(inspect_roots(roots))
+            finalized = self.store.matching_finalized(
+                graph_run_id, graph["revision"], task["request_id"],
+                task["revision"], digest,
+            )
+            if finalized is not None:
+                verified = self.read(graph_run_id, finalized["evaluation_id"])
+                if verified.get("is_current"):
+                    row = verified
+        except (RuntimeError, ValueError, OSError):
+            pass
         return {
             "final_evaluation_status": row.get("effective_status", row["status"]),
             "final_evaluation_id": row.get("evaluation_id"),
