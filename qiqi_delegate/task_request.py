@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -19,6 +20,33 @@ MAX_SOURCE_BYTES = 100_000
 MAX_CONTEXT_SOURCES = 16
 MAX_REQUEST_CHARS = 100_000
 DECISIONS = {"direct", "targeted_discovery", "full_discovery", "blocked"}
+
+
+def _process_start_token(pid: int) -> str | None:
+    """Linux process birth token prevents PID reuse from retaining stale claims.
+
+    On systems without /proc, PID liveness remains a best-effort fallback.
+    """
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
+        return fields[19] if len(fields) > 19 else None
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _owner_alive(pid: int | None, token: str | None) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # Another owner's process exists but is not inspectable.
+    except OSError:
+        return True  # Fail conservatively on unknown permission/OS errors.
+    actual_token = _process_start_token(pid)
+    return not (token is not None and actual_token is not None and token != actual_token)
 
 
 def _text(value: Any, label: str) -> str:
@@ -90,9 +118,66 @@ class TaskRequestStore:
                     turn_id TEXT,
                     state TEXT NOT NULL,
                     detail TEXT,
-                    created_at_ns INTEGER NOT NULL
+                    created_at_ns INTEGER NOT NULL,
+                    owner_pid INTEGER,
+                    owner_start_token TEXT
                 );
             """)
+            # Backward-compatible migration of databases written by Issue #6
+            # before Discovery process ownership was tracked.
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(task_discoveries)")
+            }
+            for name, field_type in (
+                ("owner_pid", "INTEGER"),
+                ("owner_start_token", "TEXT"),
+            ):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE task_discoveries ADD COLUMN {name} {field_type}")
+        self.recover_abandoned_discoveries()
+
+    def _recover_abandoned_locked(self, db: sqlite3.Connection,
+                                  request_id: str | None = None) -> int:
+        """Clear only reservations whose owner process is provably gone.
+
+        A source append and the 'attaching' transition share one transaction.
+        Hence a dead owner in 'attaching' already has a durable captured source
+        and is safe to finalize as settled. 'requested' is interrupted, not
+        counted as reserved, allowing the Lead to try Discovery again.
+        """
+        sql = (
+            "SELECT discovery_id, state, owner_pid, owner_start_token "
+            "FROM task_discoveries WHERE state IN ('requested', 'attaching')"
+        )
+        params: tuple[str, ...] = ()
+        if request_id is not None:
+            sql += " AND request_id=?"
+            params = (request_id,)
+        recovered = 0
+        for row in db.execute(sql, params).fetchall():
+            if _owner_alive(row["owner_pid"], row["owner_start_token"]):
+                continue
+            completed = row["state"] == "attaching"
+            updated = db.execute(
+                "UPDATE task_discoveries SET state=?, detail=? "
+                "WHERE discovery_id=? AND state=?",
+                (
+                    "settled" if completed else "interrupted",
+                    ("Owner process exited after evidence was attached; finalized "
+                     "durable result" if completed else
+                     "Discovery owner process exited before completion; "
+                     "abandoned source reservation recovered"),
+                    row["discovery_id"], row["state"],
+                ),
+            )
+            recovered += updated.rowcount
+        return recovered
+
+    def recover_abandoned_discoveries(self) -> int:
+        """Recover abandoned reservations after a restart without touching live owners."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return self._recover_abandoned_locked(db)
 
     def _connect(self):
         db = sqlite3.connect(self.database, timeout=30)
@@ -283,6 +368,7 @@ class TaskRequestStore:
             if row is None or row["revision"] != expected_revision:
                 raise RuntimeError("stale task context revision")
             sources = json.loads(row["sources_json"])
+            self._recover_abandoned_locked(db, request_id)
             pending = db.execute(
                 "SELECT discovery_id FROM task_discoveries "
                 "WHERE request_id=? AND state='requested'",
@@ -311,11 +397,13 @@ class TaskRequestStore:
             if discovery_id is not None:
                 # Reservation is consumed atomically with the source append;
                 # finish_discovery will finalize this captured result afterward.
-                db.execute(
-                    "UPDATE task_discoveries SET state='attaching' "
+                changed = db.execute(
+                    "UPDATE task_discoveries SET state='attaching', turn_id=? "
                     "WHERE discovery_id=? AND request_id=? AND state='requested'",
-                    (discovery_id, request_id),
+                    (source["turn_id"], discovery_id, request_id),
                 )
+                if changed.rowcount != 1:
+                    raise RuntimeError("Discovery reservation was concurrently recovered")
         return self.get(request_id)
 
     def assess(self, request_id: str, expected_revision: int,
@@ -394,6 +482,7 @@ class TaskRequestStore:
             ).fetchone()
             if row is None or row["revision"] != current["revision"]:
                 raise RuntimeError("stale task context revision")
+            self._recover_abandoned_locked(db, request_id)
             pending = db.execute(
                 "SELECT COUNT(*) FROM task_discoveries "
                 "WHERE request_id=? AND state='requested'",
@@ -406,9 +495,14 @@ class TaskRequestStore:
                     "sources before dispatch"
                 )
             db.execute(
-                "INSERT INTO task_discoveries VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)",
+                "INSERT INTO task_discoveries "
+                "(discovery_id, request_id, mode, repository_names_json, "
+                "questions_json, route, turn_id, state, detail, created_at_ns, "
+                "owner_pid, owner_start_token) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)",
                 (discovery_id, request_id, mode, json.dumps(repositories),
-                 json.dumps(questions), route, "requested", time.time_ns()),
+                 json.dumps(questions), route, "requested", time.time_ns(),
+                 os.getpid(), _process_start_token(os.getpid())),
             )
         return discovery_id
 
