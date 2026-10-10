@@ -115,7 +115,9 @@ class TaskRequestStore:
             raise ValueError(f"unexpected {kind} source fields: {sorted(set(raw)-permitted)}")
         entry: dict[str, Any] = {"id": "source:" + uuid.uuid4().hex, "kind": kind}
         if kind == "inline":
-            data = _text(raw.get("text"), "inline source text")
+            data = raw.get("text")
+            if not isinstance(data, str) or not data.strip():
+                raise ValueError("inline source text must be nonempty")
             entry["label"] = _text(raw.get("label", "inline"), "inline label")
             entry["verification"] = "reported"
         elif kind in {"repo_file", "workspace_file"}:
@@ -176,7 +178,7 @@ class TaskRequestStore:
     def create(self, user_request: str, sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if not isinstance(user_request, str) or not user_request.strip() or len(user_request) > MAX_REQUEST_CHARS:
             raise ValueError("user_request must be nonempty and within limit")
-        if not isinstance(sources or [], list) or len(sources or []) > 16:
+        if sources is not None and (not isinstance(sources, list) or len(sources) > 16):
             raise ValueError("sources must be a list of at most 16 entries")
         resolved = [self._resolve_source(s) for s in (sources or [])]
         request_id = str(uuid.uuid4())
