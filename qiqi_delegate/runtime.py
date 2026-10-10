@@ -527,11 +527,44 @@ class DelegateRuntime:
     async def delegate(self, *, repository: str, route: str, packet: TaskPacket,
                        session_id: str | None = None,
                        discovery_repositories: tuple[str, ...] | None = None,
-                       discovery_id: str | None = None) -> dict:
+                       discovery_id: str | None = None,
+                       evaluation_repositories: tuple[str, ...] | None = None,
+                       evaluation_roots: dict[str, Path] | None = None,
+                       evaluation_id: str | None = None) -> dict:
         repos = self.repos()
         if repository not in repos:
             raise ValueError(f"unknown repository: {repository}; available: {', '.join(repos)}")
         adapter, args = self.route(route)
+        if evaluation_id is not None:
+            if (discovery_repositories is not None or discovery_id is not None
+                    or evaluation_repositories is None or evaluation_roots is None
+                    or session_id is not None):
+                raise ValueError("evaluation requires a fresh isolated multi-root session")
+            if (not evaluation_repositories or
+                    set(evaluation_repositories) != set(evaluation_roots) or
+                    len(evaluation_repositories) != len(set(evaluation_repositories)) or
+                    repository not in evaluation_repositories or
+                    any(name not in repos for name in evaluation_repositories)):
+                raise ValueError("evaluation roots must match registered graph repositories")
+            if any(not root.is_dir() or root.resolve() != root or
+                   root.resolve() in repos.values()
+                   for root in evaluation_roots.values()):
+                raise ValueError("unsafe evaluation snapshot root")
+            # Prompt-only no-write is not protection. Reject unsafe Herdr
+            # routes: allow a deliberately configured Codex read-only sandbox
+            # and disallow arbitrary config overrides and bypass flags.
+            if adapter != "codex" or args not in (
+                ["--sandbox", "read-only"],
+                ["--sandbox=read-only"],
+            ):
+                raise ValueError(
+                    "Final Evaluator requires a configured Codex route with "
+                    "exactly --sandbox read-only and no --yolo/overrides"
+                )
+            args = list(args) + ["--skip-git-repo-check"]
+            for name in evaluation_repositories:
+                if name != repository:
+                    args += ["--add-dir", str(evaluation_roots[name])]
         if discovery_repositories is not None:
             if session_id is not None:
                 raise ValueError("Discovery RESUME is not supported in this workflow")
@@ -555,6 +588,19 @@ class DelegateRuntime:
             if row is None or row["repository"] != repository or row["adapter"] != adapter:
                 raise ValueError("unknown session or session owned by another repository/agent")
         turn_id = str(uuid.uuid4())
+        if evaluation_id is not None:
+            # Native ID linked BEFORE Peer launch, surviving interruption
+            # between capture persistence and coordinator return.
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                changed = db.execute(
+                    "UPDATE final_evaluations SET status='evaluating', turn_id=?, "
+                    "updated_at_ns=? WHERE evaluation_id=? "
+                    "AND status='requested' AND turn_id IS NULL",
+                    (turn_id, time.time_ns(), evaluation_id),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("evaluation dispatch reservation missing")
         if discovery_id is not None:
             if discovery_repositories is None:
                 raise ValueError("discovery_id may only be used for Discovery")
@@ -572,7 +618,20 @@ class DelegateRuntime:
                 if bound.rowcount != 1:
                     raise RuntimeError("Discovery reservation missing or already bound")
         claim_id = "turn:" + turn_id
-        self._claim(repository, claim_id, repository_root=repos[repository])
+        execution_root = (
+            evaluation_roots[repository] if evaluation_id is not None
+            else repos[repository]
+        )
+        # Evaluators execute against disposable snapshot directories, but
+        # their write claim must retain the stable, *registered* Git-root
+        # identity. The operator-only show-claim/release-claim commands resolve
+        # repos.yaml, not temporary snapshot paths (which disappear if an
+        # AgentStartupBlocked worker must be inspected after cleanup).
+        # The registered root is also the mutex identity used by normal Peers:
+        # do not allow an evaluator's preserved claim to become unrecoverable
+        # and permanently block subsequent delegation.
+        claim_root = repos[repository] if evaluation_id is not None else execution_root
+        self._claim(repository, claim_id, repository_root=claim_root)
         workspace_id = None
         closed = False
         preserve_startup = False
@@ -584,7 +643,7 @@ class DelegateRuntime:
                 os.chmod(sink, 0o700)
                 nonce = uuid.uuid4().hex
                 await self._ensure_herdr_server()
-                top = await self._json("workspace", "create", "--cwd", str(repos[repository]),
+                top = await self._json("workspace", "create", "--cwd", str(execution_root),
                                        "--label", f"qiqi:{repository}:{turn_id[:8]}", "--no-focus")
                 workspace_id = top["workspace"]["workspace_id"]
                 pane_id = top["root_pane"]["pane_id"]
@@ -593,7 +652,10 @@ class DelegateRuntime:
                     agent_args += (["resume", session_id] if adapter == "codex"
                                    else ["--resume", session_id])
                 name, agent = await self._start_agent(pane_id, adapter, agent_args)
-                prompt = render_task_prompt(packet, discovery_repositories=discovery_repositories)
+                prompt = render_task_prompt(
+                    packet, discovery_repositories=discovery_repositories,
+                    evaluation_repositories=evaluation_repositories,
+                )
                 status, agent = await self._prompt(name, prompt, adapter)
                 native = self._native_id(agent, adapter)
                 if native is None:

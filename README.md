@@ -291,6 +291,168 @@ Gọi `reconcile_graph` cùng `expected_revision` để áp dụng TaskGraph m�
 
 Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó không tương đương ACCEPT.** Lead phải đọc captured evidence trước khi quyết định.
 
+## Final Evaluation Gate — Issue #8
+
+A completed TaskGraph is NOT necessarily a verified final product. The Lead
+continues its existing per-node `get_node_reviews` / `submit_decisions` loop.
+When the entire graph is `complete` with **every node satisfied**, a separate
+**single, fresh Unified Evaluator** reviews the final combined implementation,
+including cross-module contracts, before delivery is finalized.
+
+1. Bind the original verbatim user request using `prepare_task_request`,
+   `submit_context_assessment`, and `start_graph(..., task_request_id,
+   task_request_revision, requirement_map)`. Legacy unbound graphs are explicitly
+   ineligible for independent final PASS; their old APIs remain usable.
+2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
+   `graph_state="complete"` remains an execution-only state, not a final PASS.
+3. Configure a dedicated safe Codex route in workspace `agent-routing.yaml`:
+   
+   ```yaml
+   routes:
+     codex-evaluator:
+       agent: codex
+       args: ["--sandbox", "read-only"]
+   ```
+
+   Final Evaluation fails closed for `--yolo`, Claude and arbitrary CLI/config
+   overrides. This route must genuinely enforce read-only agent execution.
+4. Call `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`.
+   The Coordinator snapshots **all** repositories in the active TaskGraph
+   (including staged, unstaged and non-ignored untracked files), then launches
+   **one fresh native Evaluator session** with snapshot CWD + `--add-dir`
+   for additional module roots. The bounded TaskPacket contains only
+   small routing metadata and relative archive locations, not the entire
+   original request and TaskGraph inline. In the primary isolated snapshot,
+   `.qiqi-final-task-sources/index.json` stores the **full verbatim original
+   request**, assessed requirements, and an index of every source (including
+   sources omitted by Lead). `.qiqi-final-task-sources/task-graph.json`
+   preserves every node and acceptance criterion. Complete original source
+   contents are separate read-only files, including large native captures.
+   The Evaluator must read all relevant archives; no 100k-character prompt
+   truncation is allowed. Missing/tampered input blocks dispatch.
+5. Inspect `get_final_evaluation(graph_run_id, evaluation_id?)`. The durable
+   structured report has `verdict`, `requirement_results`,
+   `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
+   Report evidence must match each repository's captured
+   `.qiqi-evaluation-manifest.json`. Existing file evidence has fields
+   `{repository, path, sha256, locator}`. A tracked file deleted during
+   implementation has **no current content SHA256** and may instead provide
+   `{kind: "deleted", repository, path, locator}`; its path must exist in
+   that manifest's `deleted_paths` tombstones. This permits legitimate
+   deletion-only requirements to PASS without inventing file hashes.
+   Untracked/missing paths and fake deletion references are rejected.
+   All original requirements must be covered. For multi-repo PASS,
+   **each** integration check must cite
+   at least two distinct repository sources, while the complete set of
+   integration checks must cover every participating repository. Separate
+   module-only checks never suffice. A bare LLM "PASS" without corroborating
+   file evidence is rejected; a native settled response alone is not a PASS.
+6. On FAIL or INCONCLUSIVE, Lead fixes/replans through existing graph tools,
+   then reruns one whole-product evaluation after the updated graph is complete.
+7. Call `finalize_graph(graph_run_id, evaluation_id, expected_revision)` only
+   after an independently validated `passed` result matching the exact current
+   graph/request/repository snapshot. `get_graph` separately reports
+   `graph_state`, `final_evaluation_status`, `evaluation_is_current` and
+   `delivery_status`. Changes to untracked/tracked files or graph/request
+   revision invalidate the previous PASS. Repeating
+   `start_final_evaluation` on an already finalized **unchanged**
+   graph/request/snapshot reuses the existing result (`already_finalized=true`)
+   without dispatching another native Evaluator or clearing delivery.
+   `get_graph` continues to report `delivery_status="finalized"` for a
+   current approved snapshot, even if a newer attempt record exists.
+   If snapshots A and B were both finalized and a worktree reverts from B to A,
+   the gate selects A's **historical finalized PASS** by the current
+   graph revision, Task Request identity/revision and repository manifest digest
+   (not by the most recent finalization timestamp), and reuses its original
+   evaluation ID without rerunning Codex. Rebinding a different Task Request
+   or changing to a never-approved snapshot cannot reuse that PASS.
+   A changed snapshot without a matching finalized PASS must be evaluated again.
+
+**Limits and security boundaries:** Snapshots use verified registered Git roots,
+a strict file allowlist, symlink/path protections, file hashing before/after
+copy and deterministic manifests. Tracked paths deleted from the worktree,
+including staged deletions and staged/unstaged renames, are preserved as
+`deleted_paths` tombstones **only when that path exists in HEAD** (a real
+previously committed file). Missing index-only additions—such as a
+`git add -N` intent-to-add file or a staged new file subsequently deleted
+from the worktree—fail closed rather than becoming fake deletion evidence.
+Present index-only additions are captured and hashed normally. Verified
+HEAD deletions are not copied; restoring one changes the manifest digest
+and invalidates a prior PASS.
+Default bounds are 3,000 files/repo, 1 MB/file and 24 MB total.
+Snapshots are temporary and separate from original trees. Repository
+files or directories colliding with reserved evaluator metadata paths
+(`.qiqi-evaluation-manifest.json` or `.qiqi-final-task-sources`) are
+rejected before copying, rather than silently overwritten. Git submodules
+(gitlink mode 160000 in HEAD or index) are rejected rather than incorrectly
+recorded as deletions: recursively snapshotting submodule worktrees is not
+supported yet. **Sparse checkout is also unsupported and fails closed.**
+Git `core.sparseCheckout` mode and individual `skip-worktree` index entries
+are rejected before manifest creation: a tracked path intentionally omitted
+by sparse checkout is not a real deletion tombstone and can never count as
+final PASS evidence. Restore a complete working tree and clear skip-worktree
+flags before evaluating. Ordinary staged/unstaged deletions in a complete
+working tree remain supported.
+`--add-dir` grants additional directory access: **it is not a sandbox**.
+The route is only allowed with explicit Codex `--sandbox read-only`.
+The feature does not execute arbitrary verification commands from reports or
+independently attest LLM-reported test runs; do not treat test claims as
+deterministic proof. Read permissions outside snapshots depend on the
+host/Herdr deployment: if the host cannot confine the agent as required,
+do not run final evaluation on secret-bearing or untrusted workspaces.
+A model finding no errors cannot prove mathematical correctness.
+
+**Crash/concurrency semantics:** Store evaluation IDs and native turn bindings
+before launch. Duplicate active requests do not dispatch a second agent.
+Failed/ambiguous/cancelled runs never PASS; diagnostic and native capture
+association remain auditable. If the bound Task Request/assessment or
+TaskGraph revision changes while the Evaluator is running, its completed
+PASS claim is stored as `inconclusive` with a stale-input reason and
+full native capture; the `evaluating` slot is released for reevaluation
+once the new request-to-graph binding is updated. Startup-blocked agents
+whose Herdr workspace
+is preserved remain `interrupted` and block further evaluator launches until
+an operator confirms worker termination using `recover-final-evaluation`.
+**Settled capture does not override failed Herdr cleanup.** If a native
+Evaluator produces a complete structured PASS but Herdr cannot confirm
+closing its workspace, `start_final_evaluation` returns
+`final_evaluation_status="interrupted"`, never `passed`.
+`get_final_evaluation` preserves the full native turn capture and returns
+`cleanup` with `cleanup_state`, `workspace_id`, `write_claim_id`,
+`write_claim_repository` and `recovery_action`. These IDs remain durable
+across MCP restarts. `finalize_graph` rejects the result, and a second
+evaluation is blocked until exact operator recovery; an LLM's captured PASS
+is evidence for inspection, not permission to deliver. During startup
+recovery, an outstanding native-turn write claim also blocks automatic
+PASS restoration, even if a settled capture exists.
+
+**Operator recovery for preserved Evaluator workspaces:** The Herdr Evaluator
+runs inside a disposable snapshot, but its write claim records the stable
+canonical root registered under the primary repository in `repos.yaml`.
+This deliberate separation makes `show-claim --repository <primary-repo>`
+and `release-claim --repository <primary-repo> --claim-id 'turn:<id>'
+--worker-termination-confirmed` usable even **after the snapshot directory
+has been deleted**. On `AgentStartupBlocked` or an unconfirmed workspace
+close, inspect/close the actual Herdr workspace, verify that the external
+worker stopped, then use the operator-only `show-claim` and exact-ID
+`release-claim` commands shown below. For an `interrupted` Final Evaluation,
+also use `show-final-evaluation` followed by `recover-final-evaluation
+--evaluation-id <id> --worker-termination-confirmed`. Releasing the write
+claim alone does not clear an interrupted evaluation reservation; these
+are separate, audited recoveries. Never release a still-running worker's
+claim.
+
+Finalization checks graph/request revisions and the live multi-repository
+manifest digest. **After SQLite commits**, it reloads `repos.yaml`, resolves
+the current Graph repository names to their canonical Git roots, rechecks
+Graph/Task Request eligibility, and recomputes the manifest against **those
+freshly registered paths**. Repository remaps/removals, malformed registry
+configuration, or changed worktree contents revoke the delivered flag with
+a durable audit record and return an error—not successful delivery. Later
+registry or source changes also stale any previous PASS on reads. SQLite
+alone cannot prevent external filesystem/registry writes after the final
+freshness check.
+
 ## Native capture và trạng thái lỗi
 
 `qiqi_delegate.result_hook` ghi native Stop event của Codex hoặc Claude. Runtime dùng dữ liệu này làm nguồn kết quả. Không dùng terminal scraping để suy đoán final response.
