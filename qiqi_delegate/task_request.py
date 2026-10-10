@@ -138,15 +138,17 @@ class TaskRequestStore:
 
     def _recover_abandoned_locked(self, db: sqlite3.Connection,
                                   request_id: str | None = None) -> int:
-        """Clear only reservations whose owner process is provably gone.
+        """Reconcile dead-owner reservations with native captures atomically.
 
-        A source append and the 'attaching' transition share one transaction.
-        Hence a dead owner in 'attaching' already has a durable captured source
-        and is safe to finalize as settled. 'requested' is interrupted, not
-        counted as reserved, allowing the Lead to try Discovery again.
+        Runtime assigns the native turn ID to the Discovery BEFORE launching
+        the Peer and saves its turn into SQLite before returning. A crash after
+        the turn is captured but before append() must not lose the evidence.
+        Recovery treats a committed settled turn as a durable source, while
+        leaving claims owned by live processes untouched.
         """
         sql = (
-            "SELECT discovery_id, state, owner_pid, owner_start_token "
+            "SELECT discovery_id, request_id, state, turn_id, "
+            "repository_names_json, route, owner_pid, owner_start_token "
             "FROM task_discoveries WHERE state IN ('requested', 'attaching')"
         )
         params: tuple[str, ...] = ()
@@ -157,18 +159,90 @@ class TaskRequestStore:
         for row in db.execute(sql, params).fetchall():
             if _owner_alive(row["owner_pid"], row["owner_start_token"]):
                 continue
-            completed = row["state"] == "attaching"
+
+            if row["state"] == "attaching":
+                # The source append and attaching state were one transaction.
+                update = db.execute(
+                    "UPDATE task_discoveries SET state='settled', detail=? "
+                    "WHERE discovery_id=? AND state='attaching'",
+                    ("Owner exited after captured evidence was attached; "
+                     "finalized durable result", row["discovery_id"]),
+                )
+                recovered += update.rowcount
+                continue
+
+            turn = (db.execute(
+                "SELECT turn_id, repository, route, state, response "
+                "FROM turns WHERE turn_id=?",
+                (row["turn_id"],),
+            ).fetchone() if row["turn_id"] else None)
+            valid_capture = (
+                turn is not None
+                and turn["state"] == "settled"
+                and isinstance(turn["response"], str)
+                and bool(turn["response"])
+                and len(turn["response"]) <= CAPTURE_MAX_RESPONSE_CHARS
+                and turn["route"] == row["route"]
+                and turn["repository"] in json.loads(row["repository_names_json"])
+            )
+            if valid_capture:
+                request = db.execute(
+                    "SELECT revision, sources_json FROM task_requests "
+                    "WHERE request_id=?",
+                    (row["request_id"],),
+                ).fetchone()
+                if request is not None:
+                    sources = json.loads(request["sources_json"])
+                    already_present = any(
+                        source.get("kind") == "peer_turn"
+                        and source.get("turn_id") == row["turn_id"]
+                        for source in sources
+                    )
+                    if already_present or len(sources) < MAX_CONTEXT_SOURCES:
+                        if not already_present:
+                            response = turn["response"]
+                            sources.append({
+                                "id": "source:" + uuid.uuid4().hex,
+                                "kind": "peer_turn",
+                                "turn_id": row["turn_id"],
+                                "repository": turn["repository"],
+                                "verification": "peer_observed",
+                                "content": response,
+                                "sha256": hashlib.sha256(
+                                    response.encode("utf-8")
+                                ).hexdigest(),
+                                "captured_at_ns": time.time_ns(),
+                            })
+                            db.execute(
+                                "UPDATE task_requests "
+                                "SET sources_json=?, assessment_json=NULL, "
+                                "revision=revision+1 WHERE request_id=?",
+                                (json.dumps(sources, ensure_ascii=False),
+                                 row["request_id"]),
+                            )
+                        done = db.execute(
+                            "UPDATE task_discoveries "
+                            "SET state='settled', detail=? "
+                            "WHERE discovery_id=? AND state='requested'",
+                            ("Recovered native captured turn after owner exit",
+                             row["discovery_id"]),
+                        )
+                        recovered += done.rowcount
+                        continue
+                # The turn remains addressable using the persisted turn_id even
+                # if an unexpected source capacity or request problem occurs.
+                detail = ("Captured result exists but could not be attached; "
+                          "use the recorded turn_id with a new task request")
+                state = "failed"
+            else:
+                detail = ("Discovery owner process exited before a recoverable "
+                          "settled native capture; abandoned source reservation recovered")
+                state = "interrupted"
+
             updated = db.execute(
                 "UPDATE task_discoveries SET state=?, detail=? "
-                "WHERE discovery_id=? AND state=?",
-                (
-                    "settled" if completed else "interrupted",
-                    ("Owner process exited after evidence was attached; finalized "
-                     "durable result" if completed else
-                     "Discovery owner process exited before completion; "
-                     "abandoned source reservation recovered"),
-                    row["discovery_id"], row["state"],
-                ),
+                "WHERE discovery_id=? AND state='requested'",
+                (state, detail, row["discovery_id"]),
             )
             recovered += updated.rowcount
         return recovered
