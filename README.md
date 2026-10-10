@@ -375,7 +375,13 @@ files or directories colliding with reserved evaluator metadata paths
 rejected before copying, rather than silently overwritten. Git submodules
 (gitlink mode 160000 in HEAD or index) are rejected rather than incorrectly
 recorded as deletions: recursively snapshotting submodule worktrees is not
-supported yet.
+supported yet. **Sparse checkout is also unsupported and fails closed.**
+Git `core.sparseCheckout` mode and individual `skip-worktree` index entries
+are rejected before manifest creation: a tracked path intentionally omitted
+by sparse checkout is not a real deletion tombstone and can never count as
+final PASS evidence. Restore a complete working tree and clear skip-worktree
+flags before evaluating. Ordinary staged/unstaged deletions in a complete
+working tree remain supported.
 `--add-dir` grants additional directory access: **it is not a sandbox**.
 The route is only allowed with explicit Codex `--sandbox read-only`.
 The feature does not execute arbitrary verification commands from reports or
