@@ -144,6 +144,15 @@ class EvaluationSnapshot:
                     # Read-only input snapshot; sandboxed tests may write to
                     # separate ephemeral artifact directories.
                     target.chmod(0o444 if mode & 0o111 == 0 else 0o555)
+                # Evaluator can look up hashes by repository-relative path
+                # without embedding thousands of file hashes in the prompt.
+                (destination / ".qiqi-evaluation-manifest.json").write_text(
+                    json.dumps({
+                        "repository": name, "head": info["head"],
+                        "files": info["files"],
+                    }, ensure_ascii=False, sort_keys=True),
+                    encoding="utf-8",
+                )
                 self.paths[name] = destination
             second = inspect_roots(self.roots)
             if first != second:
