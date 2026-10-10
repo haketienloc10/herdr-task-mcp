@@ -362,3 +362,58 @@ def test_graph_peer_prompt_carries_request_and_accepted_upstream(tmp_path, monke
     assert "Requirements for this node: Implement client" in prompt
     assert "Accepted upstream Peer report (A;" in prompt
     assert "backend/api.py:24" in prompt
+
+
+
+def test_updated_request_requires_graph_reconciliation_with_revised_packets(tmp_path, monkeypatch):
+    runtime, store = workspace(tmp_path)
+    request = store.create("Retry 429")
+    ready = store.assess(request["request_id"], 1, assessment())
+    old_payload = {"nodes": [{
+        "node_id": "implement", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {
+            "objective": "Implement original retry", "scope": ["src"],
+            "acceptance_criteria": ["Tests pass"]
+        }
+    }]}
+    gr = GraphRuntime(GraphRuntimeStore(runtime.db),
+                      readiness_guard=store.assert_graph_ready)
+    run = gr.start_graph(task_graph_from_payload(old_payload),
+                         repository_names=runtime.repos().keys())
+    gid = run["graph_run_id"]
+    store.bind_graph(gid, request["request_id"], ready["revision"],
+                     ["implement"], {"implement": ["R1"]})
+    expanded = store.append(request["request_id"], 2,
+                            {"kind": "inline", "text": "New constraints"})
+    updated = store.assess(request["request_id"], expanded["revision"], assessment())
+    with pytest.raises(RuntimeError, match="stale"):
+        store.assert_graph_ready(gid)
+
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(runtime.root))
+    import importlib
+    server = importlib.import_module("qiqi_delegate.server")
+    monkeypatch.setattr(server, "runtime", runtime)
+    monkeypatch.setattr(server, "graph_runtime", gr)
+    monkeypatch.setattr(server, "task_requests", store)
+
+    graph_snapshot = gr.get_graph(gid)
+    with pytest.raises(Exception, match="revised task packet"):
+        asyncio.run(server.reconcile_graph(
+            gid, server.Graph.model_validate(old_payload),
+            graph_snapshot["revision"], {"implement": ["R1"]},
+        ))
+
+    new_payload = {"nodes": [{
+        **old_payload["nodes"][0],
+        "task_packet": {
+            **old_payload["nodes"][0]["task_packet"],
+            "objective": "Implement updated retry with new constraints",
+        },
+    }]}
+    result = asyncio.run(server.reconcile_graph(
+        gid, server.Graph.model_validate(new_payload),
+        gr.get_graph(gid)["revision"], {"implement": ["R1"]},
+    ))
+    assert result["graph_run_id"] == gid
+    assert store.graph_binding(gid)["request_revision"] == updated["revision"]
+    store.assert_graph_ready(gid)
