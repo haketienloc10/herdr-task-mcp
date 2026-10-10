@@ -16,6 +16,7 @@ from qiqi_delegate.core import CAPTURE_MAX_RESPONSE_CHARS
 from typing import Any, Callable
 
 MAX_SOURCE_BYTES = 100_000
+MAX_CONTEXT_SOURCES = 16
 MAX_REQUEST_CHARS = 100_000
 DECISIONS = {"direct", "targeted_discovery", "full_discovery", "blocked"}
 
@@ -188,8 +189,8 @@ class TaskRequestStore:
     def create(self, user_request: str, sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if not isinstance(user_request, str) or not user_request.strip() or len(user_request) > MAX_REQUEST_CHARS:
             raise ValueError("user_request must be nonempty and within limit")
-        if sources is not None and (not isinstance(sources, list) or len(sources) > 16):
-            raise ValueError("sources must be a list of at most 16 entries")
+        if sources is not None and (not isinstance(sources, list) or len(sources) > MAX_CONTEXT_SOURCES):
+            raise ValueError(f"sources must be a list of at most {MAX_CONTEXT_SOURCES} entries")
         resolved = [self._resolve_source(s) for s in (sources or [])]
         request_id = str(uuid.uuid4())
         with self._connect() as db:
@@ -264,15 +265,58 @@ class TaskRequestStore:
         return self.get(request_id)
 
     def append(self, request_id: str, expected_revision: int,
-               source: dict[str, Any]) -> dict[str, Any]:
-        current = self.get(request_id)
-        if current["revision"] != expected_revision:
-            raise RuntimeError("stale task context revision")
+               source: dict[str, Any], *,
+               discovery_id: str | None = None) -> dict[str, Any]:
+        """Append a source without consuming a slot reserved by running Discovery.
+
+        A Discovery result must use its own active reservation; other writers
+        cannot occupy that reserved slot. Check and update atomically so
+        concurrent sessions cannot overfill the source list.
+        """
         resolved = self._resolve_source(source)
-        if len(current["sources"]) >= 16:
-            raise ValueError("too many context sources")
-        return self._write(request_id, expected_revision,
-                           sources=current["sources"] + [resolved])
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT sources_json, revision FROM task_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None or row["revision"] != expected_revision:
+                raise RuntimeError("stale task context revision")
+            sources = json.loads(row["sources_json"])
+            pending = db.execute(
+                "SELECT discovery_id FROM task_discoveries "
+                "WHERE request_id=? AND state='requested'",
+                (request_id,),
+            ).fetchall()
+            reserved = {item["discovery_id"] for item in pending}
+            if discovery_id is None:
+                if len(sources) + len(reserved) >= MAX_CONTEXT_SOURCES:
+                    raise ValueError(
+                        "no unreserved context source slot; Discovery has reserved "
+                        "capacity or the request has reached its source limit"
+                    )
+            else:
+                if discovery_id not in reserved:
+                    raise ValueError("Discovery result requires an active source reservation")
+                if source.get("kind") != "peer_turn":
+                    raise ValueError("Discovery reservation accepts only captured Peer evidence")
+                if len(sources) + len(reserved) > MAX_CONTEXT_SOURCES:
+                    raise ValueError("Discovery source reservation capacity exhausted")
+            db.execute(
+                "UPDATE task_requests SET revision=revision+1, sources_json=?, "
+                "assessment_json=NULL WHERE request_id=? AND revision=?",
+                (json.dumps(sources + [resolved], ensure_ascii=False),
+                 request_id, expected_revision),
+            )
+            if discovery_id is not None:
+                # Reservation is consumed atomically with the source append;
+                # finish_discovery will finalize this captured result afterward.
+                db.execute(
+                    "UPDATE task_discoveries SET state='attaching' "
+                    "WHERE discovery_id=? AND request_id=? AND state='requested'",
+                    (discovery_id, request_id),
+                )
+        return self.get(request_id)
 
     def assess(self, request_id: str, expected_revision: int,
                assessment: dict[str, Any]) -> dict[str, Any]:
@@ -341,6 +385,26 @@ class TaskRequestStore:
             raise ValueError("Discovery requires matching readiness decision")
         discovery_id = str(uuid.uuid4())
         with self._connect() as db:
+            # Serialize against ordinary source appends and other Discovery
+            # reservations. Reject at capacity before any Peer is started.
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT sources_json, revision FROM task_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None or row["revision"] != current["revision"]:
+                raise RuntimeError("stale task context revision")
+            pending = db.execute(
+                "SELECT COUNT(*) FROM task_discoveries "
+                "WHERE request_id=? AND state='requested'",
+                (request_id,),
+            ).fetchone()[0]
+            if len(json.loads(row["sources_json"])) + pending >= MAX_CONTEXT_SOURCES:
+                raise ValueError(
+                    "Discovery cannot start: no free context source slot for "
+                    "captured evidence; create a new request with the relevant "
+                    "sources before dispatch"
+                )
             db.execute(
                 "INSERT INTO task_discoveries VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)",
                 (discovery_id, request_id, mode, json.dumps(repositories),
@@ -353,11 +417,15 @@ class TaskRequestStore:
                          detail: str | None = None) -> None:
         if state not in {"settled", "failed", "blocked", "capture_ambiguous"}:
             raise ValueError("invalid discovery state")
+        # A successful Peer capture first appends its source (requested ->
+        # attaching). Other terminal outcomes release an unused reservation.
+        previous = "attaching" if state == "settled" and turn_id else "requested"
         with self._connect() as db:
             result = db.execute(
                 "UPDATE task_discoveries SET state=?, turn_id=?, detail=? "
-                "WHERE discovery_id=? AND state='requested'",
-                (state, turn_id, detail[:1000] if detail else None, discovery_id),
+                "WHERE discovery_id=? AND state=?",
+                (state, turn_id, detail[:1000] if detail else None,
+                 discovery_id, previous),
             )
             if result.rowcount != 1:
                 raise ValueError("unknown or completed Discovery")
