@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.final_eval_snapshot import evidence_is_in_manifest
+from qiqi_delegate.task_request import _owner_alive, _process_start_token
 
 ACTIVE = ("requested", "evaluating")
 FINISHED = ("passed", "failed", "inconclusive", "errored", "interrupted")
@@ -39,6 +40,7 @@ class FinalEvaluationStore:
                     report_json TEXT,
                     detail TEXT,
                     owner_pid INTEGER NOT NULL,
+                    owner_start_token TEXT,
                     created_at_ns INTEGER NOT NULL,
                     updated_at_ns INTEGER NOT NULL,
                     finalized_at_ns INTEGER
@@ -49,6 +51,108 @@ class FinalEvaluationStore:
                     ON final_evaluations(graph_run_id)
                     WHERE status IN ('requested', 'evaluating');
             """)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {
+                row["name"] for row in db.execute(
+                    "PRAGMA table_info(final_evaluations)"
+                )
+            }
+            if "owner_start_token" not in columns:
+                db.execute(
+                    "ALTER TABLE final_evaluations ADD COLUMN owner_start_token TEXT"
+                )
+        self.recover_abandoned()
+
+    def recover_abandoned(self) -> int:
+        """Recover native settled captures from dead owners; never restart a Peer.
+
+        If the outcome cannot be proven, mark interrupted and require explicit
+        operator confirmation before permitting another evaluation dispatch.
+        """
+        changed = 0
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT * FROM final_evaluations "
+                "WHERE status IN ('requested','evaluating')"
+            ).fetchall()
+            for row in rows:
+                if _owner_alive(row["owner_pid"], row["owner_start_token"]):
+                    continue
+                turn = db.execute(
+                    "SELECT state, response FROM turns WHERE turn_id=?",
+                    (row["turn_id"],),
+                ).fetchone() if row["turn_id"] else None
+                response = turn["response"] if turn and turn["state"] == "settled" else None
+                report = None
+                status = "interrupted"
+                detail = "Owner exited before verifiable native completion; operator recovery required"
+                if response:
+                    try:
+                        assessment = db.execute(
+                            "SELECT assessment_json FROM task_requests WHERE request_id=?",
+                            (row["request_id"],),
+                        ).fetchone()
+                        requirements = (
+                            json.loads(assessment["assessment_json"])["requirements"]
+                            if assessment and assessment["assessment_json"] else []
+                        )
+                        report = self.validate_report(
+                            json.loads(response),
+                            json.loads(row["manifest_json"]),
+                            {r["id"] for r in requirements},
+                        )
+                        status = {"pass": "passed", "fail": "failed",
+                                  "inconclusive": "inconclusive"}[report["verdict"]]
+                        detail = "Recovered durable native capture from abandoned evaluator"
+                    except (KeyError, ValueError, TypeError) as exc:
+                        status = "inconclusive"
+                        detail = "Native capture persisted but report invalid: " + str(exc)
+                updated = db.execute(
+                    "UPDATE final_evaluations SET status=?, raw_response=?, "
+                    "report_json=?, detail=?, updated_at_ns=? WHERE evaluation_id=? "
+                    "AND status IN ('requested','evaluating')",
+                    (status, response, json.dumps(report) if report else None,
+                     detail, time.time_ns(), row["evaluation_id"]),
+                )
+                changed += updated.rowcount
+        return changed
+
+    def inspect_interrupted(self, evaluation_id: str) -> dict[str, Any]:
+        return self.get(evaluation_id)
+
+    def release_interrupted(self, evaluation_id: str, *,
+                            worker_termination_confirmed: bool) -> dict[str, Any]:
+        """Operator-only exact-ID clearance; never exposed to Lead MCP."""
+        if worker_termination_confirmed is not True:
+            raise ValueError("verify evaluator worker termination before recovery")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status FROM final_evaluations WHERE evaluation_id=?",
+                (evaluation_id,),
+            ).fetchone()
+            if row is None or row["status"] != "interrupted":
+                raise ValueError("only an interrupted evaluation can be released")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS final_evaluation_recovery_audit (
+                    evaluation_id TEXT NOT NULL,
+                    recovered_at_ns INTEGER NOT NULL,
+                    worker_termination_confirmed INTEGER NOT NULL
+                    CHECK(worker_termination_confirmed=1)
+                )
+            """)
+            db.execute(
+                "UPDATE final_evaluations SET status='errored', detail=?, "
+                "updated_at_ns=? WHERE evaluation_id=? AND status='interrupted'",
+                ("Operator confirmed worker termination; safe to retry",
+                 time.time_ns(), evaluation_id),
+            )
+            db.execute(
+                "INSERT INTO final_evaluation_recovery_audit VALUES (?, ?, 1)",
+                (evaluation_id, time.time_ns()),
+            )
+        return self.get(evaluation_id)
 
     def _connect(self):
         db = sqlite3.connect(self.database, timeout=30)
@@ -103,6 +207,16 @@ class FinalEvaluationStore:
                     binding is None or binding["request_id"] != request_id or
                     binding["request_revision"] != request_revision):
                 raise RuntimeError("stale graph/request binding for final evaluation")
+            interrupted = db.execute(
+                "SELECT evaluation_id FROM final_evaluations "
+                "WHERE graph_run_id=? AND status='interrupted' LIMIT 1",
+                (graph_run_id,),
+            ).fetchone()
+            if interrupted:
+                raise RuntimeError(
+                    "previous evaluator was interrupted; operator must confirm "
+                    "worker termination and release its exact evaluation ID"
+                )
             existing = db.execute(
                 "SELECT * FROM final_evaluations "
                 "WHERE graph_run_id=? AND status IN ('requested','evaluating') "
@@ -124,11 +238,11 @@ class FinalEvaluationStore:
                     "INSERT INTO final_evaluations "
                     "(evaluation_id,graph_run_id,graph_revision,request_id,"
                     "request_revision,route,manifest_json,manifest_digest,"
-                    "status,owner_pid,created_at_ns,updated_at_ns) "
-                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?)",
+                    "status,owner_pid,owner_start_token,created_at_ns,updated_at_ns) "
+                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?)",
                     (return_id, graph_run_id, graph_revision, request_id,
                      request_revision, route, json.dumps(manifest, sort_keys=True),
-                     digest, os.getpid(), now, now),
+                     digest, os.getpid(), _process_start_token(os.getpid()), now, now),
                 )
                 created = True
         return self.get(return_id), created
