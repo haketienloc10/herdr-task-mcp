@@ -172,6 +172,19 @@ class FinalEvaluationStore:
         result["manifest"] = json.loads(result.pop("manifest_json"))
         result["report"] = (json.loads(result.pop("report_json"))
                             if result["report_json"] else None)
+        if result["turn_id"]:
+            # Read-only recovery locator: even if cancellation happened after
+            # native persistence but before returning to the coordinator, the
+            # complete durable captured turn remains inspectable.
+            with self._connect() as db:
+                native = db.execute(
+                    "SELECT state, response FROM turns WHERE turn_id=?",
+                    (result["turn_id"],),
+                ).fetchone()
+            if native is not None:
+                result["native_capture"] = {
+                    "state": native["state"], "response": native["response"],
+                }
         return result
 
     def latest(self, graph_run_id: str) -> dict[str, Any] | None:
@@ -360,6 +373,14 @@ class FinalEvaluationStore:
                     not isinstance(run["artifact_ref"], str)):
                 raise ValueError("invalid verification run descriptor")
         if verdict == "pass" and (
+            (len(manifest) > 1 and (
+                not checks or
+                set(manifest) - {
+                    e["repository"]
+                    for check in checks
+                    for e in check["evidence"]
+                }
+            )) or
             any(r["status"] != "pass" for r in requirements) or
             any(f["severity"] in {"blocking", "major"} for f in findings) or
             any(c["status"] != "pass" for c in checks) or
@@ -390,12 +411,13 @@ class FinalEvaluationStore:
             if status == "passed":
                 bound_turn = row["turn_id"] or turn_id
                 native = db.execute(
-                    "SELECT state, response FROM turns WHERE turn_id=?",
+                    "SELECT state, response, repository, route "
+                    "FROM turns WHERE turn_id=?",
                     (bound_turn,),
                 ).fetchone()
                 metadata = db.execute(
-                    "SELECT manifest_json, request_id FROM final_evaluations "
-                    "WHERE evaluation_id=?", (evaluation_id,),
+                    "SELECT manifest_json, request_id, route "
+                    "FROM final_evaluations WHERE evaluation_id=?", (evaluation_id,),
                 ).fetchone()
                 context = db.execute(
                     "SELECT assessment_json FROM task_requests WHERE request_id=?",
@@ -404,7 +426,10 @@ class FinalEvaluationStore:
                 if (not isinstance(raw_response, str) or
                         native is None or native["state"] != "settled" or
                         native["response"] != raw_response or report is None or
-                        context is None or context["assessment_json"] is None):
+                        native["route"] != metadata["route"] or
+                        native["repository"] not in json.loads(
+                            metadata["manifest_json"]
+                        ) or context is None or context["assessment_json"] is None):
                     raise ValueError(
                         "PASS requires an exact persisted native settled turn, "
                         "the same complete response, and assessed requirements"
