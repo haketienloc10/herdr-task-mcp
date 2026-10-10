@@ -411,13 +411,45 @@ class FinalEvaluationStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT status, turn_id FROM final_evaluations WHERE evaluation_id=?",
+                "SELECT status, turn_id, graph_run_id, graph_revision, "
+                "request_id, request_revision FROM final_evaluations "
+                "WHERE evaluation_id=?",
                 (evaluation_id,),
             ).fetchone()
             if row is None or row["status"] not in ACTIVE:
                 raise RuntimeError("final evaluation already completed or missing")
             if turn_id is not None and row["turn_id"] not in (None, turn_id):
                 raise RuntimeError("native turn binding mismatch")
+            if status == "passed":
+                # The assessment may change while a native evaluator is
+                # running. Treat the result as stale *within this transaction*
+                # before trying to validate old requirement IDs against a
+                # newer assessment. Do not leave an active reservation behind.
+                current_request = db.execute(
+                    "SELECT revision FROM task_requests WHERE request_id=?",
+                    (row["request_id"],),
+                ).fetchone()
+                current_graph = db.execute(
+                    "SELECT revision FROM graph_runs WHERE graph_run_id=?",
+                    (row["graph_run_id"],),
+                ).fetchone()
+                bound = db.execute(
+                    "SELECT request_id, request_revision "
+                    "FROM task_graph_bindings WHERE graph_run_id=?",
+                    (row["graph_run_id"],),
+                ).fetchone()
+                if (current_request is None or
+                        current_request["revision"] != row["request_revision"]
+                        or current_graph is None or
+                        current_graph["revision"] != row["graph_revision"]
+                        or bound is None or
+                        bound["request_id"] != row["request_id"] or
+                        bound["request_revision"] != row["request_revision"]):
+                    status = "inconclusive"
+                    detail = (
+                        "Stale final evaluation: TaskGraph or bound Task Request "
+                        "changed during native evaluation; reassess and rerun"
+                    )
             if status == "passed":
                 bound_turn = row["turn_id"] or turn_id
                 native = db.execute(
