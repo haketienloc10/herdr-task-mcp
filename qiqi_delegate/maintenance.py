@@ -199,7 +199,11 @@ def _task_request_store(workspace: Path) -> TaskRequestStore:
     if not workspace.is_dir():
         raise ValueError(f"workspace directory does not exist: {workspace}")
     runtime = DelegateRuntime(workspace)
-    return TaskRequestStore(runtime.db, runtime.root, runtime.repos)
+    # Both show-discovery and explicit ownerless recovery must avoid silently
+    # recovering unrelated dead-owner reservations during store construction.
+    return TaskRequestStore(
+        runtime.db, runtime.root, runtime.repos, recover_on_startup=False,
+    )
 
 
 def show_discovery(*, workspace: Path, discovery_id: str) -> dict[str, Any]:
