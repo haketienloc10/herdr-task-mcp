@@ -291,6 +291,74 @@ Gọi `reconcile_graph` cùng `expected_revision` để áp dụng TaskGraph m�
 
 Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó không tương đương ACCEPT.** Lead phải đọc captured evidence trước khi quyết định.
 
+## Final Evaluation Gate — Issue #8
+
+A completed TaskGraph is NOT necessarily a verified final product. The Lead
+continues its existing per-node `get_node_reviews` / `submit_decisions` loop.
+When the entire graph is `complete` with **every node satisfied**, a separate
+**single, fresh Unified Evaluator** reviews the final combined implementation,
+including cross-module contracts, before delivery is finalized.
+
+1. Bind the original verbatim user request using `prepare_task_request`,
+   `submit_context_assessment`, and `start_graph(..., task_request_id,
+   task_request_revision, requirement_map)`. Legacy unbound graphs are explicitly
+   ineligible for independent final PASS; their old APIs remain usable.
+2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
+   `graph_state="complete"` remains an execution-only state, not a final PASS.
+3. Configure a dedicated safe Codex route in workspace `agent-routing.yaml`:
+   
+   ```yaml
+   routes:
+     codex-evaluator:
+       agent: codex
+       args: ["--sandbox", "read-only"]
+   ```
+
+   Final Evaluation fails closed for `--yolo`, Claude and arbitrary CLI/config
+   overrides. This route must genuinely enforce read-only agent execution.
+4. Call `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`.
+   The Coordinator snapshots **all** repositories in the active TaskGraph
+   (including staged, unstaged and non-ignored untracked files), then launches
+   **one fresh native Evaluator session** with snapshot CWD + `--add-dir`
+   for additional module roots. It passes the original request, requirements,
+   current TaskGraph and all node acceptance criteria, not Peer report claims.
+5. Inspect `get_final_evaluation(graph_run_id, evaluation_id?)`. The durable
+   structured report has `verdict`, `requirement_results`,
+   `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
+   Report evidence must reference real repository/path/SHA256 values from the
+   isolated `.qiqi-evaluation-manifest.json`; all original requirements must
+   be covered. A bare LLM "PASS" without corroborating file evidence is
+   rejected. A native settled response alone is NOT an accepted evaluation.
+6. On FAIL or INCONCLUSIVE, Lead fixes/replans through existing graph tools,
+   then reruns one whole-product evaluation after the updated graph is complete.
+7. Call `finalize_graph(graph_run_id, evaluation_id, expected_revision)` only
+   after an independently validated `passed` result matching the exact current
+   graph/request/repository snapshot. `get_graph` separately reports
+   `graph_state`, `final_evaluation_status`, `evaluation_is_current` and
+   `delivery_status`. Changes to untracked/tracked files or graph/request
+   revision invalidate the previous PASS.
+
+**Limits and security boundaries:** Snapshots use verified registered Git roots,
+a strict file allowlist, symlink/path protections, file hashing before/after
+copy and deterministic manifests, with defaults 3,000 files/repo, 1 MB/file
+and 24 MB total. Snapshots are temporary and separate from original trees.
+`--add-dir` grants additional directory access: **it is not a sandbox**.
+The route is only allowed with explicit Codex `--sandbox read-only`.
+The feature does not execute arbitrary verification commands from reports or
+independently attest LLM-reported test runs; do not treat test claims as
+deterministic proof. Read permissions outside snapshots depend on the
+host/Herdr deployment: if the host cannot confine the agent as required,
+do not run final evaluation on secret-bearing or untrusted workspaces.
+A model finding no errors cannot prove mathematical correctness.
+
+**Crash/concurrency semantics:** Store evaluation IDs and native turn bindings
+before launch. Duplicate active requests do not dispatch a second agent.
+Failed/ambiguous/cancelled runs never PASS; diagnostic and native capture
+association remain auditable. Finalization checks graph/request revisions and
+the live multi-repository manifest digest inside the persisted gate operation.
+Operator must inspect uncertain external Herdr worker state before retrying
+an interrupted evaluator.
+
 ## Native capture và trạng thái lỗi
 
 `qiqi_delegate.result_hook` ghi native Stop event của Codex hoặc Claude. Runtime dùng dữ liệu này làm nguồn kết quả. Không dùng terminal scraping để suy đoán final response.
