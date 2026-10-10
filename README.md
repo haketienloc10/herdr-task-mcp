@@ -360,7 +360,13 @@ including cross-module contracts, before delivery is finalized.
    without dispatching another native Evaluator or clearing delivery.
    `get_graph` continues to report `delivery_status="finalized"` for a
    current approved snapshot, even if a newer attempt record exists.
-   A changed snapshot never reuses the old PASS and must be evaluated again.
+   If snapshots A and B were both finalized and a worktree reverts from B to A,
+   the gate selects A's **historical finalized PASS** by the current
+   graph revision, Task Request identity/revision and repository manifest digest
+   (not by the most recent finalization timestamp), and reuses its original
+   evaluation ID without rerunning Codex. Rebinding a different Task Request
+   or changing to a never-approved snapshot cannot reuse that PASS.
+   A changed snapshot without a matching finalized PASS must be evaluated again.
 
 **Limits and security boundaries:** Snapshots use verified registered Git roots,
 a strict file allowlist, symlink/path protections, file hashing before/after
