@@ -352,13 +352,20 @@ async def delegate_repo_task(
         required = {r["id"] for r in current["assessment"]["requirements"]}
         if not requirement_refs or any(r not in required for r in requirement_refs):
             raise ValueError("delegate_repo_task needs valid requirement_refs")
-        constraints = list(constraints or []) + [
-            "Original user request: " + current["user_request"],
-            "Resolved requirements: " + " | ".join(
-                r["text"] for r in current["assessment"]["requirements"]
-                if r["id"] in requirement_refs
-            ),
+        selected_requirements = [
+            r for r in current["assessment"]["requirements"]
+            if r["id"] in requirement_refs
         ]
+        constraints = list(constraints or []) + [
+            "Original user request (verbatim): " + current["user_request"],
+            "Resolved requirements: " + " | ".join(r["text"] for r in selected_requirements),
+        ]
+        for source in current["sources"][:8]:
+            if any(source["id"] in r["evidence_refs"] for r in selected_requirements):
+                constraints.append(
+                    f"Source {source['id']} [{source['kind']} / "
+                    f"{source['verification']}]: " + source["content"][:6000]
+                )
     packet = build_task_packet(
         objective=objective, scope=scope, acceptance_criteria=acceptance_criteria,
         out_of_scope=out_of_scope, constraints=constraints, known_unknowns=known_unknowns,
@@ -553,6 +560,18 @@ async def reconcile_graph(
         task_requests._check_map(
             current, [node.node_id for node in authored.nodes], requirement_map,
         )
+        # Changing only the requirement mapping must not silently preserve
+        # an already-satisfied node whose authored task was never revised.
+        previous_nodes = {
+            node.node_id: node for node in graph_runtime._graph_for_run(graph_run_id).nodes
+        }
+        for node in authored.nodes:
+            if (node.node_id in previous_nodes and
+                    binding["requirement_map"].get(node.node_id) != requirement_map[node.node_id] and
+                    previous_nodes[node.node_id] == node):
+                raise ValueError(
+                    f"changed requirements for {node.node_id!r} require a revised task packet"
+                )
     elif requirement_map is not None:
         raise ValueError("cannot attach requirement_map to legacy unassessed graph")
     result = graph_runtime.reconcile_graph(
