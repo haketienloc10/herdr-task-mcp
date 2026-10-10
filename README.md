@@ -107,6 +107,84 @@ Trong lời gọi MCP, truyền **tên route** như `codex-balanced`. Không tru
 
 Muốn giữ chế độ yêu cầu xác nhận, sửa `args: []` cho từng route. Installer chỉ tạo `agent-routing.yaml` khi file chưa tồn tại; chạy lại installer không ghi đè cấu hình hiện có.
 
+## Task Readiness & Discovery-on-demand (Issue #6)
+
+TaskGraph hợp lệ không chứng minh task đúng ý user. Workflow mới giữ nguyên **user request** và context sources **tùy chọn**, dùng một Context Assessment đã lưu (với revision) để quyết định có thể giao ngay hay cần điều tra.
+
+### Quy trình Lead
+
+1. `prepare_task_request(user_request, sources?)` đăng ký yêu cầu. `sources=[]` hoàn toàn hợp lệ: **không cần spec hay handoff**. Server không truy cập được lịch sử chat; hãy truyền nguyên văn request.
+2. `get_task_request(request_id)` trả user request, snapshots, provenance, revision, stale source IDs. Các nguồn hiện hỗ trợ `inline`, `repo_file`, `workspace_file` và captured `peer_turn`. Nguồn tài liệu trong Git root chỉ được đọc bằng locator chính xác; không mở quyền đọc repository tùy ý cho Lead.
+3. `submit_context_assessment(request_id, expected_revision, assessment)` nhận requirements có `evidence_refs`, `blocking_unknowns`, `decision` và `rationale`. Requirement từ prompt gốc dẫn `request:current`; không cần source ngoài.
+4. `direct` khi yêu cầu đủ actionable để giao Peer (Peer tự tìm chi tiết cục bộ). Gọi `start_graph(..., task_request_id, task_request_revision, requirement_map)` hoặc `delegate_repo_task(..., task_request_id, task_request_revision, requirement_refs)`. Graph mapping phải bao phủ mọi requirement.
+5. `targeted_discovery` nếu thiếu một fact có thể đổi kế hoạch; `full_discovery` nếu chưa hiểu hệ thống. Gọi `delegate_discovery(request_id, repository_names, route, questions, mode)`. Một Peer có thể đọc các Git root đã đăng ký qua `--add-dir`. Peer result được capture/append vào request; **assessment cũ bị invalidated**, QiQi review và reassess trước khi triển khai.
+6. `blocked` nếu thiếu quyết định nghiệp vụ mà đọc code cũng không giải quyết. Yêu cầu user làm rõ, không tự tưởng tượng.
+
+### Ví dụ A: Yêu cầu rõ, không document → DIRECT
+
+~~~json
+{"user_request":"Trong backend, retry HTTP 429 và 503 tối đa 3 lần, giữ public API và viết regression tests"}
+~~~
+
+Không cần sources. Assessment sau `prepare_task_request` (giả sử `revision=1`):
+
+~~~json
+{"request_id":"<request_id>","expected_revision":1,
+ "assessment":{
+   "requirements":[
+     {"id":"R1","text":"Retry 429/503 tối đa 3 lần","evidence_refs":["request:current"]},
+     {"id":"R2","text":"Giữ public API và thêm tests","evidence_refs":["request:current"]}
+   ],
+   "blocking_unknowns":[],
+   "decision":"direct",
+   "rationale":"Mục tiêu, repository và acceptance conditions đã đủ để giao implementation"
+ }}
+~~~
+
+Sau assessment dùng revision mới (ví dụ 2). Graph node `retry-backend` gắn `requirement_map={"retry-backend":["R1","R2"]}` và có TaskPacket tự đủ nghĩa. **Không gọi Discovery**.
+
+### Ví dụ B: Chưa rõ nguyên nhân → FULL DISCOVERY
+
+User: "Hệ thống đôi khi tạo trùng đơn hàng; tìm nguyên nhân và sửa." Không có handoff/spec.
+
+QiQi đánh giá `decision="full_discovery"`, `blocking_unknowns=["Không biết luồng gây duplicate order"]`, rồi gọi:
+
+~~~json
+{"request_id":"<request_id>","repository_names":["backend","frontend"],
+ "route":"codex-balanced","mode":"full_discovery",
+ "questions":["Trace request/retry/idempotency xuyên backend/frontend có file:line",
+              "Nêu nguyên nhân đã xác minh và những unknowns còn lại"]}
+~~~
+
+Sau captured response, QiQi tạo assessment mới, quyết định triển khai theo evidence thay vì phỏng đoán. Nếu chỉ thiếu một contract/idempotency detail, dùng `targeted_discovery`.
+
+### Ví dụ C: Context inline → DIRECT
+
+~~~json
+{"user_request":"Implement theo spec được cung cấp, giữ API",
+ "sources":[{"kind":"inline","label":"user-spec",
+             "text":"Retry HTTP 503 only, max 2 attempts. No public API changes."}]}
+~~~
+
+Dùng `sources[0].id` trả về làm `evidence_refs`. `verification=reported` chỉ cho biết nội dung được **cung cấp**, không đồng nghĩa đã chứng minh trong code. Nếu đã đủ để giao Peer thì DIRECT.
+
+### Ví dụ D: Handoff/spec chỉ là nguồn tùy chọn
+
+~~~json
+{"user_request":"Tiếp tục phần còn lại theo tài liệu",
+ "sources":[{"kind":"repo_file","repository":"backend","path":"handoff.md"}]}
+~~~
+
+QiQi phân biệt phần `completed` và `remaining`, đối chiếu chỉ dẫn mới, chỉ Discovery khi thiếu thông tin ảnh hưởng kế hoạch. Runtime giữ snapshot/hash; source file thay đổi sau assessment có thể chặn dispatch.
+
+### Ranh giới đảm bảo và legacy
+
+- Các API cũ `start_graph`/`delegate_repo_task` không có `task_request_id` vẫn dùng chế độ **legacy_unassessed**, không được tuyên bố đã qua readiness gate.
+- Bound TaskGraph sử dụng revision guard, kiểm tra blocking unknowns và ánh xạ node với requirements; prompt Peer nhận user request, các requirements liên quan và accepted upstream response.
+- **Discovery no-write chỉ bằng prompt.** Route Codex có thể giữ `--yolo`; `--add-dir` không phải sandbox read-only. Agent vẫn có thể ghi vào repo bổ sung dù instruction cấm, write claim không bao phủ hết các repo này. Chỉ sử dụng trên repository đáng tin cậy.
+- Runtime chỉ kiểm tra cấu trúc, refs, digest và revision; không đảm bảo tuyệt đối suy luận ngữ nghĩa của QiQi. Cần execution trace thật để kiểm chứng LLM có tuân thủ.
+
+
 ## Bắt đầu giao việc
 
 Gọi `workspace_info` trước. Công cụ trả tên repository, route và Herdr session đang dùng.
