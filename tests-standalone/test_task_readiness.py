@@ -258,10 +258,20 @@ def test_discovery_audit_survives_restart(tmp_path):
         request["request_id"], "targeted_discovery",
         ["backend", "frontend"], ["Inspect idempotency"], "codex-balanced",
     )
+    with runtime._connect() as db:
+        db.execute("INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   ("captured-turn", "native", "backend", "codex-balanced",
+                    "settled", "Inspected idempotency at src/orders.py:41", 456))
+    attached = store.append(
+        request["request_id"], assessed["revision"],
+        {"kind": "peer_turn", "turn_id": "captured-turn"},
+        discovery_id=ident,
+    )
     store.finish_discovery(ident, "settled", turn_id="captured-turn")
     resumed = TaskRequestStore(runtime.db, runtime.root, runtime.repos)
     item = resumed.get(request["request_id"])
-    assert item["revision"] == assessed["revision"]
+    assert item["revision"] == assessed["revision"] + 1
+    assert attached["assessment"] is None
     assert item["discoveries"][0]["questions"] == ["Inspect idempotency"]
     assert item["discoveries"][0]["turn_id"] == "captured-turn"
 
