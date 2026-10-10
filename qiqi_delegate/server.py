@@ -362,6 +362,7 @@ async def delegate_discovery(
         response = await runtime.delegate(
             repository=repository_names[0], route=route, packet=packet,
             discovery_repositories=tuple(repository_names),
+            discovery_id=discovery_id,
         )
     except BaseException as exc:
         task_requests.finish_discovery(
