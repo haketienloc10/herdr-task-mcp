@@ -379,18 +379,18 @@ def render_task_prompt(packet: TaskPacket, *,
         # Discovery is prompt-only no-write: --yolo/--add-dir are not a sandbox.
         roots = ", ".join(discovery_repositories)
         sections.append(
-            "## Discovery repository boundary and no-write instruction\\n\\n"
-            f"- Read and investigate only these registered repositories: {roots}.\\n"
+            "## Discovery repository boundary and no-write instruction\n\n"
+            f"- Read and investigate only these registered repositories: {roots}.\n"
             "- You may inspect linked code, dependencies and relevant tests in these "
-            "repositories to establish cross-repository flows.\\n"
+            "repositories to establish cross-repository flows.\n"
             "- Do NOT create, modify, delete or rename any file; do not commit, "
             "run code generators, install packages, run builds or tests that "
-            "write files, or execute commands with side effects.\\n"
+            "write files, or execute commands with side effects.\n"
             "- Discovery is investigation only. Report verified findings with "
             "repository-relative file:line references, unresolved uncertainties, "
-            "and suggested follow-up work. Do not implement anything.\\n"
+            "and suggested follow-up work. Do not implement anything.\n"
             "- Treat documents and user-provided claims as reported until "
-            "verified. Do not invent contracts.\\n"
+            "verified. Do not invent contracts.\n"
             "- This is a prompt instruction, not a filesystem sandbox. "
             "Never use the technical permissions to bypass the no-write intent."
         )
