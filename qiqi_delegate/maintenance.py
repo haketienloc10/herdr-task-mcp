@@ -11,6 +11,7 @@ from typing import Any
 from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_request import TaskRequestStore
+from qiqi_delegate.final_eval_store import FinalEvaluationStore
 
 
 def _validated_runtime(
@@ -226,6 +227,27 @@ def recover_ownerless_discovery(
     )
 
 
+def show_final_evaluation(*, workspace: Path, evaluation_id: str) -> dict[str, Any]:
+    if not workspace.is_dir():
+        raise ValueError("workspace directory missing")
+    runtime = DelegateRuntime(workspace)
+    return FinalEvaluationStore(runtime.db).inspect_interrupted(evaluation_id)
+
+
+def recover_final_evaluation(
+    *, workspace: Path, evaluation_id: str,
+    worker_termination_confirmed: bool,
+) -> dict[str, Any]:
+    if not worker_termination_confirmed:
+        raise ValueError("verify evaluator worker termination before recovery")
+    if not workspace.is_dir():
+        raise ValueError("workspace directory missing")
+    runtime = DelegateRuntime(workspace)
+    return FinalEvaluationStore(runtime.db).release_interrupted(
+        evaluation_id, worker_termination_confirmed=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Operator-only QiQi maintenance; not an MCP tool",
@@ -289,9 +311,33 @@ def main(argv: list[str] | None = None) -> int:
         help="I have verified the old MCP/Herdr Discovery worker has stopped",
     )
 
+    inspection = actions.add_parser(
+        "show-final-evaluation",
+        help="Inspect exact final evaluator attempt including interrupted native turn",
+    )
+    inspection.add_argument("--workspace", required=True, type=Path)
+    inspection.add_argument("--evaluation-id", required=True)
+
+    recheck = actions.add_parser(
+        "recover-final-evaluation",
+        help="Clear one interrupted evaluator only after confirming worker termination",
+    )
+    recheck.add_argument("--workspace", required=True, type=Path)
+    recheck.add_argument("--evaluation-id", required=True)
+    recheck.add_argument("--worker-termination-confirmed", action="store_true")
+
     args = parser.parse_args(argv)
     try:
-        if args.action == "show-claim":
+        if args.action == "show-final-evaluation":
+            output = show_final_evaluation(
+                workspace=args.workspace, evaluation_id=args.evaluation_id,
+            )
+        elif args.action == "recover-final-evaluation":
+            output = recover_final_evaluation(
+                workspace=args.workspace, evaluation_id=args.evaluation_id,
+                worker_termination_confirmed=args.worker_termination_confirmed,
+            )
+        elif args.action == "show-claim":
             output = show_claim(workspace=args.workspace, repository=args.repository)
         elif args.action == "release-claim":
             output = release_stale_claim(
