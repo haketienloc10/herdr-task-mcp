@@ -11,6 +11,8 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path, PurePosixPath
+
+from qiqi_delegate.core import CAPTURE_MAX_RESPONSE_CHARS
 from typing import Any, Callable
 
 MAX_SOURCE_BYTES = 100_000
@@ -168,7 +170,15 @@ class TaskRequestStore:
             data = turn["response"]
             entry.update(turn_id=turn_id, repository=turn["repository"],
                          verification="peer_observed")
-        if len(data.encode("utf-8")) > MAX_SOURCE_BYTES:
+        # A native Peer capture can be larger than the 100k-byte document
+        # limit. Preserve it in the task request so the Lead can inspect the
+        # complete Discovery result and reassess, even when the result cannot
+        # fit into a subsequent 100k-character implementation TaskPacket.
+        # Do not silently truncate captured evidence.
+        if kind in {"peer_turn", "accepted_graph_node"}:
+            if len(data) > CAPTURE_MAX_RESPONSE_CHARS:
+                raise ValueError("captured peer source exceeds native capture limit")
+        elif len(data.encode("utf-8")) > MAX_SOURCE_BYTES:
             raise ValueError("source content exceeds maximum size")
         entry["content"] = data
         entry["sha256"] = hashlib.sha256(data.encode("utf-8")).hexdigest()
