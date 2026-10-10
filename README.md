@@ -383,6 +383,19 @@ once the new request-to-graph binding is updated. Startup-blocked agents
 whose Herdr workspace
 is preserved remain `interrupted` and block further evaluator launches until
 an operator confirms worker termination using `recover-final-evaluation`.
+**Settled capture does not override failed Herdr cleanup.** If a native
+Evaluator produces a complete structured PASS but Herdr cannot confirm
+closing its workspace, `start_final_evaluation` returns
+`final_evaluation_status="interrupted"`, never `passed`.
+`get_final_evaluation` preserves the full native turn capture and returns
+`cleanup` with `cleanup_state`, `workspace_id`, `write_claim_id`,
+`write_claim_repository` and `recovery_action`. These IDs remain durable
+across MCP restarts. `finalize_graph` rejects the result, and a second
+evaluation is blocked until exact operator recovery; an LLM's captured PASS
+is evidence for inspection, not permission to deliver. During startup
+recovery, an outstanding native-turn write claim also blocks automatic
+PASS restoration, even if a settled capture exists.
+
 **Operator recovery for preserved Evaluator workspaces:** The Herdr Evaluator
 runs inside a disposable snapshot, but its write claim records the stable
 canonical root registered under the primary repository in `repos.yaml`.
