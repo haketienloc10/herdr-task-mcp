@@ -417,3 +417,92 @@ def test_updated_request_requires_graph_reconciliation_with_revised_packets(tmp_
     assert result["graph_run_id"] == gid
     assert store.graph_binding(gid)["request_revision"] == updated["revision"]
     store.assert_graph_ready(gid)
+
+
+
+def test_mcp_direct_flow_without_handoff_and_explicit_legacy(tmp_path, monkeypatch):
+    runtime, store = workspace(tmp_path)
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(runtime.root))
+    import importlib
+    server = importlib.import_module("qiqi_delegate.server")
+    gr = GraphRuntime(GraphRuntimeStore(runtime.db),
+                      readiness_guard=store.assert_graph_ready)
+    monkeypatch.setattr(server, "runtime", runtime)
+    monkeypatch.setattr(server, "task_requests", store)
+    monkeypatch.setattr(server, "graph_runtime", gr)
+
+    request = asyncio.run(server.prepare_task_request("Retry 429/503 in backend"))
+    assert request["sources"] == []
+    ready = asyncio.run(server.submit_context_assessment(
+        request["request_id"], 1,
+        server.ReadinessAssessment.model_validate(assessment()),
+    ))
+    payload = {"nodes": [{
+        "node_id": "retry", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {
+            "objective": "Retry 429/503", "scope": ["src"],
+            "acceptance_criteria": ["Tests pass"],
+        }
+    }]}
+    bound = asyncio.run(server.start_graph(
+        server.Graph.model_validate(payload),
+        request["request_id"], ready["revision"], {"retry": ["R1"]},
+    ))
+    assert bound["task_request_binding"]["request_id"] == request["request_id"]
+    read = asyncio.run(server.get_graph(bound["graph_run_id"]))
+    assert read["task_request_binding"]["requirement_map"] == {"retry": ["R1"]}
+    legacy = asyncio.run(server.start_graph(server.Graph.model_validate(payload)))
+    assert legacy["task_readiness_policy"] == "legacy_unassessed"
+    assert asyncio.run(server.get_graph(legacy["graph_run_id"]))[
+        "task_readiness_policy"] == "legacy_unassessed"
+
+    delegated = {}
+    async def fake_delegate(**kwargs):
+        delegated["packet"] = kwargs["packet"]
+        return {"state": "settled"}
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    asyncio.run(server.delegate_repo_task(
+        "backend", "codex-balanced", "Retry", ["src"], ["Tests pass"],
+        task_request_id=request["request_id"],
+        task_request_revision=ready["revision"], requirement_refs=["R1"],
+    ))
+    assert "Original user request" in render_task_prompt(delegated["packet"])
+    with pytest.raises(Exception, match="requirement_refs"):
+        asyncio.run(server.delegate_repo_task(
+            "backend", "codex-balanced", "Retry", ["src"], ["Tests pass"],
+            task_request_id=request["request_id"],
+            task_request_revision=ready["revision"],
+        ))
+
+
+def test_mcp_discovery_roundtrip_resets_readiness(tmp_path, monkeypatch):
+    runtime, store = workspace(tmp_path)
+    monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(runtime.root))
+    import importlib
+    server = importlib.import_module("qiqi_delegate.server")
+    monkeypatch.setattr(server, "runtime", runtime)
+    monkeypatch.setattr(server, "task_requests", store)
+    request = store.create("Investigate duplicate orders")
+    store.assess(request["request_id"], 1, assessment(
+        decision="targeted_discovery", unknowns=["Is idempotency implemented?"],
+    ))
+    captured = {}
+    async def fake_delegate(**kwargs):
+        captured["repositories"] = kwargs["discovery_repositories"]
+        with runtime._connect() as db:
+            db.execute("INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       ("discovery-turn", "native-session", "backend", "codex-balanced",
+                        "settled", "Idempotency is missing at backend/order.py:30", 123))
+        return {"state": "settled", "turn_id": "discovery-turn",
+                "agent_response": "Idempotency is missing at backend/order.py:30"}
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    result = asyncio.run(server.delegate_discovery(
+        request["request_id"], ["backend", "frontend"],
+        "codex-balanced", ["Inspect idempotency"],
+    ))
+    assert captured["repositories"] == ("backend", "frontend")
+    assert result["task_request"]["assessment"] is None
+    assert result["task_request"]["sources"][0]["verification"] == "peer_observed"
+    assert result["task_request"]["discoveries"][0]["turn_id"] == "discovery-turn"
+    with pytest.raises(ValueError, match="blocked"):
+        store.assert_ready(request["request_id"])
