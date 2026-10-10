@@ -622,7 +622,16 @@ class DelegateRuntime:
             evaluation_roots[repository] if evaluation_id is not None
             else repos[repository]
         )
-        self._claim(repository, claim_id, repository_root=execution_root)
+        # Evaluators execute against disposable snapshot directories, but
+        # their write claim must retain the stable, *registered* Git-root
+        # identity. The operator-only show-claim/release-claim commands resolve
+        # repos.yaml, not temporary snapshot paths (which disappear if an
+        # AgentStartupBlocked worker must be inspected after cleanup).
+        # The registered root is also the mutex identity used by normal Peers:
+        # do not allow an evaluator's preserved claim to become unrecoverable
+        # and permanently block subsequent delegation.
+        claim_root = repos[repository] if evaluation_id is not None else execution_root
+        self._claim(repository, claim_id, repository_root=claim_root)
         workspace_id = None
         closed = False
         preserve_startup = False
