@@ -387,6 +387,38 @@ class FinalEvaluationStore:
                 raise RuntimeError("final evaluation already completed or missing")
             if turn_id is not None and row["turn_id"] not in (None, turn_id):
                 raise RuntimeError("native turn binding mismatch")
+            if status == "passed":
+                bound_turn = row["turn_id"] or turn_id
+                native = db.execute(
+                    "SELECT state, response FROM turns WHERE turn_id=?",
+                    (bound_turn,),
+                ).fetchone()
+                metadata = db.execute(
+                    "SELECT manifest_json, request_id FROM final_evaluations "
+                    "WHERE evaluation_id=?", (evaluation_id,),
+                ).fetchone()
+                context = db.execute(
+                    "SELECT assessment_json FROM task_requests WHERE request_id=?",
+                    (metadata["request_id"],),
+                ).fetchone()
+                if (not isinstance(raw_response, str) or
+                        native is None or native["state"] != "settled" or
+                        native["response"] != raw_response or report is None or
+                        context is None or context["assessment_json"] is None):
+                    raise ValueError(
+                        "PASS requires an exact persisted native settled turn, "
+                        "the same complete response, and assessed requirements"
+                    )
+                required = {
+                    item["id"] for item in json.loads(
+                        context["assessment_json"]
+                    )["requirements"]
+                }
+                validated = self.validate_report(
+                    report, json.loads(metadata["manifest_json"]), required,
+                )
+                if validated["verdict"] != "pass":
+                    raise ValueError("PASS status conflicts with validated report")
             updated = db.execute(
                 "UPDATE final_evaluations SET status=?, raw_response=?, "
                 "report_json=?, detail=?, turn_id=COALESCE(turn_id, ?), "
