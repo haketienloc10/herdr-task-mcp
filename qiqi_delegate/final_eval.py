@@ -203,7 +203,8 @@ class FinalEvaluationCoordinator:
             acceptance_criteria=[
                 "Every original requirement must be verified against actual final files.",
                 "Trace end-to-end cross-repository contracts and integrations.",
-                "Cite exact repository/path and sha256 from the per-repo "
+                "Cite exact repository/path and sha256 for files, or an "
+                "explicit tracked-deletion tombstone, from the per-repo "
                 ".qiqi-evaluation-manifest.json files.",
                 "Return exactly one JSON object with keys verdict, requirement_results, "
                 "cross_repository_checks, verification_runs, findings, unknowns.",
@@ -214,7 +215,13 @@ class FinalEvaluationCoordinator:
                 "without observed execution evidence.",
                 "Lead and Peer reports are claims, not independent proof.",
                 "Each snapshot root contains .qiqi-evaluation-manifest.json "
-                "with source file SHA256 values.",
+                "with source file SHA256 values and tracked deleted_paths. "
+                "Evidence for an existing file MUST be {repository, path, "
+                "sha256, locator}. Evidence for a tracked DELETION MUST be "
+                "{kind: 'deleted', repository, path, locator}; absent files "
+                "have NO sha256. The path MUST be present in that repo's "
+                "deleted_paths array; do not invent tombstones. Deletion-only "
+                "requirements can PASS with validated tombstone evidence.",
                 "The primary snapshot has .qiqi-final-task-sources/index.json "
                 "containing the FULL VERBATIM user request, original requirements "
                 "and source index; task-graph.json in that folder contains ALL "
@@ -260,8 +267,18 @@ class FinalEvaluationCoordinator:
                 task["revision"], route, snap.manifest, snap.digest,
             )
             if not created:
-                # An in-flight native turn may still exist. Never dispatch a
-                # duplicate even if a second process asks for the same run.
+                # Reuse a current finalized PASS; never demote delivered state
+                # by dispatching an unnecessary second Evaluator. The store
+                # makes this check under the reservation transaction.
+                if reserved["finalized_at_ns"] is not None:
+                    previous = self.read(graph_run_id, reserved["evaluation_id"])
+                    if not previous.get("is_current"):
+                        raise RuntimeError(
+                            "previous finalization no longer matches current inputs"
+                        )
+                    previous["already_finalized"] = True
+                    return previous
+                # Existing in-flight native turn: do not double-dispatch.
                 return {"evaluation_id": reserved["evaluation_id"],
                         "status": reserved["status"], "already_active": True,
                         "turn_id": reserved["turn_id"]}
@@ -364,6 +381,14 @@ class FinalEvaluationCoordinator:
 
     def graph_status(self, graph_run_id: str) -> dict[str, Any]:
         row = self.read(graph_run_id)
+        # A repeated/overlapping evaluation must not hide an already
+        # finalized, still-current deliverable in get_graph. Select a
+        # matching approved snapshot independently of "latest attempt".
+        finalized = self.store.latest_finalized(graph_run_id)
+        if finalized is not None:
+            verified = self.read(graph_run_id, finalized["evaluation_id"])
+            if verified.get("is_current"):
+                row = verified
         return {
             "final_evaluation_status": row.get("effective_status", row["status"]),
             "final_evaluation_id": row.get("evaluation_id"),
