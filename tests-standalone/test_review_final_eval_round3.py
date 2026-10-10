@@ -254,4 +254,4 @@ def test_finalization_revoked_if_source_changes_during_commit(tmp_path, monkeypa
             (eid,),
         ).fetchone()
     assert audit is not None
-    assert audit[0] > 0 and "repository changed" in audit[1]
+    assert audit[0] > 0 and "changed during finalization" in audit[1]
