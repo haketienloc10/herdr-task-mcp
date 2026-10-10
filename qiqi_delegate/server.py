@@ -346,6 +346,8 @@ async def delegate_repo_task(
 ) -> dict[str, Any]:
     """START/RESUME Peer; no request_id means explicit legacy unassessed behavior."""
     if task_request_id is not None:
+        if task_request_revision is None:
+            raise ValueError("task_request_revision is required with task_request_id")
         current = task_requests.assert_ready(task_request_id, task_request_revision)
         required = {r["id"] for r in current["assessment"]["requirements"]}
         if not requirement_refs or any(r not in required for r in requirement_refs):
@@ -377,6 +379,8 @@ async def start_graph(
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
     _check_graph_routes(authored)
     if task_request_id is not None:
+        if task_request_revision is None:
+            raise ValueError("task_request_revision is required with task_request_id")
         current = task_requests.assert_ready(task_request_id, task_request_revision)
         if requirement_map is None:
             raise ValueError("bound graph requires requirement_map")
@@ -419,20 +423,69 @@ async def get_node_reviews(graph_run_id: str,
         graph_run_id, locators, expected_revision=expected_revision
     )
 
-async def _graph_execute(node: GraphNode, session_id: str | None = None) -> dict:
+async def _graph_execute(
+    graph_run_id: str, node: GraphNode, session_id: str | None = None,
+) -> dict:
     if not node.route:
         raise ValueError(f"node {node.node_id} has no route")
-    return await runtime.delegate(repository=node.repository, route=node.route,
-                                  packet=node.task_packet, session_id=session_id)
+    packet = node.task_packet
+    binding = task_requests.graph_binding(graph_run_id)
+    if binding is not None:
+        current = task_requests.assert_ready(
+            binding["request_id"], binding["request_revision"],
+        )
+        requirement_ids = binding["requirement_map"].get(node.node_id, [])
+        requirements = [
+            r for r in current["assessment"]["requirements"]
+            if r["id"] in requirement_ids
+        ]
+        if not requirements:
+            raise ValueError("bound node has no current mapped requirements")
+        # A TaskPacket must remain self-sufficient even in a fresh Peer session.
+        # Data below is provenance-bearing context, not authority to inspect other roots.
+        additions = [
+            "Original user request (verbatim): " + current["user_request"],
+            "Requirements for this node: " + " | ".join(r["text"] for r in requirements),
+        ]
+        for source in current["sources"][:8]:
+            referenced = any(
+                source["id"] in req["evidence_refs"] for req in requirements
+            )
+            if referenced:
+                additions.append(
+                    f"Source {source['id']} [{source['kind']} / "
+                    f"{source['verification']}]: " + source["content"][:6000]
+                )
+        for parent in node.depends_on:
+            previous = graph_runtime.store.get_node(graph_run_id, parent)
+            if not previous or previous.get("semantic_state") != "satisfied":
+                raise RuntimeError("upstream dependency is not semantically accepted")
+            attempt = graph_runtime.store.get_attempt(
+                previous["current_attempt_id"],
+            )
+            response = (attempt or {}).get("result", {}).get("agent_response")
+            if not isinstance(response, str) or not response.strip():
+                raise RuntimeError("accepted upstream evidence is missing")
+            additions.append(
+                f"Accepted upstream Peer report ({parent}; captured evidence): "
+                + response[:6000]
+            )
+        payload = packet.as_dict()
+        payload["constraints"] = list(payload.get("constraints", [])) + additions
+        packet = build_task_packet(**payload)
+    return await runtime.delegate(
+        repository=node.repository, route=node.route,
+        packet=packet, session_id=session_id,
+    )
 
 @mcp.tool()
 @_public_tool_errors
 async def delegate_next(graph_run_id: str) -> dict[str, Any]:
     """Execute one conflict-free wave; dependent nodes require ACCEPT."""
     async def start(node: GraphNode):
-        return await _graph_execute(node)
+        return await _graph_execute(graph_run_id, node)
     async def resume(node: GraphNode, session_id: str):
-        return await _graph_execute(node, session_id)
+        return await _graph_execute(graph_run_id, node, session_id)
     return await graph_runtime.delegate_next(graph_run_id, executor=start, resume_executor=resume)
 
 @mcp.tool()
