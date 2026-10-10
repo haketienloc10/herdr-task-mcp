@@ -279,10 +279,23 @@ class EvaluationSnapshot:
 
 
 def evidence_is_in_manifest(
-    manifest: dict[str, Any], repository: str, path: str, sha256: str,
+    manifest: dict[str, Any], repository: str, path: str,
+    sha256: str | None = None, *, kind: str = "file",
 ) -> bool:
+    """Validate explicit file-hash or tracked-deletion evidence.
+
+    Deletion tombstones are names from Git HEAD/index absent in the captured
+    worktree, not files: they intentionally have no SHA256 content hash.
+    They are bound to the same frozen manifest digest as all other evidence.
+    """
     entry = manifest.get(repository)
-    return bool(entry and any(
+    if not isinstance(entry, dict):
+        return False
+    if kind == "deleted":
+        return sha256 is None and path in entry.get("deleted_paths", ())
+    if kind != "file" or not isinstance(sha256, str):
+        return False
+    return any(
         row["path"] == path and row["sha256"] == sha256
-        for row in entry["files"]
-    ))
+        for row in entry.get("files", ())
+    )
