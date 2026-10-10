@@ -194,16 +194,15 @@ def claude_config(existing: str, python: Path, root: Path,
     return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
 
 ROUTES = """# Routes and arguments belong to this workspace, not any child repository.
+# These defaults reduce interactive approval; change args here or in the
+# generated agent-routing.yaml if the workspace requires stricter permissions.
 routes:
   codex-balanced:
     agent: codex
-    args: []
+    args: ["--yolo"]
   claude-balanced:
     agent: claude
-    args: []
-# Example opt-in:
-#   codex: args: ["--yolo"]
-#   claude: args: ["--permission-mode", "auto"]
+    args: ["--permission-mode", "auto"]
 """
 
 REPOS = """# Register existing Git roots relative to THIS workspace.
