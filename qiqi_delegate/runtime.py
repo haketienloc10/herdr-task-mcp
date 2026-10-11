@@ -550,17 +550,10 @@ class DelegateRuntime:
                    root.resolve() in repos.values()
                    for root in evaluation_roots.values()):
                 raise ValueError("unsafe evaluation snapshot root")
-            # Prompt-only no-write is not protection. Reject unsafe Herdr
-            # routes: allow a deliberately configured Codex read-only sandbox
-            # and disallow arbitrary config overrides and bypass flags.
-            if adapter != "codex" or args not in (
-                ["--sandbox", "read-only"],
-                ["--sandbox=read-only"],
-            ):
-                raise ValueError(
-                    "Final Evaluator requires a configured Codex route with "
-                    "exactly --sandbox read-only and no --yolo/overrides"
-                )
+            # Keep Final Evaluation Codex-only. CLI flags, including sandbox
+            # and reasoning effort, are supplied by the workspace route.
+            if adapter != "codex":
+                raise ValueError("Final Evaluator requires a Codex route")
             args = list(args) + ["--skip-git-repo-check"]
             for name in evaluation_repositories:
                 if name != repository:
