@@ -11,8 +11,12 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 from pathlib import Path
 
+from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
+
 START = "<!-- BEGIN HERDR-TASK-MCP RULES -->"
 END = "<!-- END HERDR-TASK-MCP RULES -->"
+CLAUDE_START = "<!-- BEGIN HERDR-TASK-MCP CLAUDE IMPORT -->"
+CLAUDE_END = "<!-- END HERDR-TASK-MCP CLAUDE IMPORT -->"
 MCP_START = "# >>> qiqi-delegate MCP (managed)"
 MCP_END = "# <<< qiqi-delegate MCP (managed)"
 SERVER = "qiqi_delegate"
@@ -67,6 +71,31 @@ def managed_rules(existing: bytes) -> bytes:
         suffix = "" if not text else ("" if text.endswith(("\n", "\r")) else newline)
         result = text + suffix + (newline if text else "") + block + newline
     return result.encode("utf-8")
+
+def managed_claude_rules(existing: bytes) -> bytes:
+    """Import the shared AGENTS.md into Claude while preserving user content."""
+    text = existing.decode("utf-8")
+    starts, ends = text.count(CLAUDE_START), text.count(CLAUDE_END)
+    if (starts, ends) not in ((0, 0), (1, 1)):
+        raise ValueError("CLAUDE.md has malformed or duplicate qiqi_delegate markers; no changes written")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    block = CLAUDE_START + newline + "@AGENTS.md" + newline + CLAUDE_END
+    if starts:
+        a, b = text.index(CLAUDE_START), text.index(CLAUDE_END)
+        if b < a:
+            raise ValueError("CLAUDE.md marker ordering is invalid")
+        if (a and text[a - 1] not in "\r\n") or (
+            b + len(CLAUDE_END) < len(text)
+            and text[b + len(CLAUDE_END)] not in "\r\n"
+        ):
+            raise ValueError("CLAUDE.md markers must occupy complete lines")
+        return (text[:a] + block + text[b + len(CLAUDE_END):]).encode("utf-8")
+    # An existing explicit import already guarantees the common policy.
+    if re.search(r"(?m)^[ \t]*@AGENTS\.md[ \t]*$", text):
+        return existing
+    suffix = "" if not text else ("" if text.endswith(("\n", "\r")) else newline)
+    return (text + suffix + (newline if text else "") + block + newline).encode("utf-8")
+
 
 def _strip_own_section(text: str) -> str:
     count_start, count_end = text.count(MCP_START), text.count(MCP_END)
@@ -213,7 +242,12 @@ routes:
   claude-balanced:
     agent: claude
     args: ["--permission-mode", "auto"]
-"""
+  codex-evaluator:
+    agent: codex
+    args: ["--sandbox", "read-only"]
+  claude-evaluator:
+    agent: claude
+    args: """ + json.dumps(list(CLAUDE_EVALUATOR_ARGS)) + "\n"
 
 REPOS = """# Register existing Git roots relative to THIS workspace.
 # Child repositories: path: frontend. Sibling repositories: path: ../frontend.
@@ -240,13 +274,15 @@ async def install_workspace(root: Path, python: Path | None = None,
     if not root.is_dir():
         raise ValueError("workspace root must be a directory")
     agents = root / "AGENTS.md"
+    claude_rules = root / "CLAUDE.md"
     codex = root / ".codex" / "config.toml"
     claude = root / ".mcp.json"
-    for path in (agents, codex, claude, root / ".codex",
+    for path in (agents, claude_rules, codex, claude, root / ".codex",
                  root / ".herdr-task-mcp"):
         if path.is_symlink():
             raise ValueError(f"refusing symlink: {path}")
     a_old = agents.read_bytes() if agents.exists() else b""
+    lead_old = claude_rules.read_bytes() if claude_rules.exists() else b""
     c_old = codex.read_text(encoding="utf-8") if codex.exists() else ""
     m_old = claude.read_text(encoding="utf-8") if claude.exists() else ""
     # Complete all validations before modifying any file.
@@ -256,6 +292,7 @@ async def install_workspace(root: Path, python: Path | None = None,
         else _existing_herdr_session(c_old, m_old)
     )
     a_new = managed_rules(a_old)
+    lead_new = managed_claude_rules(lead_old)
     c_new = codex_config(c_old, python, root, herdr_session=herdr_session)
     m_new = claude_config(m_old, python, root, herdr_session=herdr_session)
     (root / ".codex").mkdir(exist_ok=True)
@@ -263,6 +300,7 @@ async def install_workspace(root: Path, python: Path | None = None,
     state.mkdir(mode=0o700, exist_ok=True)
     (state / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
     agents.write_bytes(a_new)
+    claude_rules.write_bytes(lead_new)
     codex.write_text(c_new, encoding="utf-8")
     claude.write_text(m_new, encoding="utf-8")
     for name, value in (("repos.yaml", REPOS), ("agent-routing.yaml", ROUTES)):
