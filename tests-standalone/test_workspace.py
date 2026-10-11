@@ -579,11 +579,20 @@ def test_unclosed_fence_with_four_space_false_closer_fails_before_any_write(tmp_
 @pytest.mark.parametrize("existing", [
     b"The token \x60<!--\x60 starts a comment.\n@AGENTS.md\n",
     b"\x60\x60<!--\x60\x60\n@AGENTS.md\n",
-    b"\x60\n<!--\n\x60\n@AGENTS.md\n",
     b"Example \x60<!--\x60 text.\r\n@AGENTS.md\r\n",
 ])
 def test_html_comment_delimiter_in_inline_code_does_not_hide_real_import(existing):
     assert managed_claude_rules(existing) == existing
+
+
+def test_unclosed_html_block_after_unmatched_tick_needs_managed_import():
+    # CommonMark starts an HTML block on the <!-- line; the apparent second
+    # backtick does not close the previous paragraph's literal tick.
+    existing = b"\x60\n<!--\n\x60\n@AGENTS.md\n"
+    installed = managed_claude_rules(existing)
+    assert installed.startswith(existing)
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert managed_claude_rules(installed) == installed
 
 
 def test_inline_code_comment_example_still_allows_managed_import():
@@ -643,12 +652,11 @@ def test_paragraph_break_does_not_clear_real_html_comment():
     (b"- \t\x60\x60\x60md\n", b"  \x60\x60\x60\n", b"    \x60\x60\x60\n"),
 ])
 def test_tab_list_indent_cannot_close_fence_early(list_start, fake_closer, real_closer):
+    # The outdented fake closer becomes a NEW top-level fence. Our
+    # conservative checker must never accept its import as active.
     example = list_start + fake_closer + b"@AGENTS.md\n" + real_closer
-    installed = managed_claude_rules(example)
-    assert installed.startswith(example)
-    assert installed.count(b"@AGENTS.md") == 2
-    assert installed.count(CLAUDE_START.encode()) == 1
-    assert managed_claude_rules(installed) == installed
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        managed_claude_rules(example)
 
 
 @pytest.mark.parametrize("list_start,closing", [
@@ -680,13 +688,11 @@ def test_tab_list_fence_inactive_marked_import_fails_without_writes(tmp_path):
     b"- item\n\n  \x60\x60\x60md\n\x60\x60\x60\n@AGENTS.md\n\x60\x60\x60\n# end\n",
 ])
 def test_list_continuation_fence_dedent_opens_new_top_level_fence(example):
-    # An unindented backtick/tilde line does NOT close a list-contained
-    # fence. It opens a new top-level code fence; its import is inactive.
-    installed = managed_claude_rules(example)
-    assert installed.startswith(example)
-    assert installed.count(CLAUDE_START.encode()) == 1
-    assert installed.count(b"@AGENTS.md") == 2
-    assert managed_claude_rules(installed) == installed
+    # Outdented delimiters form a new top-level fence, not a list closer.
+    # If our independent scanners disagree on the subsequent context,
+    # fail closed rather than write an import that might still be inactive.
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        managed_claude_rules(example)
 
 
 @pytest.mark.parametrize("existing", [
