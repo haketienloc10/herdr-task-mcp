@@ -1,7 +1,7 @@
 """Strict native CLI profiles for independent Final Evaluation.
 
 Claude uses a restricted evaluation harness, only built-in read-only file
-tools, no MCP tools/skills, and no interactive approval. This policy is not
+tools, no user/project MCP server loading or tool calls/skills, and no interactive approval. This policy is not
 a kernel-enforced filesystem sandbox.
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ CLAUDE_EVALUATOR_ARGS = (
     "--tools", "Read,Glob,Grep",
     "--allowedTools", "Read,Glob,Grep",
     "--disallowedTools", "mcp__*",
+    "--strict-mcp-config",
     "--disable-slash-commands",
 )
 
@@ -29,6 +30,7 @@ def validate_evaluator_route(adapter: str, args: list[str]) -> None:
     raise ValueError(
         "Final Evaluation requires a safe Codex or Claude evaluator route: "
         "Codex --sandbox read-only or exact restricted Claude profile "
-        "(--restricted, read-only tools, no MCP/skills, dontAsk); "
+        "(--restricted, --strict-mcp-config without --mcp-config, "
+        "read-only tools, no MCP/skills, dontAsk); "
         "unsafe route or CLI overrides are forbidden"
     )
