@@ -52,7 +52,7 @@ qiqi-control/
 - `agent-routing.yaml` định nghĩa cách khởi động Peer.
 - `.herdr-task-mcp/` giữ SQLite và trạng thái cục bộ.
 
-Installer chỉ cập nhật vùng marker trong `AGENTS.md` và `CLAUDE.md` (hoặc giữ nguyên import `@AGENTS.md` đã có). Để tránh công nhận nhầm import trong list/code, installer xác minh bằng parser **CommonMark** (`markdown-it-py`) cùng bộ kiểm tra fail-closed; khi hai cách kiểm tra không thống nhất, installer từ chối trước khi ghi thay vì coi import là hợp lệ. Không sửa các Git repository được giao việc.
+Installer chỉ cập nhật vùng marker trong `AGENTS.md` và `CLAUDE.md` (hoặc giữ nguyên import `@AGENTS.md` đã có). Để tránh công nhận nhầm import trong list/code, installer xác minh bằng parser **CommonMark** (`markdown-it-py`) cùng bộ kiểm tra fail-closed; khi hai cách kiểm tra không thống nhất, installer từ chối trước khi ghi thay vì coi import là hợp lệ. Đối với lỗi I/O thông thường, installer tạo bản thay thế và bản khôi phục trên cùng filesystem trước khi thay thế file đích; nếu một bước ghi thất bại, các file đã thay đổi được khôi phục. Không cam kết giao dịch xuyên qua mất điện, lỗi hệ thống hoặc ghi đồng thời từ tiến trình khác. Không sửa các Git repository được giao việc.
 
 Nếu cần Herdr session riêng, chạy:
 
