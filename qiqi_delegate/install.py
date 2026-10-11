@@ -440,13 +440,59 @@ def _stage_install_file(root: Path, content: bytes, mode: int | None = None) -> 
         raise
 
 
+def _stage_install_rollback(root: Path, original: Path) -> Path:
+    """Hard-link the original inode so rollback retains uid, gid, ACLs and xattrs."""
+    fd, name = tempfile.mkstemp(prefix=".qiqi-install-", dir=root)
+    os.close(fd)
+    backup = Path(name)
+    try:
+        backup.unlink()
+        os.link(original, backup)
+        return backup
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+
+
+def _preserve_install_metadata(original: Path, staged: Path) -> None:
+    """Clone and verify metadata before any target file can be replaced.
+
+    POSIX ACLs on Linux are xattrs. Refuse files on platforms where we cannot
+    inspect/copy them rather than silently changing their security metadata.
+    """
+    required = ("listxattr", "getxattr", "setxattr")
+    if not all(hasattr(os, name) for name in required):
+        raise ValueError(f"cannot safely preserve file xattrs: {original}")
+    source = original.stat()
+    target = staged.stat()
+    if (target.st_uid, target.st_gid) != (source.st_uid, source.st_gid):
+        os.chown(staged, source.st_uid, source.st_gid)
+    os.chmod(staged, stat.S_IMODE(source.st_mode))
+    # Explicitly copy all visible xattrs, including POSIX ACL/security attrs,
+    # then verify no source attributes were dropped or unexpected ones added.
+    source_attrs = set(os.listxattr(original))
+    for name in source_attrs:
+        os.setxattr(staged, name, os.getxattr(original, name))
+    if set(os.listxattr(staged)) != source_attrs:
+        raise ValueError(f"cannot safely reproduce file xattrs: {original}")
+    for name in source_attrs:
+        if os.getxattr(staged, name) != os.getxattr(original, name):
+            raise ValueError(f"cannot safely reproduce file xattr {name}: {original}")
+    verified = staged.stat()
+    if (
+        (verified.st_uid, verified.st_gid) != (source.st_uid, source.st_gid)
+        or stat.S_IMODE(verified.st_mode) != stat.S_IMODE(source.st_mode)
+    ):
+        raise ValueError(f"cannot safely reproduce file ownership/mode: {original}")
+
+
 def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
     """Stage everything before writes; restore all earlier files on failure.
 
     Temporary files are on the workspace filesystem for atomic os.replace.
-    Backups are staged up front so rollback does not need free disk space.
-    This protects against ordinary I/O exceptions, not system crashes or
-    concurrent external writers.
+    Rollback hard links retain the original inodes and security metadata;
+    staged replacements must reproduce that metadata before commit. This
+    protects against ordinary I/O exceptions, not crashes or concurrent writes.
     """
     staged: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
@@ -466,10 +512,14 @@ def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
                 old_data = destination.read_bytes()
                 if old_data == data:
                     continue
-                backups[destination] = _stage_install_file(root, old_data, old_mode)
+                # A hard-linked backup preserves the original inode's entire
+                # metadata on rollback (including ownership and ACLs).
+                backups[destination] = _stage_install_rollback(root, destination)
             else:
                 old_mode = None
             staged[destination] = _stage_install_file(root, data, old_mode)
+            if destination in backups:
+                _preserve_install_metadata(destination, staged[destination])
 
         for directory, mode in (
             (root / ".codex", None),
