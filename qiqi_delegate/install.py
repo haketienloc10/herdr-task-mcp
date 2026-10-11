@@ -121,7 +121,7 @@ def _active_claude_import_lines(text: str) -> set[int]:
 
         if inline_ticks is None:
             # Remove optional Markdown list markers when finding an opening
-            # fenced code block, e.g. "- \x60\x60\x60md". Continuation lines
+            # fenced code block, e.g. "- ```md". Continuation lines
             # with <=3 indentation also use the ordinary fence rule.
             candidate = visible
             while True:
@@ -129,7 +129,7 @@ def _active_claude_import_lines(text: str) -> set[int]:
                 if not item:
                     break
                 candidate = candidate[item.end():]
-            opener = re.match(r" {0,3}(\x60{3,}|~{3,})", candidate)
+            opener = re.match(r" {0,3}(`{3,}|~{3,})", candidate)
             if opener:
                 fence_char = opener.group(1)[0]
                 fence_width = len(opener.group(1))
@@ -146,11 +146,11 @@ def _active_claude_import_lines(text: str) -> set[int]:
             if visible[i] == "\\":
                 i += 2
                 continue
-            if visible[i] != "\x60":
+            if visible[i] != "`":
                 i += 1
                 continue
             j = i + 1
-            while j < len(visible) and visible[j] == "\x60":
+            while j < len(visible) and visible[j] == "`":
                 j += 1
             width = j - i
             if inline_ticks is None:
