@@ -189,10 +189,20 @@ def _active_claude_import_lines(text: str) -> set[int]:
         starts.append(offset)
         offset += len(line)
     confirmed = set()
-    for token in MarkdownIt("commonmark").parse(text):
-        # Imports embedded in lazy list continuations are not standalone
-        # document paragraphs. Do not rely on their availability in Claude.
-        if token.type != "inline" or token.level != 1 or not token.map:
+    tokens = MarkdownIt("commonmark").parse(text)
+    for index, token in enumerate(tokens):
+        # A top-level Setext heading also has an inline token at level 1.
+        # Only a real top-level paragraph may contain an active import.
+        # Requiring its immediate paragraph_open parent excludes headings,
+        # list continuations, HTML blocks and other Markdown containers.
+        if (
+            token.type != "inline"
+            or token.level != 1
+            or not token.map
+            or index == 0
+            or tokens[index - 1].type != "paragraph_open"
+            or tokens[index - 1].level != 0
+        ):
             continue
         # Require actual text, not code_inline/html_inline/image content.
         if not any(
