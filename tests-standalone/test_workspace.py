@@ -320,6 +320,53 @@ def test_install_stage_failure_leaves_files_and_directories_intact(tmp_path, mon
     assert not list(tmp_path.glob(".qiqi-install-*"))
 
 
+@pytest.mark.parametrize("fail_late", [False, True])
+def test_rollback_links_never_leave_protected_destination_parent(tmp_path, monkeypatch, fail_late):
+    # Restrict .codex while leaving its config readable. A hard link in
+    # tmp_path would bypass this directory's access policy.
+    asyncio.run(install_workspace(tmp_path))
+    codex_dir = tmp_path / ".codex"
+    codex_dir.chmod(0o700)
+    codex_file = codex_dir / "config.toml"
+    original_bytes = codex_file.read_bytes()
+    original_inode = codex_file.stat().st_ino
+    import qiqi_delegate.install as installer
+    real_link = installer.os.link
+    real_replace = installer.os.replace
+    observed_links = []
+
+    def inspect_link(original, backup, *args, **kwargs):
+        source, dest = Path(original), Path(backup)
+        assert dest.parent == source.parent, "rollback link escaped its protected parent"
+        result = real_link(original, backup, *args, **kwargs)
+        observed_links.append((source, dest))
+        assert dest.stat().st_ino == source.stat().st_ino
+        if source == codex_file:
+            assert dest.parent == codex_dir
+            assert not list(tmp_path.glob(".qiqi-install-*"))
+        return result
+
+    def fail_on_mcp(source, destination):
+        if fail_late and Path(destination) == tmp_path / ".mcp.json":
+            raise OSError("late replace failed")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(installer.os, "link", inspect_link)
+    monkeypatch.setattr(installer.os, "replace", fail_on_mcp)
+    if fail_late:
+        with pytest.raises(OSError, match="late replace failed"):
+            asyncio.run(install_workspace(tmp_path, herdr_session="new-test-session"))
+        assert codex_file.read_bytes() == original_bytes
+        assert codex_file.stat().st_ino == original_inode
+    else:
+        asyncio.run(install_workspace(tmp_path, herdr_session="new-test-session"))
+        assert codex_file.read_bytes() != original_bytes
+
+    assert any(source == codex_file for source, _ in observed_links)
+    assert not list(tmp_path.rglob(".qiqi-install-*"))
+    assert codex_dir.stat().st_mode & 0o777 == 0o700
+
+
 def _test_install_xattr(path: Path) -> str:
     if not all(hasattr(os, attr) for attr in ("setxattr", "getxattr", "listxattr")):
         pytest.skip("POSIX xattrs unavailable")
