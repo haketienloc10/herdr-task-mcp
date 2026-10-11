@@ -715,6 +715,15 @@ def test_list_continuation_fence_closed_inside_list_allows_real_import():
     assert managed_claude_rules(existing) == existing
 
 
+def test_lazy_list_continuation_is_not_trusted_as_standalone_import():
+    existing = b"- item\n@AGENTS.md\n"
+    installed = managed_claude_rules(existing)
+    assert installed.startswith(existing)
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert installed.count(b"@AGENTS.md") == 2
+    assert managed_claude_rules(installed) == installed
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
