@@ -353,11 +353,16 @@ class FinalEvaluationStore:
     @staticmethod
     def validate_report(
         payload: Any, manifest: dict[str, Any], required_ids: set[str],
+        coverage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("FinalEvaluationReport must be a JSON object")
         expected = {"verdict", "requirement_results", "cross_repository_checks",
                     "verification_runs", "findings", "unknowns"}
+        if coverage is not None:
+            expected |= {"schema_version", "criterion_results", "resolved_item_results"}
+            if payload.get("schema_version") != 2:
+                raise ValueError("strict quality evaluation requires report v2")
         if set(payload) != expected:
             raise ValueError("FinalEvaluationReport fields are missing or unexpected")
         verdict = payload["verdict"]
@@ -492,6 +497,34 @@ class FinalEvaluationStore:
             raise ValueError("claimed PASS conflicts with requirement/check evidence")
         if verdict == "pass" and not requirements:
             raise ValueError("PASS requires requirements")
+        if coverage is not None:
+            for key, expected_items in (("criterion_results", coverage["criteria"]),
+                                        ("resolved_item_results", coverage["discovered"])):
+                entries = payload[key]
+                if not isinstance(entries, list) or len(entries) != len(expected_items):
+                    raise ValueError("Final Evaluation omitted mandatory quality obligations")
+                seen_items = set()
+                for entry in entries:
+                    if not isinstance(entry, dict) or set(entry) != {
+                        "item_id", "status", "evidence", "rationale"
+                    }:
+                        raise ValueError("malformed final quality result")
+                    item_id = entry["item_id"]
+                    if (item_id in seen_items or item_id not in expected_items
+                            or entry["status"] not in ("pass", "fail", "inconclusive")
+                            or not isinstance(entry["rationale"], str)
+                            or not entry["rationale"].strip()):
+                        raise ValueError("invalid/duplicate final quality item")
+                    seen_items.add(item_id)
+                    check_evidence(entry["evidence"], mandatory=entry["status"] == "pass")
+                    if verdict == "pass" and entry["status"] != "pass":
+                        raise ValueError("claimed PASS conflicts with unfinished quality item")
+            # An executed run is not proof when its result/artifact is missing.
+            if verdict == "pass" and any(
+                run["exit_code"] is None or not run["artifact_ref"].strip()
+                for run in runs
+            ):
+                raise ValueError("claimed PASS lacks verification run artifacts")
         return payload
 
     def complete(
@@ -578,6 +611,9 @@ class FinalEvaluationStore:
                         "PASS requires an exact persisted native settled turn, "
                         "the same complete response, and assessed requirements"
                     )
+                quality.assert_current(db, row["graph_run_id"],
+                                       db.execute("SELECT quality_revision FROM final_evaluations "
+                                                  "WHERE evaluation_id=?", (evaluation_id,)).fetchone()[0])
                 required = {
                     item["id"] for item in json.loads(
                         context["assessment_json"]
@@ -585,6 +621,7 @@ class FinalEvaluationStore:
                 }
                 validated = self.validate_report(
                     report, json.loads(metadata["manifest_json"]), required,
+                    quality.final_coverage(self.database, row["graph_run_id"]),
                 )
                 if validated["verdict"] != "pass":
                     raise ValueError("PASS status conflicts with validated report")
@@ -672,6 +709,7 @@ class FinalEvaluationStore:
                     or binding["request_revision"] != request_revision
                     or request is None or request["revision"] != request_revision):
                 raise RuntimeError("final evaluation PASS is absent, stale or already finalized")
+            quality.assert_current(db, entry["graph_run_id"], entry["quality_revision"])
             result = db.execute(
                 "UPDATE final_evaluations SET finalized_at_ns=?, updated_at_ns=? "
                 "WHERE evaluation_id=? AND status='passed' AND finalized_at_ns IS NULL",
