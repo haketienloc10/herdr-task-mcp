@@ -72,47 +72,63 @@ def managed_rules(existing: bytes) -> bytes:
         result = text + suffix + (newline if text else "") + block + newline
     return result.encode("utf-8")
 
-def _has_active_claude_import(text: str) -> bool:
-    """Only trust a standalone @AGENTS.md outside Markdown code/comment blocks.
+def _active_claude_import_lines(text: str) -> set[int]:
+    """Find standalone imports outside fences and HTML comments.
 
-    Conservative detection is intentional: ambiguous examples cause us to
-    append a managed import rather than silently leave Claude without rules.
+    Return original line offsets so a managed block cannot be validated by
+    some *other* active @AGENTS.md elsewhere in the document. Treat nested
+    comments conservatively to avoid mistaking an inert import for an active
+    one when a marker comment is wrapped in another HTML comment.
     """
+    active = set()
     fence_char = None
     fence_width = 0
-    in_comment = False
-    for line in text.splitlines():
+    comment_depth = 0
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        start = offset
+        offset += len(raw_line)
+        line = raw_line.rstrip("\r\n")
         if fence_char is not None:
             closing = r" {0,3}" + re.escape(fence_char) + "{" + str(fence_width) + r",}[ \t]*"
             if re.fullmatch(closing, line):
                 fence_char = None
             continue
-        opener = re.match(r" {0,3}(`{3,}|~{3,})", line)
-        if opener:
-            fence_char = opener.group(1)[0]
-            fence_width = len(opener.group(1))
-            continue
-        # Ignore imports in HTML comments, including multiline comments.
+        if not comment_depth:
+            opener = re.match(r" {0,3}(`{3,}|~{3,})", line)
+            if opener:
+                fence_char = opener.group(1)[0]
+                fence_width = len(opener.group(1))
+                continue
         visible = ""
         rest = line
         while rest:
-            if in_comment:
-                end = rest.find("-->")
-                if end < 0:
+            if comment_depth:
+                opened, closed = rest.find("<!--"), rest.find("-->")
+                if opened >= 0 and (closed < 0 or opened < closed):
+                    comment_depth += 1
+                    rest = rest[opened + 4:]
+                elif closed >= 0:
+                    comment_depth -= 1
+                    rest = rest[closed + 3:]
+                else:
                     break
-                in_comment = False
-                rest = rest[end + 3:]
             else:
-                begin = rest.find("<!--")
-                if begin < 0:
+                opened = rest.find("<!--")
+                if opened < 0:
                     visible += rest
                     break
-                visible += rest[:begin]
-                in_comment = True
-                rest = rest[begin + 4:]
+                visible += rest[:opened]
+                comment_depth = 1
+                rest = rest[opened + 4:]
         if re.fullmatch(r" {0,3}@AGENTS\.md[ \t]*", visible):
-            return True
-    return False
+            active.add(start)
+    return active
+
+
+def _has_active_claude_import(text: str) -> bool:
+    """True only for an import that Claude can actually use."""
+    return bool(_active_claude_import_lines(text))
 
 
 def managed_claude_rules(existing: bytes) -> bytes:
@@ -132,12 +148,22 @@ def managed_claude_rules(existing: bytes) -> bytes:
             and text[b + len(CLAUDE_END)] not in "\r\n"
         ):
             raise ValueError("CLAUDE.md markers must occupy complete lines")
-        return (text[:a] + block + text[b + len(CLAUDE_END):]).encode("utf-8")
-    # Preserve an existing active import, but not a code/example occurrence.
-    if _has_active_claude_import(text):
-        return existing
-    suffix = "" if not text else ("" if text.endswith(("\n", "\r")) else newline)
-    return (text + suffix + (newline if text else "") + block + newline).encode("utf-8")
+        result = text[:a] + block + text[b + len(CLAUDE_END):]
+    else:
+        # Preserve an existing active import, but not a code/example occurrence.
+        if _has_active_claude_import(text):
+            return existing
+        suffix = "" if not text else ("" if text.endswith(("\n", "\r")) else newline)
+        result = text + suffix + (newline if text else "") + block + newline
+    # Check the exact owned import, not just any other active import in the file.
+    import_start = result.index(CLAUDE_START) + len(CLAUDE_START) + len(newline)
+    if import_start not in _active_claude_import_lines(result):
+        raise ValueError(
+            "CLAUDE.md managed @AGENTS.md import is inactive inside a "
+            "Markdown fence or HTML comment; move the managed block outside "
+            "that context before reinstalling"
+        )
+    return result.encode("utf-8")
 
 
 def _strip_own_section(text: str) -> str:
