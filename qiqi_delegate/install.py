@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -423,10 +424,26 @@ repositories: []
 #     path: ../backend
 """
 
-def _stage_install_file(root: Path, content: bytes, mode: int | None = None) -> Path:
-    """Allocate and fully write a replacement/rollback image before commit."""
-    fd, name = tempfile.mkstemp(prefix=".qiqi-install-", dir=root)
-    staged = Path(name)
+def _stage_install_file(directory: Path, content: bytes, mode: int | None = None) -> Path:
+    """Stage within the destination parent, retaining its creation semantics.
+
+    A new file uses O_CREAT with mode 0666 so the actual umask, setgid parent
+    and default ACL govern ownership and permissions as with a direct write.
+    Existing files instead receive their original metadata before commit.
+    """
+    if mode is None:
+        for _ in range(10):
+            staged = directory / (".qiqi-install-" + secrets.token_hex(16))
+            try:
+                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise FileExistsError(f"unable to allocate staging file in {directory}")
+    else:
+        fd, name = tempfile.mkstemp(prefix=".qiqi-install-", dir=directory)
+        staged = Path(name)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
@@ -500,7 +517,26 @@ def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
     created_dirs: list[Path] = []
     failed_restores: set[Path] = set()
     try:
+        # Create parents before staging so all new files inherit the metadata
+        # of their actual destination directory, not the workspace root.
+        # No pre-existing file is replaced until all staging is successful.
+        for directory, mode in (
+            (root / ".codex", None),
+            (root / ".herdr-task-mcp", 0o700),
+        ):
+            if directory.is_symlink():
+                raise ValueError(f"refusing symlink: {directory}")
+            if not directory.exists():
+                directory.mkdir(mode=mode or 0o777)
+                created_dirs.append(directory)
+            elif not directory.is_dir():
+                raise ValueError(f"expected install directory: {directory}")
+
         for destination, data in files.items():
+            # exists() follows symlinks and returns False for dangling ones.
+            # Reject all managed symlinks before inspecting or linking inodes.
+            if destination.is_symlink():
+                raise ValueError(f"refusing symlink: {destination}")
             if destination.exists():
                 if not destination.is_file():
                     raise ValueError(f"expected regular install file: {destination}")
@@ -517,19 +553,9 @@ def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
                 backups[destination] = _stage_install_rollback(root, destination)
             else:
                 old_mode = None
-            staged[destination] = _stage_install_file(root, data, old_mode)
+            staged[destination] = _stage_install_file(destination.parent, data, old_mode)
             if destination in backups:
                 _preserve_install_metadata(destination, staged[destination])
-
-        for directory, mode in (
-            (root / ".codex", None),
-            (root / ".herdr-task-mcp", 0o700),
-        ):
-            if not directory.exists():
-                directory.mkdir(mode=mode or 0o777)
-                created_dirs.append(directory)
-            elif not directory.is_dir():
-                raise ValueError(f"expected install directory: {directory}")
 
         for destination, replacement in staged.items():
             os.replace(replacement, destination)
@@ -545,6 +571,13 @@ def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
             except OSError as restore_error:
                 failed_restores.add(destination)
                 restore_errors.append(f"{destination}: {restore_error}")
+        # Staged files now live inside their destination parents. Remove
+        # uncommitted stages before attempting to remove newly made parents.
+        for temporary in staged.values():
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                restore_errors.append(f"{temporary}: {cleanup_error}")
         for directory in reversed(created_dirs):
             try:
                 directory.rmdir()
@@ -581,7 +614,8 @@ async def install_workspace(root: Path, python: Path | None = None,
     codex = root / ".codex" / "config.toml"
     claude = root / ".mcp.json"
     for path in (agents, claude_rules, codex, claude, root / ".codex",
-                 root / ".herdr-task-mcp"):
+                 root / ".herdr-task-mcp", root / ".herdr-task-mcp" / ".gitignore",
+                 root / "repos.yaml", root / "agent-routing.yaml"):
         if path.is_symlink():
             raise ValueError(f"refusing symlink: {path}")
     a_old = agents.read_bytes() if agents.exists() else b""
