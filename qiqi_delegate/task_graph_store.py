@@ -679,6 +679,8 @@ class GraphRuntimeStore:
         *,
         expected_revision: int,
         reset_node_ids: set[str],
+        requirement_map: dict[str, list[str]] | None = None,
+        successor_map: dict[str, str] | None = None,
     ) -> None:
         """Atomically replace the active semantic graph while retaining execution history."""
 
@@ -725,6 +727,9 @@ class GraphRuntimeStore:
             ).fetchone()[0]
             if running:
                 raise RuntimeError("graph reconciliation cannot run while node attempts are active")
+
+            quality.reconcile(conn, run_id, previous_graph, snapshot.graph,
+                              requirement_map, successor_map)
 
             active_rows = conn.execute(
                 "SELECT node_id FROM graph_node_states "
