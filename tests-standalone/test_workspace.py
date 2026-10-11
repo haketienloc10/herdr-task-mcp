@@ -412,6 +412,95 @@ def test_installer_refuses_unverifiable_metadata_before_modifying_workspace(tmp_
     assert not list(tmp_path.glob(".qiqi-install-*"))
 
 
+@pytest.mark.parametrize("symlink_target", ["regular", "dangling"])
+def test_managed_gitignore_symlink_aborts_before_any_workspace_change(tmp_path, symlink_target):
+    state = tmp_path / ".herdr-task-mcp"
+    state.mkdir()
+    target = tmp_path / "user-gitignore"
+    if symlink_target == "regular":
+        target.write_bytes(b"user-owned contents\n")
+    link = state / ".gitignore"
+    link.symlink_to(target)
+    (tmp_path / "AGENTS.md").write_bytes(b"# untouched user policy\n")
+    before = (tmp_path / "AGENTS.md").read_bytes()
+
+    with pytest.raises(ValueError, match="refusing symlink"):
+        asyncio.run(install_workspace(tmp_path))
+    assert link.is_symlink()
+    assert link.readlink() == target
+    if symlink_target == "regular":
+        assert target.read_bytes() == b"user-owned contents\n"
+    else:
+        assert not target.exists()
+    assert (tmp_path / "AGENTS.md").read_bytes() == before
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not list(tmp_path.rglob(".qiqi-install-*"))
+
+
+@pytest.mark.parametrize("symlink_name", ["repos.yaml", "agent-routing.yaml"])
+def test_existing_default_config_symlink_is_not_touched(tmp_path, symlink_name):
+    user_file = tmp_path / "user-file"
+    user_file.write_bytes(b"# preserved\n")
+    link = tmp_path / symlink_name
+    link.symlink_to(user_file)
+    with pytest.raises(ValueError, match="refusing symlink"):
+        asyncio.run(install_workspace(tmp_path))
+    assert link.is_symlink()
+    assert user_file.read_bytes() == b"# preserved\n"
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".codex").exists()
+
+
+def test_new_root_files_match_direct_write_permissions(tmp_path):
+    reference = tmp_path / "reference.txt"
+    reference.write_bytes(b"reference\n")
+    reference_mode = reference.stat().st_mode & 0o7777
+    reference_group = reference.stat().st_gid
+    asyncio.run(install_workspace(tmp_path))
+    for filename in ("AGENTS.md", "CLAUDE.md", ".mcp.json",
+                     "repos.yaml", "agent-routing.yaml"):
+        target = tmp_path / filename
+        assert target.stat().st_mode & 0o7777 == reference_mode
+        assert target.stat().st_gid == reference_group
+    reference.unlink()
+
+
+def test_new_codex_config_inherits_parent_setgid_metadata(tmp_path):
+    parent = tmp_path / ".codex"
+    parent.mkdir()
+    parent.chmod(0o2770)
+    control = parent / "reference.toml"
+    control.write_bytes(b"reference\n")
+    expected = control.stat()
+
+    asyncio.run(install_workspace(tmp_path))
+    config = (parent / "config.toml").stat()
+    assert config.st_gid == expected.st_gid
+    assert config.st_mode & 0o7777 == expected.st_mode & 0o7777
+    assert not list(tmp_path.rglob(".qiqi-install-*"))
+
+
+def test_stage_failure_in_new_directory_cleans_temporary_files(tmp_path, monkeypatch):
+    import qiqi_delegate.install as installer
+    real_stage = installer._stage_install_file
+
+    def fail_late(directory, content, mode=None):
+        if content == b"*\n!.gitignore\n":
+            raise OSError("injected stage failure for gitignore")
+        return real_stage(directory, content, mode)
+
+    monkeypatch.setattr(installer, "_stage_install_file", fail_late)
+    with pytest.raises(OSError, match="injected stage failure for gitignore"):
+        asyncio.run(install_workspace(tmp_path))
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".herdr-task-mcp").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not list(tmp_path.rglob(".qiqi-install-*"))
+
+
 def test_installer_preserves_uv_venv_python_symlink_and_repairs_prior_config(tmp_path: Path):
     """A venv Python symlink must not be resolved to uv's base interpreter."""
     venv_bin = tmp_path / "tools" / "qiqi-venv" / "bin"
