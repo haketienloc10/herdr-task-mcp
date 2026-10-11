@@ -422,6 +422,29 @@ def test_no_supervisor_modules_in_package():
     assert not list(root.glob("*supervisor*"))
 
 
+
+@pytest.mark.parametrize("example", [
+    b"# Example in a fenced code block\n```md\n@AGENTS.md\n```\n",
+    b"~~~markdown\n@AGENTS.md\n~~~\n",
+    b"````md\n@AGENTS.md\n````\n",
+    b"    @AGENTS.md\n",
+    b"<!--\n@AGENTS.md\n-->\n",
+    b"# Example\r\n```md\r\n@AGENTS.md\r\n```\r\n",
+])
+def test_claude_import_examples_do_not_suppress_managed_import(example):
+    installed = managed_claude_rules(example)
+    assert installed.startswith(example)
+    assert installed.count(b"@AGENTS.md") == 2  # One example, one active import
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert installed.count(CLAUDE_END.encode()) == 1
+    assert managed_claude_rules(installed) == installed
+
+
+def test_claude_active_import_outside_fenced_example_needs_no_extra_block():
+    existing = b"```md\n@AGENTS.md\n```\n\n@AGENTS.md\n"
+    assert managed_claude_rules(existing) == existing
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
