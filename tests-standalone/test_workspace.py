@@ -674,6 +674,41 @@ def test_tab_list_fence_inactive_marked_import_fails_without_writes(tmp_path):
     assert not (tmp_path / ".mcp.json").exists()
 
 
+@pytest.mark.parametrize("example", [
+    b"- item\n\n  \x60\x60\x60md\n\x60\x60\x60\n@AGENTS.md\n\x60\x60\x60\n",
+    b"1. item\n\n   ~~~md\n~~~\n@AGENTS.md\n~~~\n",
+    b"- item\n\n  \x60\x60\x60md\n\x60\x60\x60\n@AGENTS.md\n\x60\x60\x60\n# end\n",
+])
+def test_list_continuation_fence_dedent_opens_new_top_level_fence(example):
+    # An unindented backtick/tilde line does NOT close a list-contained
+    # fence. It opens a new top-level code fence; its import is inactive.
+    installed = managed_claude_rules(example)
+    assert installed.startswith(example)
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert installed.count(b"@AGENTS.md") == 2
+    assert managed_claude_rules(installed) == installed
+
+
+@pytest.mark.parametrize("existing", [
+    b"- item\n\n  \x60\x60\x60md\n\x60\x60\x60\n@AGENTS.md\n",
+    b"1. item\n\n   ~~~md\n~~~\n@AGENTS.md\n",
+])
+def test_unclosed_top_level_fence_after_list_dedent_fails_before_write(tmp_path, existing):
+    (tmp_path / "CLAUDE.md").write_bytes(existing)
+    (tmp_path / "AGENTS.md").write_bytes(b"# Existing rules\n")
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == existing
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# Existing rules\n"
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_list_continuation_fence_closed_inside_list_allows_real_import():
+    existing = b"- item\n\n  \x60\x60\x60md\n  \x60\x60\x60\n@AGENTS.md\n"
+    assert managed_claude_rules(existing) == existing
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
