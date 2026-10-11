@@ -379,3 +379,106 @@ def assert_no_open_work(db_path: Any, run_id: str) -> dict[str, Any]:
         raise ValueError("Quality Gate has unfinished/unresolved work: " +
                          ", ".join(open_items[:16]))
     return current
+
+
+def reconcile(conn: sqlite3.Connection, run_id: str, previous_graph: Any,
+              next_graph: Any, requirement_map: dict[str, list[str]] | None,
+              successors: dict[str, str] | None) -> None:
+    """Move unfinished obligations to explicit successor work inside graph CAS.
+
+    This must execute in the SAME transaction that changes the authored graph.
+    """
+    if not is_strict(conn, run_id):
+        return
+    if requirement_map is None:
+        raise ValueError("strict quality reconciliation requires requirement_map")
+    successors = successors or {}
+    previous = {n.node_id: n for n in previous_graph.nodes}
+    following = {n.node_id: n for n in next_graph.nodes}
+    replaced = {
+        node_id for node_id, node in previous.items()
+        if node_id not in following or node != following[node_id]
+    }
+    if set(successors) != replaced:
+        raise ValueError("successor_map must cover exactly changed/removed nodes")
+    now = time.time_ns()
+    for old_id, target in successors.items():
+        if target not in following:
+            raise ValueError("successor_map references absent target node")
+        obligations = conn.execute(
+            "SELECT item_id,kind,requirement_ids_json,state FROM quality_items "
+            "WHERE graph_run_id=? AND node_id=? AND state!='superseded'",
+            (run_id, old_id),
+        ).fetchall()
+        for item_id, kind, req_json, state in obligations:
+            if not set(json.loads(req_json)) <= set(requirement_map[target]):
+                raise ValueError("successor does not cover unresolved requirement IDs")
+            if kind == "discovered":
+                conn.execute("UPDATE quality_items SET node_id=?,successor_node_id=?,updated_at_ns=? "
+                             "WHERE graph_run_id=? AND item_id=?",
+                             (target, target, now, run_id, item_id))
+            elif target != old_id:
+                conn.execute("UPDATE quality_items SET state='superseded',"
+                             "successor_node_id=?,updated_at_ns=? "
+                             "WHERE graph_run_id=? AND item_id=?",
+                             (target, now, run_id, item_id))
+            conn.execute(
+                "INSERT INTO quality_events(graph_run_id,item_id,event,reason,created_at_ns) "
+                "VALUES (?,?,?,?,?)",
+                (run_id, item_id, "replan", old_id + " -> " + target, now),
+            )
+    # Every newly authored or changed criterion has to be performed/reviewed
+    # again; old evidence remains in the append-only quality event log.
+    for node in next_graph.nodes:
+        if node.node_id in previous and node.node_id not in replaced:
+            continue
+        for index, criterion in enumerate(node.task_packet.acceptance_criteria):
+            cid = "criterion:" + node.node_id + ":" + str(index)
+            present = conn.execute(
+                "SELECT 1 FROM quality_items WHERE graph_run_id=? AND item_id=?",
+                (run_id, cid),
+            ).fetchone()
+            if present:
+                conn.execute(
+                    "UPDATE quality_items SET kind='criterion',node_id=?,criterion_index=?,"
+                    "requirement_ids_json=?,description=?,state='not_done',details='',"
+                    "evidence_json='[]',successor_node_id=NULL,updated_at_ns=? "
+                    "WHERE graph_run_id=? AND item_id=?",
+                    (node.node_id, index, _json(requirement_map[node.node_id]),
+                     criterion, now, run_id, cid),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO quality_items(graph_run_id,item_id,kind,node_id,"
+                    "criterion_index,requirement_ids_json,description,state,updated_at_ns)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (run_id, cid, "criterion", node.node_id, index,
+                     _json(requirement_map[node.node_id]), criterion, "not_done", now),
+                )
+    # If a changed node now has fewer criteria, retire the old index after
+    # requiring a successor above; do not leave an orphan that can be ignored.
+    for old_id in replaced:
+        if old_id not in following:
+            continue
+        count = len(following[old_id].task_packet.acceptance_criteria)
+        conn.execute(
+            "UPDATE quality_items SET state='superseded',successor_node_id=?,updated_at_ns=? "
+            "WHERE graph_run_id=? AND node_id=? AND kind='criterion' "
+            "AND criterion_index>=?",
+            (successors[old_id], now, run_id, old_id, count),
+        )
+    conn.execute("UPDATE quality_policies SET revision=revision+1 WHERE graph_run_id=?",
+                 (run_id,))
+
+
+def outstanding_for_node(db_path: Any, run_id: str, node_id: str) -> set[str]:
+    with sqlite3.connect(db_path) as db:
+        if not is_strict(db, run_id):
+            return set()
+        return {
+            row[0] for row in db.execute(
+                "SELECT item_id FROM quality_items WHERE graph_run_id=? AND node_id=? "
+                "AND kind='discovered' AND state NOT IN ('not_verified','superseded','verified')",
+                (run_id, node_id),
+            )
+        }
