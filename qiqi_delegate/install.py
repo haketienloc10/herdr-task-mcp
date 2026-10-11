@@ -190,7 +190,9 @@ def _active_claude_import_lines(text: str) -> set[int]:
         offset += len(line)
     confirmed = set()
     for token in MarkdownIt("commonmark").parse(text):
-        if token.type != "inline" or not token.map:
+        # Imports embedded in lazy list continuations are not standalone
+        # document paragraphs. Do not rely on their availability in Claude.
+        if token.type != "inline" or token.level != 1 or not token.map:
             continue
         # Require actual text, not code_inline/html_inline/image content.
         if not any(
