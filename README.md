@@ -335,17 +335,20 @@ including cross-module contracts, before delivery is finalized.
    ineligible for independent final PASS; their old APIs remain usable.
 2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
    `graph_state="complete"` remains an execution-only state, not a final PASS.
-3. Configure a dedicated safe Codex route in workspace `agent-routing.yaml`:
+3. Configure a dedicated Codex route in workspace `agent-routing.yaml`:
    
    ```yaml
    routes:
      codex-evaluator:
        agent: codex
-       args: ["--sandbox", "read-only"]
+       args: ["-c", "model_reasoning_effort=high"]
    ```
 
-   Final Evaluation fails closed for `--yolo`, Claude and arbitrary CLI/config
-   overrides. This route must genuinely enforce read-only agent execution.
+   Final Evaluation requires a Codex route but no longer requires
+   `--sandbox read-only` or rejects `--yolo`. The workspace supplies CLI arguments
+   and permissions. An unrestricted evaluator may modify snapshots or access
+   other locations permitted by Codex/Herdr; the prompt's no-write instruction
+   is not an enforced sandbox. Use only trusted workspaces.
 4. Call `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
@@ -424,12 +427,14 @@ final PASS evidence. Restore a complete working tree and clear skip-worktree
 flags before evaluating. Ordinary staged/unstaged deletions in a complete
 working tree remain supported.
 `--add-dir` grants additional directory access: **it is not a sandbox**.
-The route is only allowed with explicit Codex `--sandbox read-only`.
+Final Evaluation does not enforce a Codex sandbox setting. Any CLI arguments
+configured for the route (including `--yolo`) are passed through. The
+Evaluator's CWD is an isolated snapshot, but that does not prevent access to
+the original repositories or other files allowed by the host/Herdr deployment.
 The feature does not execute arbitrary verification commands from reports or
 independently attest LLM-reported test runs; do not treat test claims as
-deterministic proof. Read permissions outside snapshots depend on the
-host/Herdr deployment: if the host cannot confine the agent as required,
-do not run final evaluation on secret-bearing or untrusted workspaces.
+deterministic proof. Do not run an unrestricted Evaluator on secret-bearing or
+untrusted workspaces without additional isolation.
 A model finding no errors cannot prove mathematical correctness.
 
 **Crash/concurrency semantics:** Store evaluation IDs and native turn bindings
