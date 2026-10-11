@@ -45,7 +45,7 @@ qiqi-control/
 ~~~
 
 - `AGENTS.md` chứa quy tắc Lead dùng chung trong cặp marker do installer quản lý.
-- `CLAUDE.md` import `@AGENTS.md` để Claude Lead dùng cùng quy tắc; installer chỉ quản lý đoạn import và giữ nguyên nội dung khác.
+- `CLAUDE.md` import `@AGENTS.md` để Claude Lead dùng cùng quy tắc; installer giữ nguyên nội dung khác và chỉ coi import ngoài fenced code block/comment là có hiệu lực.
 - `.codex/config.toml` đăng ký MCP `qiqi_delegate` cho Codex.
 - `.mcp.json` đăng ký MCP `qiqi_delegate` cho Claude.
 - `repos.yaml` liệt kê Git repository được phép nhận việc.
@@ -104,7 +104,7 @@ routes:
     args: ["--sandbox", "read-only"]
   claude-evaluator:
     agent: claude
-    args: ["--restricted", "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep", "--disallowedTools", "mcp__*", "--disable-slash-commands"]
+    args: ["--restricted", "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep", "--disallowedTools", "mcp__*", "--strict-mcp-config", "--disable-slash-commands"]
 ~~~
 
 Trong lời gọi MCP, truyền **tên route** như `codex-balanced`. Không truyền `codex` thay cho tên route.
@@ -351,13 +351,18 @@ including cross-module contracts, before delivery is finalized.
    - Claude: chỉ chấp nhận đúng profile `--restricted`,
      `--permission-mode dontAsk`, `--tools Read,Glob,Grep`,
      `--allowedTools Read,Glob,Grep`, `--disallowedTools mcp__*`,
+     `--strict-mcp-config` (không có `--mcp-config`) và
      `--disable-slash-commands`. Yêu cầu Claude Code từ phiên bản `2.1.248`
      (có `--restricted`); bản cũ sẽ không khởi động evaluator.
 
-   Claude evaluator chỉ dùng công cụ đọc file, chặn MCP tools và skills.
-   Đây là ràng buộc ở tầng Claude CLI, **không phải OS-level read-only sandbox**.
-   Không chạy evaluator với untrusted managed hooks/chính sách cục bộ có thể
-   thực hiện side effect. Runtime từ chối cờ thiếu, thừa hoặc thay đổi thứ tự.
+   Claude evaluator chỉ được gọi tool đọc file, chặn MCP tool calls và không
+   nạp MCP server từ cấu hình user/project thông thường. `--disallowedTools`
+   **không ngăn server khởi động**; `--strict-mcp-config` mới giới hạn nguồn
+   cấu hình MCP. Một số chính sách managed MCP/hook cấp hệ thống có thể có
+   quyền ưu tiên riêng. Đây là ràng buộc ở tầng Claude CLI, **không phải
+   OS-level read-only sandbox**. Không chạy evaluator với untrusted managed
+   hooks/chính sách cục bộ có thể thực hiện side effect. Runtime từ chối
+   cờ thiếu, thừa hoặc thay đổi thứ tự.
 4. Gọi `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`
    hoặc đổi route thành `"claude-evaluator"`.
    The Coordinator snapshots **all** repositories in the active TaskGraph
