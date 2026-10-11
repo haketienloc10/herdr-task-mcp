@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.final_eval_snapshot import evidence_is_in_manifest
+from qiqi_delegate import quality
 from qiqi_delegate.task_request import _owner_alive, _process_start_token
 
 ACTIVE = ("requested", "evaluating")
@@ -66,6 +67,8 @@ class FinalEvaluationStore:
                 db.execute(
                     "ALTER TABLE final_evaluations ADD COLUMN cleanup_json TEXT"
                 )
+            if "quality_revision" not in columns:
+                db.execute("ALTER TABLE final_evaluations ADD COLUMN quality_revision INTEGER")
         self.recover_abandoned()
 
     def recover_abandoned(self) -> int:
@@ -223,6 +226,7 @@ class FinalEvaluationStore:
     def matching_finalized(
         self, graph_run_id: str, graph_revision: int,
         request_id: str, request_revision: int, digest: str,
+        quality_revision: int | None = None,
     ) -> dict[str, Any] | None:
         """Select a finalized PASS for the exact current delivery identity.
 
@@ -237,10 +241,10 @@ class FinalEvaluationStore:
                 "WHERE graph_run_id=? AND status='passed' "
                 "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
                 "AND request_id=? AND request_revision=? "
-                "AND manifest_digest=? "
+                "AND manifest_digest=? AND quality_revision IS ? "
                 "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
                 (graph_run_id, graph_revision, request_id,
-                 request_revision, digest),
+                 request_revision, digest, quality_revision),
             ).fetchone()
         return self.get(row["evaluation_id"]) if row else None
 
@@ -248,6 +252,7 @@ class FinalEvaluationStore:
         self, graph_run_id: str, graph_revision: int, request_id: str,
         request_revision: int, route: str,
         manifest: dict[str, Any], digest: str,
+        quality_revision: int | None = None,
     ) -> tuple[dict[str, Any], bool]:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -268,6 +273,7 @@ class FinalEvaluationStore:
                     binding is None or binding["request_id"] != request_id or
                     binding["request_revision"] != request_revision):
                 raise RuntimeError("stale graph/request binding for final evaluation")
+            quality.assert_current(db, graph_run_id, quality_revision)
             # A verified, already-finalized identical product has no work
             # left to dispatch. Resolve this inside the same IMMEDIATE
             # transaction as active-attempt reservation to avoid the race
@@ -277,10 +283,10 @@ class FinalEvaluationStore:
                 "WHERE graph_run_id=? AND status='passed' "
                 "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
                 "AND request_id=? AND request_revision=? "
-                "AND manifest_digest=? "
+                "AND manifest_digest=? AND quality_revision IS ? "
                 "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
                 (graph_run_id, graph_revision, request_id,
-                 request_revision, digest),
+                 request_revision, digest, quality_revision),
             ).fetchone()
             if finalized is not None:
                 return_id = finalized["evaluation_id"]
@@ -308,7 +314,8 @@ class FinalEvaluationStore:
             if existing is not None:
                 if (existing["graph_revision"] != graph_revision or
                         existing["manifest_digest"] != digest or
-                        existing["request_revision"] != request_revision):
+                        existing["request_revision"] != request_revision or
+                         existing["quality_revision"] != quality_revision):
                     raise RuntimeError(
                         "another final evaluation is active for a different version"
                     )
@@ -321,11 +328,12 @@ class FinalEvaluationStore:
                     "INSERT INTO final_evaluations "
                     "(evaluation_id,graph_run_id,graph_revision,request_id,"
                     "request_revision,route,manifest_json,manifest_digest,"
-                    "status,owner_pid,owner_start_token,created_at_ns,updated_at_ns) "
-                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?)",
+                    "status,owner_pid,owner_start_token,created_at_ns,updated_at_ns,quality_revision) "
+                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?,?)",
                     (return_id, graph_run_id, graph_revision, request_id,
                      request_revision, route, json.dumps(manifest, sort_keys=True),
-                     digest, os.getpid(), _process_start_token(os.getpid()), now, now),
+                     digest, os.getpid(), _process_start_token(os.getpid()), now, now,
+                     quality_revision),
                 )
                 created = True
         return self.get(return_id), created
