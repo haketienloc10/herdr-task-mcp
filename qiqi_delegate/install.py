@@ -140,7 +140,8 @@ def _active_claude_import_lines(text: str) -> set[int]:
                     i += 3
                 else:
                     i += 1
-            elif line[i] == "\\" and i + 1 < len(line):
+            elif inline_ticks is None and line[i] == "\\" and i + 1 < len(line):
+                # Markdown escapes apply outside code spans only.
                 i += 2
             elif line[i] == "\x60":
                 end = i + 1
