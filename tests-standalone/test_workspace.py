@@ -445,6 +445,49 @@ def test_claude_active_import_outside_fenced_example_needs_no_extra_block():
     assert managed_claude_rules(existing) == existing
 
 
+@pytest.mark.parametrize("before,after", [
+    (b"```markdown\n", b"\n```\n"),
+    (b"~~~markdown\n", b"\n~~~\n"),
+    (b"````markdown\n", b"\n````\n"),
+    (b"<!--\n", b"\n-->\n"),
+    (b"<!--\r\n", b"\r\n-->\r\n"),
+])
+def test_managed_claude_import_inside_code_or_comment_fails_closed(tmp_path, before, after):
+    newline = b"\r\n" if b"\r\n" in before else b"\n"
+    owned = (CLAUDE_START.encode() + newline + b"@AGENTS.md" +
+             newline + CLAUDE_END.encode())
+    inactive = before + owned + after
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        managed_claude_rules(inactive)
+    original = b"# Existing shared instructions\n"
+    (tmp_path / "AGENTS.md").write_bytes(original)
+    (tmp_path / "CLAUDE.md").write_bytes(inactive)
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        asyncio.run(install_workspace(tmp_path))
+    # Both user files and config outputs remain intact if validation fails.
+    assert (tmp_path / "AGENTS.md").read_bytes() == original
+    assert (tmp_path / "CLAUDE.md").read_bytes() == inactive
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_inactive_managed_import_is_not_accepted_via_another_active_import():
+    owned = (CLAUDE_START + "\n@AGENTS.md\n" + CLAUDE_END)
+    existing = ("```md\n" + owned + "\n```\n@AGENTS.md\n").encode()
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        managed_claude_rules(existing)
+
+
+@pytest.mark.parametrize("unfinished", [b"```markdown\nExample\n", b"<!--\nExample\n"])
+def test_installer_does_not_append_import_into_unclosed_markdown(tmp_path, unfinished):
+    (tmp_path / "CLAUDE.md").write_bytes(unfinished)
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == unfinished
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".codex").exists()
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
