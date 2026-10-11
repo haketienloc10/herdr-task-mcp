@@ -503,14 +503,18 @@ def test_claude_list_fences_and_multiline_spans_are_not_active_imports(example):
     assert managed_claude_rules(result) == result
 
 
-@pytest.mark.parametrize("before,after", [
-    (b"\x60\nExample line\n", b"\n\x60\n"),
-    (b"\x60\x60\nExample line\n", b"\n\x60\x60\n"),
-    (b"- \x60\x60\x60md\n  ", b"\n  \x60\x60\x60\n"),
+@pytest.mark.parametrize("before,after,error", [
+    (b"\x60\nExample line\n", b"\n\x60\n",
+     "managed @AGENTS.md import is inactive"),
+    (b"\x60\x60\nExample line\n", b"\n\x60\x60\n",
+     "managed @AGENTS.md import is inactive"),
+    # The list prefix also violates the independent full-line marker invariant.
+    (b"- \x60\x60\x60md\n  ", b"\n  \x60\x60\x60\n",
+     "CLAUDE.md markers must occupy complete lines"),
 ])
-def test_managed_claude_import_inside_nested_code_is_rejected(before, after):
+def test_managed_claude_import_inside_nested_code_is_rejected(before, after, error):
     owned = (CLAUDE_START + "\n@AGENTS.md\n" + CLAUDE_END).encode()
-    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+    with pytest.raises(ValueError, match=error):
         managed_claude_rules(before + owned + after)
 
 
