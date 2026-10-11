@@ -73,15 +73,17 @@ def managed_rules(existing: bytes) -> bytes:
     return result.encode("utf-8")
 
 def _active_claude_import_lines(text: str) -> set[int]:
-    """Find usable standalone imports, ignoring Markdown code and HTML comments.
+    """Find standalone imports outside Markdown code and HTML comments.
 
-    Track positions (rather than only a boolean) so another active import cannot
-    incorrectly validate a disabled installer-owned import.
+    Record exact line offsets: another active import cannot validate an
+    inactive installer-owned block. This conservative scanner is not a full
+    CommonMark renderer; uncertain contexts must not authorize imports.
     """
-    active = set()
-    fence_char = None
+    active: set[int] = set()
+    fence_char: str | None = None
     fence_width = 0
-    inline_ticks = None
+    fence_base_indent = 0
+    inline_ticks: int | None = None
     comment_depth = 0
     offset = 0
     for raw_line in text.splitlines(keepends=True):
@@ -89,75 +91,72 @@ def _active_claude_import_lines(text: str) -> set[int]:
         offset += len(raw_line)
         line = raw_line.rstrip("\r\n")
         if fence_char is not None:
-            # A fence opened on a list item can close under that list's indent.
-            closing = r" *" + re.escape(fence_char) + "{" + str(fence_width) + r",}[ \t]*"
+            # CommonMark closers allow at most 3 spaces relative to their
+            # container, not unlimited indentation. Lists supply a base.
+            closing = (
+                r" {" + str(fence_base_indent) + ","
+                + str(fence_base_indent + 3) + "}"
+                + re.escape(fence_char) + "{" + str(fence_width)
+                + r",}[ \t]*"
+            )
             if re.fullmatch(closing, line):
                 fence_char = None
             continue
 
-        # Strip comments before parsing code or imports, handling outer comments
-        # around installer marker comments conservatively.
-        visible = ""
-        rest = line
-        while rest:
-            if comment_depth:
-                opened, closed = rest.find("<!--"), rest.find("-->")
-                if opened >= 0 and (closed < 0 or opened < closed):
-                    comment_depth += 1
-                    rest = rest[opened + 4:]
-                elif closed >= 0:
-                    comment_depth -= 1
-                    rest = rest[closed + 3:]
-                else:
-                    break
-            else:
-                opened = rest.find("<!--")
-                if opened < 0:
-                    visible += rest
-                    break
-                visible += rest[:opened]
-                comment_depth = 1
-                rest = rest[opened + 4:]
-
-        if inline_ticks is None:
-            # Remove optional Markdown list markers when finding an opening
-            # fenced code block, e.g. "- ```md". Continuation lines
-            # with <=3 indentation also use the ordinary fence rule.
-            candidate = visible
+        if inline_ticks is None and not comment_depth:
+            candidate = line
+            list_indent = 0
             while True:
-                item = re.match(r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", candidate)
+                item = re.match(
+                    r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", candidate
+                )
                 if not item:
                     break
+                list_indent += item.end()
                 candidate = candidate[item.end():]
-            opener = re.match(r" {0,3}(`{3,}|~{3,})", candidate)
+            opener = re.match(r" {0,3}(\x60{3,}|~{3,})", candidate)
             if opener:
                 fence_char = opener.group(1)[0]
                 fence_width = len(opener.group(1))
+                fence_base_indent = list_indent
                 continue
 
-        if inline_ticks is None and re.fullmatch(r" {0,3}@AGENTS\.md[ \t]*", visible):
+        if (
+            inline_ticks is None and not comment_depth
+            and re.fullmatch(r" {0,3}@AGENTS\.md[ \t]*", line)
+        ):
             active.add(start)
 
-        # Markdown inline code can span lines. While inside a backtick run,
-        # neither imports nor fence openers are active. Fail closed if the
-        # span remains unclosed before the installer-owned import.
+        # Process delimiters in source order: an HTML-comment opener inside
+        # inline code must not start a comment spanning subsequent lines.
         i = 0
-        while i < len(visible):
-            if visible[i] == "\\":
+        while i < len(line):
+            if comment_depth:
+                if line.startswith("<!--", i):
+                    comment_depth += 1
+                    i += 4
+                elif line.startswith("-->", i):
+                    comment_depth -= 1
+                    i += 3
+                else:
+                    i += 1
+            elif line[i] == "\\" and i + 1 < len(line):
                 i += 2
-                continue
-            if visible[i] != "`":
+            elif line[i] == "\x60":
+                end = i + 1
+                while end < len(line) and line[end] == "\x60":
+                    end += 1
+                width = end - i
+                if inline_ticks is None:
+                    inline_ticks = width
+                elif inline_ticks == width:
+                    inline_ticks = None
+                i = end
+            elif inline_ticks is None and line.startswith("<!--", i):
+                comment_depth = 1
+                i += 4
+            else:
                 i += 1
-                continue
-            j = i + 1
-            while j < len(visible) and visible[j] == "`":
-                j += 1
-            width = j - i
-            if inline_ticks is None:
-                inline_ticks = width
-            elif inline_ticks == width:
-                inline_ticks = None
-            i = j
     return active
 
 
