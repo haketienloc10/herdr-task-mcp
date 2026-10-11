@@ -729,6 +729,8 @@ class GraphRuntime:
         *,
         repository_names: Collection[str],
         expected_revision: int,
+        requirement_map: dict[str, list[str]] | None = None,
+        successor_map: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Replace the authored graph and reconcile runtime state by explicit materiality.
 
@@ -779,6 +781,8 @@ class GraphRuntime:
             next_snapshot,
             expected_revision=expected_revision,
             reset_node_ids=reset_ids,
+            requirement_map=requirement_map,
+            successor_map=successor_map,
         )
         current = self.get_graph(graph_run_id)
         previous_order = [node.node_id for node in previous_graph.nodes]
@@ -1186,7 +1190,11 @@ class GraphRuntime:
                 if decision.action == "accept":
                     if report is None:
                         raise ValueError("ACCEPT requires structured Peer report")
-                    quality.validate_lead_review(report, decision.criterion_reviews)
+                    quality.validate_lead_review(
+                        report, decision.criterion_reviews,
+                        quality.outstanding_for_node(self.store.path, graph_run_id,
+                                                     decision.node_id),
+                    )
                     turn_ref = "peer_turn:" + str(attempt["turn_id"])
                     for review in decision.criterion_reviews:
                         if turn_ref not in review["evidence_refs"]:
