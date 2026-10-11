@@ -320,6 +320,98 @@ def test_install_stage_failure_leaves_files_and_directories_intact(tmp_path, mon
     assert not list(tmp_path.glob(".qiqi-install-*"))
 
 
+def _test_install_xattr(path: Path) -> str:
+    if not all(hasattr(os, attr) for attr in ("setxattr", "getxattr", "listxattr")):
+        pytest.skip("POSIX xattrs unavailable")
+    name = "user.qiqi_install_regression"
+    try:
+        os.setxattr(path, name, b"owner-policy")
+    except OSError:
+        pytest.skip("test filesystem does not support user xattrs")
+    return name
+
+
+def test_successful_install_preserves_existing_owner_group_mode_and_xattrs(tmp_path):
+    agent = tmp_path / "AGENTS.md"
+    agent.write_bytes(b"# Original rules\n")
+    agent.chmod(0o640)
+    attr = _test_install_xattr(agent)
+    original = agent.stat()
+    asyncio.run(install_workspace(tmp_path))
+    updated = agent.stat()
+    assert (updated.st_uid, updated.st_gid) == (original.st_uid, original.st_gid)
+    assert updated.st_mode & 0o7777 == original.st_mode & 0o7777
+    assert os.getxattr(agent, attr) == b"owner-policy"
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
+def test_rollback_restores_exact_original_inode_and_xattrs(tmp_path, monkeypatch):
+    agent = tmp_path / "AGENTS.md"
+    lead = tmp_path / "CLAUDE.md"
+    agent.write_bytes(b"# Original agents\n")
+    lead.write_bytes(b"# Original Claude\n")
+    agent.chmod(0o640)
+    attr = _test_install_xattr(agent)
+    before = {p: (p.read_bytes(), p.stat()) for p in (agent, lead)}
+    import qiqi_delegate.install as installer
+    real_replace = installer.os.replace
+
+    def fail_after_replacements(source, destination):
+        if Path(destination) == tmp_path / ".mcp.json":
+            raise OSError("later replacement failed")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(installer.os, "replace", fail_after_replacements)
+    with pytest.raises(OSError, match="later replacement failed"):
+        asyncio.run(install_workspace(tmp_path))
+    for path, (bytes_before, metadata_before) in before.items():
+        now = path.stat()
+        assert path.read_bytes() == bytes_before
+        assert now.st_ino == metadata_before.st_ino
+        assert (now.st_uid, now.st_gid, now.st_mode & 0o7777) == (
+            metadata_before.st_uid, metadata_before.st_gid, metadata_before.st_mode & 0o7777
+        )
+    assert os.getxattr(agent, attr) == b"owner-policy"
+    assert not (tmp_path / ".codex").exists()
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
+def test_installer_refuses_uncopyable_xattrs_before_modifying_workspace(tmp_path, monkeypatch):
+    agent = tmp_path / "AGENTS.md"
+    agent.write_bytes(b"# Original agents\n")
+    attr = _test_install_xattr(agent)
+    before = agent.read_bytes(), agent.stat().st_ino
+    import qiqi_delegate.install as installer
+    real_setxattr = installer.os.setxattr
+
+    def denied_xattr(path, name, value, *args, **kwargs):
+        if Path(path).name.startswith(".qiqi-install-"):
+            raise PermissionError("injected ACL/xattr copy failure")
+        return real_setxattr(path, name, value, *args, **kwargs)
+
+    monkeypatch.setattr(installer.os, "setxattr", denied_xattr)
+    with pytest.raises(PermissionError, match="injected ACL/xattr copy failure"):
+        asyncio.run(install_workspace(tmp_path))
+    assert agent.read_bytes() == before[0]
+    assert agent.stat().st_ino == before[1]
+    assert os.getxattr(agent, attr) == b"owner-policy"
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
+def test_installer_refuses_unverifiable_metadata_before_modifying_workspace(tmp_path, monkeypatch):
+    agent = tmp_path / "AGENTS.md"
+    agent.write_bytes(b"# Original agents\n")
+    import qiqi_delegate.install as installer
+    monkeypatch.delattr(installer.os, "listxattr", raising=False)
+    with pytest.raises(ValueError, match="cannot safely preserve file xattrs"):
+        asyncio.run(install_workspace(tmp_path))
+    assert agent.read_bytes() == b"# Original agents\n"
+    assert not (tmp_path / ".codex").exists()
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
 def test_installer_preserves_uv_venv_python_symlink_and_repairs_prior_config(tmp_path: Path):
     """A venv Python symlink must not be resolved to uv's base interpreter."""
     venv_bin = tmp_path / "tools" / "qiqi-venv" / "bin"
