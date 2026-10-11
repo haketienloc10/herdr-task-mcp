@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import json
 import os
 import subprocess
@@ -59,6 +60,37 @@ def test_installed_rules_keep_one_task_schema_and_guide_task_specific_criteria()
     assert "test đã chạy" in installed
     assert "test chưa chạy" in installed
     assert "không bịa đặt tính năng" in installed
+
+
+def test_task_type_policy_stays_aligned_across_three_surfaces():
+    # Read the MCP instructions without importing server.py (which starts its runtime).
+    root = Path(__file__).resolve().parents[1]
+    server_ast = ast.parse((root / "qiqi_delegate" / "server.py").read_text(encoding="utf-8"))
+    mcp_call = next(
+        node.value for node in server_ast.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "mcp" for target in node.targets)
+    )
+    assert isinstance(mcp_call, ast.Call)
+    instructions = ast.literal_eval(
+        next(keyword.value for keyword in mcp_call.keywords if keyword.arg == "instructions")
+    )
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    readme_policy = readme.split("### Chính sách giao việc theo loại nhiệm vụ", 1)[1].split("\n## ", 1)[0]
+    for text in (managed_rules(b"").decode("utf-8"), instructions, readme_policy):
+        normalized = text.lower()
+        for keyword in ("taskpacket", "acceptance_criteria", "constraints",
+                        "analysis", "coding", "testing", "documentation"):
+            assert keyword in normalized
+
+    assert "chỉ chọn các tiêu chí áp dụng" in RULES
+    assert "không áp checklist không liên quan" in RULES
+    assert "request only applicable evidence" in instructions
+    assert "simple lookups require only direct evidence" in instructions
+    assert "Avoid irrelevant criteria and verbose reports for simple tasks" in instructions
+    assert "Chỉ yêu cầu nội dung liên quan" in readme_policy
+    assert "Với task đơn giản" in readme_policy
+    assert "Không áp checklist đầy đủ cho mọi task" in readme_policy
 
 
 @pytest.mark.parametrize("broken", [

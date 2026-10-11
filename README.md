@@ -233,10 +233,12 @@ Giữ **một schema `TaskPacket`** cho analysis, coding, testing và documentat
 
 | Loại việc | Gợi ý `acceptance_criteria` và `constraints` |
 |---|---|
-| Analysis / Discovery / Review | Truy vết hành vi, luồng dữ liệu, contract, lỗi và giới hạn; dẫn chứng `file:line` khi phù hợp. Với task chỉ đọc, đặt `constraints` cấm sửa file. |
+| Analysis / Discovery / Review | Chỉ yêu cầu nội dung liên quan đến mục tiêu: hành vi, luồng dữ liệu, contract, lỗi, giới hạn hay bằng chứng `file:line` khi áp dụng. Với task chỉ đọc, đặt `constraints` cấm sửa file. |
 | Coding | Mô tả hành vi phải triển khai, phạm vi thay đổi, contract cần giữ, test liên quan; phân biệt test đã chạy và chưa chạy. |
 | Testing | Nêu test cases, trường hợp biên, kết quả pass/fail và test chưa chạy. Xác định rõ có được thêm/sửa test và chạy lệnh kiểm thử hay không. |
 | Documentation | Đối chiếu implementation/contract thực tế; yêu cầu tài liệu và ví dụ chính xác, không mô tả tính năng chưa có. |
+
+Với task đơn giản như xác nhận vị trí một khóa cấu hình, `acceptance_criteria` chỉ cần yêu cầu đường dẫn `path:line` và giá trị được xác minh; không cần phân tích toàn bộ execution flow, contract hay các nhánh lỗi không liên quan.
 
 Ví dụ phần `TaskPacket` cho coding (vẫn dùng `delegate_repo_task` hoặc `task_packet` trong graph như trước):
 

@@ -30,7 +30,7 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 - Chỉ sử dụng repository có tên chính xác trong `repos.yaml`. Không tự suy đoán đường dẫn, tạo, clone hoặc thêm repository nếu chưa được người dùng yêu cầu.
 - Mỗi TaskPacket phải tự đủ nghĩa với `objective`, `scope`, `acceptance_criteria` và context hoặc constraints cần thiết. Không dựa vào lịch sử hội thoại mà Peer không thể truy cập.
 - Lead dùng chung một schema `TaskPacket` cho analysis, coding, testing và documentation. Chọn `acceptance_criteria` và `constraints` theo mục tiêu thực tế; không cần schema hay node kind riêng cho từng loại.
-- Với analysis/discovery/review: yêu cầu giải thích luồng thực thi, contract, nhánh lỗi, giới hạn xác minh và evidence `file:line` liên quan; không chấp nhận báo cáo chỉ liệt kê file hoặc công nghệ. Nếu task chỉ đọc, ghi rõ không sửa file trong `constraints`.
+- Với analysis/discovery/review: chỉ chọn các tiêu chí áp dụng cho yêu cầu, như luồng thực thi, contract, nhánh lỗi, giới hạn xác minh và evidence `file:line` khi liên quan; task tra cứu đơn giản chỉ cần câu trả lời với bằng chứng trực tiếp, không buộc phân tích toàn bộ hệ thống. Nếu task chỉ đọc, ghi rõ không sửa file trong `constraints`.
 - Với coding: nêu hành vi cần triển khai, phạm vi thay đổi, contract phải giữ và tiêu chí kiểm thử liên quan; Peer báo cáo file thay đổi, test đã chạy và phần chưa kiểm chứng.
 - Với testing: xác định hành vi/test cases cần kiểm tra, việc tạo hoặc sửa test có được phép hay không, lệnh kiểm thử phù hợp và cách báo cáo pass/fail, lỗi, test chưa chạy; không suy diễn pass khi chưa thực thi.
 - Với documentation: yêu cầu nội dung khớp implementation/contract đã xác minh, ví dụ đúng thực tế và các thay đổi tài liệu cụ thể; không bịa đặt tính năng hay kết quả kiểm thử.
