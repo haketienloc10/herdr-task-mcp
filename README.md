@@ -45,7 +45,7 @@ qiqi-control/
 ~~~
 
 - `AGENTS.md` chứa quy tắc Lead dùng chung trong cặp marker do installer quản lý.
-- `CLAUDE.md` import `@AGENTS.md` để Claude Lead dùng cùng quy tắc; installer giữ nguyên nội dung khác và chỉ coi import ngoài fenced code block/comment là có hiệu lực. Nếu **managed block** bị đặt trong code fence hoặc HTML comment (hoặc tệp có khối Markdown chưa đóng khiến import mới không thể kích hoạt), installer báo lỗi trước khi ghi file; hãy di chuyển/đóng khối đó rồi chạy lại.
+- `CLAUDE.md` import `@AGENTS.md` để Claude Lead dùng cùng quy tắc; installer giữ nguyên nội dung khác và không coi ví dụ trong fenced code (kể cả trong list), multiline inline-code spans hoặc HTML comments là import có hiệu lực. Nếu **managed block** nằm trong các ngữ cảnh này, hoặc một code span/fence/comment chưa đóng khiến import mới không thể kích hoạt, installer báo lỗi trước khi ghi file; hãy di chuyển/đóng khối Markdown rồi chạy lại.
 - `.codex/config.toml` đăng ký MCP `qiqi_delegate` cho Codex.
 - `.mcp.json` đăng ký MCP `qiqi_delegate` cho Claude.
 - `repos.yaml` liệt kê Git repository được phép nhận việc.
