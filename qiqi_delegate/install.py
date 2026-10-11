@@ -91,34 +91,42 @@ def _active_claude_import_lines(text: str) -> set[int]:
         offset += len(raw_line)
         line = raw_line.rstrip("\r\n")
         if fence_char is not None:
-            # CommonMark closers allow at most 3 spaces relative to their
-            # container, not unlimited indentation. Lists supply a base.
-            closing = (
-                r" {" + str(fence_base_indent) + ","
-                + str(fence_base_indent + 3) + "}"
-                + re.escape(fence_char) + "{" + str(fence_width)
-                + r",}[ \t]*"
+            # CommonMark closers allow at most three columns of indentation
+            # relative to the container. A tab can advance to the next
+            # 4-column stop; it is not equivalent to a single space.
+            closing = re.fullmatch(
+                r"([ \t]*)" + re.escape(fence_char)
+                + "{" + str(fence_width) + r",}[ \t]*", line
             )
-            if re.fullmatch(closing, line):
-                fence_char = None
+            if closing:
+                columns = len(closing.group(1).expandtabs(4))
+                if fence_base_indent <= columns <= fence_base_indent + 3:
+                    fence_char = None
             continue
+
+        # Blank lines end Markdown paragraphs and unmatched inline-code spans.
+        # HTML comments, unlike inline spans, can continue past blank lines.
+        if not line.strip():
+            inline_ticks = None
 
         if inline_ticks is None and not comment_depth:
             candidate = line
-            list_indent = 0
+            list_prefix_length = 0
             while True:
                 item = re.match(
                     r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", candidate
                 )
                 if not item:
                     break
-                list_indent += item.end()
+                list_prefix_length += item.end()
                 candidate = candidate[item.end():]
             opener = re.match(r" {0,3}(\x60{3,}|~{3,})", candidate)
             if opener:
                 fence_char = opener.group(1)[0]
                 fence_width = len(opener.group(1))
-                fence_base_indent = list_indent
+                # List marker indentation is measured in *columns*, not
+                # characters. E.g. "-\\t" starts its content at column 4.
+                fence_base_indent = len(line[:list_prefix_length].expandtabs(4))
                 continue
 
         if (
