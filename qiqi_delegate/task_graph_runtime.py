@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from qiqi_delegate.core import TaskPacket, build_task_packet
+from qiqi_delegate import quality
 from qiqi_delegate.runtime import AgentStartupBlocked
 from qiqi_delegate.task_graph import GraphNode, TaskGraph
 from qiqi_delegate.task_graph_scheduler import (
@@ -27,7 +28,8 @@ _NODE_FIELDS = frozenset(
 )
 _NODE_REQUIRED_FIELDS = frozenset({"node_id", "repository", "task_packet"})
 _DECISION_FIELDS = frozenset(
-    {"node_id", "action", "resume_session", "feedback", "owner", "return_checkpoint"}
+    {"node_id", "action", "resume_session", "feedback", "owner", "return_checkpoint",
+     "criterion_reviews"}
 )
 _DECISION_REQUIRED_FIELDS = frozenset({"node_id", "action"})
 _EXECUTION_TERMINAL_STATES = frozenset({"settled", "failed", "blocked", "capture_ambiguous"})
@@ -48,6 +50,7 @@ class ReviewDecision:
     feedback: tuple[str, ...] = ()
     owner: str | None = None
     return_checkpoint: str | None = None
+    criterion_reviews: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -352,6 +355,11 @@ def decisions_from_payload(payload: Any) -> tuple[ReviewDecision, ...]:
         action = decision["action"]
         has_retry_metadata = "resume_session" in decision or "feedback" in decision
         has_defer_metadata = "owner" in decision or "return_checkpoint" in decision
+        if action != "accept" and "criterion_reviews" in decision:
+            raise ValueError("criterion_reviews only valid for accept")
+        raw_reviews = decision.get("criterion_reviews", [])
+        if not isinstance(raw_reviews, list) or not all(isinstance(v, dict) for v in raw_reviews):
+            raise ValueError("criterion_reviews must be a list of objects")
         if action != "retry" and has_retry_metadata:
             raise ValueError(
                 f"graph {label} retry metadata is only valid for action='retry'"
@@ -385,6 +393,7 @@ def decisions_from_payload(payload: Any) -> tuple[ReviewDecision, ...]:
                 feedback=feedback,
                 owner=owner,
                 return_checkpoint=return_checkpoint,
+                criterion_reviews=tuple(raw_reviews),
             )
         )
     if not decisions:
@@ -702,6 +711,7 @@ class GraphRuntime:
         return {
             "graph_run_id": graph_run_id,
             "revision": revision,
+            "quality": quality.status(self.store.path, graph_run_id),
             "reviews": [
                 {
                     key: value
@@ -1153,6 +1163,41 @@ class GraphRuntime:
                     "retry, replan or block instead"
                 )
 
+        quality_updates: list[dict[str, Any]] = []
+        quality_snapshot = quality.status(self.store.path, graph_run_id)
+        if quality_snapshot["quality_policy"] == "strict_v1":
+            for decision in decisions:
+                authored = next(node for node in graph.nodes if node.node_id == decision.node_id)
+                persisted = self.store.get_node(graph_run_id, decision.node_id)
+                attempt = self.store.get_attempt(persisted["current_attempt_id"]) if persisted and persisted.get("current_attempt_id") else None
+                result = attempt.get("result") if attempt else None
+                report = None
+                if result and result.get("state") == "settled":
+                    allowed = {rid for item in quality_snapshot["items"]
+                               if item["node_id"] == decision.node_id
+                               for rid in item["requirement_ids"]}
+                    try:
+                        report = quality.parse_peer_report(
+                            result.get("agent_response"), authored.task_packet.acceptance_criteria, allowed,
+                        )
+                    except ValueError:
+                        if decision.action == "accept":
+                            raise
+                if decision.action == "accept":
+                    if report is None:
+                        raise ValueError("ACCEPT requires structured Peer report")
+                    quality.validate_lead_review(report, decision.criterion_reviews)
+                    turn_ref = "peer_turn:" + str(attempt["turn_id"])
+                    for review in decision.criterion_reviews:
+                        if turn_ref not in review["evidence_refs"]:
+                            raise ValueError("Lead review must cite the exact captured Peer turn")
+                quality_updates.append({
+                    "node_id": decision.node_id,
+                    "attempt_id": persisted.get("current_attempt_id") if persisted else None,
+                    "action": decision.action, "report": report,
+                    "reviews": decision.criterion_reviews,
+                })
+
         scheduler_decisions = tuple(
             NodeDecision(node_id=decision.node_id, action=decision.action)
             for decision in decisions
@@ -1226,6 +1271,7 @@ class GraphRuntime:
                 for (run_id, node_id), plan in retry_plans.items()
                 if run_id == graph_run_id
             },
+            quality_updates=tuple(quality_updates),
         )
 
         updated_states = {state.node_id: state for state in updated.node_states}
