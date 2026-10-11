@@ -227,6 +227,34 @@ Trong `context`, tách `trusted_facts` khỏi `claims_to_investigate`. Mỗi m�
 
 **Lead không đọc hoặc sửa repository đích thay Peer.** Peer cũng không được đọc repository khác. Nếu cần dữ liệu liên repository, Lead tạo TaskPacket riêng.
 
+### Chính sách giao việc theo loại nhiệm vụ
+
+Giữ **một schema `TaskPacket`** cho analysis, coding, testing và documentation. Lead chọn nội dung `objective`, `scope`, `acceptance_criteria` và `constraints` theo mục tiêu công việc; không cần thêm `task_type`, schema riêng hay node kind riêng. Với task kết hợp, chỉ ghép các tiêu chí thực sự liên quan.
+
+| Loại việc | Gợi ý `acceptance_criteria` và `constraints` |
+|---|---|
+| Analysis / Discovery / Review | Truy vết hành vi, luồng dữ liệu, contract, lỗi và giới hạn; dẫn chứng `file:line` khi phù hợp. Với task chỉ đọc, đặt `constraints` cấm sửa file. |
+| Coding | Mô tả hành vi phải triển khai, phạm vi thay đổi, contract cần giữ, test liên quan; phân biệt test đã chạy và chưa chạy. |
+| Testing | Nêu test cases, trường hợp biên, kết quả pass/fail và test chưa chạy. Xác định rõ có được thêm/sửa test và chạy lệnh kiểm thử hay không. |
+| Documentation | Đối chiếu implementation/contract thực tế; yêu cầu tài liệu và ví dụ chính xác, không mô tả tính năng chưa có. |
+
+Ví dụ phần `TaskPacket` cho coding (vẫn dùng `delegate_repo_task` hoặc `task_packet` trong graph như trước):
+
+~~~json
+{
+  "objective": "Implement retry HTTP 503 tối đa hai lần",
+  "scope": ["src/client", "tests"],
+  "constraints": ["Không thay đổi public API", "Không retry lỗi ngoài HTTP 503"],
+  "acceptance_criteria": [
+    "Hành vi retry đáp ứng yêu cầu và giữ nguyên public API",
+    "Có test cho HTTP 503 và lỗi không được retry",
+    "Nêu file đã thay đổi, test đã chạy và test chưa chạy"
+  ]
+}
+~~~
+
+Không áp checklist đầy đủ cho mọi task. Lead đánh giá theo `acceptance_criteria` đã giao và evidence thực tế; trạng thái Peer `settled` không đồng nghĩa với `ACCEPT`.
+
 ## Điều phối nhiều công việc bằng TaskGraph
 
 `TaskGraph` là DAG gồm các node `repo_task`. Mỗi node khai báo repository, route, TaskPacket và các dependency.

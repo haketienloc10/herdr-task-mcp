@@ -50,6 +50,17 @@ def test_managed_rules_are_generic_and_forbid_lead_direct_repo_access():
     assert managed_rules(new) == new
 
 
+def test_installed_rules_keep_one_task_schema_and_guide_task_specific_criteria():
+    installed = managed_rules(b"").decode("utf-8")
+    assert "một schema `TaskPacket`" in installed
+    for task_kind in ("analysis/discovery/review", "coding", "testing", "documentation"):
+        assert f"- Với {task_kind}:" in installed
+    assert "không sửa file" in installed
+    assert "test đã chạy" in installed
+    assert "test chưa chạy" in installed
+    assert "không bịa đặt tính năng" in installed
+
+
 @pytest.mark.parametrize("broken", [
     b"<!-- BEGIN HERDR-TASK-MCP RULES -->\n",
     b"<!-- END HERDR-TASK-MCP RULES -->\n",
