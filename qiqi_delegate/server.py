@@ -703,6 +703,7 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
 async def reconcile_graph(
     graph_run_id: str, graph: Graph, expected_revision: int,
     requirement_map: dict[str, list[str]] | None = None,
+    successor_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Replace DAG while preserving request provenance and requirement mappings."""
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
