@@ -18,6 +18,7 @@ from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_graph import GraphNode
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval import FinalEvaluationCoordinator
+from qiqi_delegate import quality
 
 class Fact(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -99,6 +100,7 @@ class Decision(BaseModel):
         default=None,
         description="Required with action='block' or 'replan' to assign recovery owner.",
     )
+    criterion_reviews: list[dict[str, Any]] | None = None
     return_checkpoint: str | None = Field(
         default=None,
         description="Required with action='block' or 'replan' to define next review point.",
@@ -507,6 +509,9 @@ async def start_graph(
             [node.node_id for node in authored.nodes], requirement_map,
         )
         result["task_request_binding"] = task_requests.graph_binding(result["graph_run_id"])
+        quality.seed(runtime.db, result["graph_run_id"], task_request_id,
+                     current["revision"], current["assessment"]["requirements"],
+                     authored, requirement_map)
     else:
         result["task_readiness_policy"] = "legacy_unassessed"
     return result
@@ -520,7 +525,15 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
     if result["task_request_binding"] is None:
         result["task_readiness_policy"] = "legacy_unassessed"
     result.update(final_evaluation.graph_status(graph_run_id))
+    result["quality"] = quality.status(runtime.db, graph_run_id)
     return result
+
+@mcp.tool()
+@_public_tool_errors
+async def get_quality_status(graph_run_id: str) -> dict[str, Any]:
+    """Read every requirement, unfinished criterion, blocker and evidence locator."""
+    return quality.status(runtime.db, graph_run_id)
+
 
 @mcp.tool()
 @_public_tool_errors
@@ -609,6 +622,20 @@ async def _graph_execute(
             )
         payload = packet.as_dict()
         payload["constraints"] = list(payload.get("constraints", [])) + additions
+        if quality.status(runtime.db, graph_run_id)["quality_policy"] == "strict_v1":
+            payload["constraints"].append(
+                "Return exactly ONE TaskExecutionReport v1 JSON object (no markdown) "
+                "with keys schema_version=1, summary, criterion_results, unresolved_items. "
+                "For every acceptance criterion in its original order, include "
+                "criterion_index, status (done/not_done/not_verified/failed/"
+                "unable_to_execute/unable_to_verify/blocked), evidence list of "
+                "{kind:repo_file,repository,path,locator}, verification "
+                "{method,performed,outcome,artifact_ref}, and details. "
+                "Include EVERY unfinished/unverified/inaccessible task as unresolved_items "
+                "with id,kind,description,affected_requirement_ids,reason,attempted_methods,next_action. "
+                "Do not claim an unrun check passed or omit an unresolved issue. "
+                "If work is incomplete, say so clearly instead of returning success."
+            )
         packet = _contextual_packet(**payload)
     return await runtime.delegate(
         repository=node.repository, route=node.route,
