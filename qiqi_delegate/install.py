@@ -457,18 +457,21 @@ def _stage_install_file(directory: Path, content: bytes, mode: int | None = None
         raise
 
 
-def _stage_install_rollback(root: Path, original: Path) -> Path:
-    """Hard-link the original inode so rollback retains uid, gid, ACLs and xattrs."""
-    fd, name = tempfile.mkstemp(prefix=".qiqi-install-", dir=root)
-    os.close(fd)
-    backup = Path(name)
-    try:
-        backup.unlink()
-        os.link(original, backup)
-        return backup
-    except BaseException:
-        backup.unlink(missing_ok=True)
-        raise
+def _stage_install_rollback(original: Path) -> Path:
+    """Hard-link the original inode inside its protected destination parent.
+
+    Placing backups in the workspace root could expose readable files from
+    restricted subdirectories. A direct link with an unpredictable name also
+    avoids the unlink-then-link gap of a temporary placeholder.
+    """
+    for _ in range(10):
+        backup = original.parent / (".qiqi-install-" + secrets.token_hex(16))
+        try:
+            os.link(original, backup)
+            return backup
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"unable to allocate rollback link in {original.parent}")
 
 
 def _preserve_install_metadata(original: Path, staged: Path) -> None:
@@ -506,7 +509,9 @@ def _preserve_install_metadata(original: Path, staged: Path) -> None:
 def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
     """Stage everything before writes; restore all earlier files on failure.
 
-    Temporary files are on the workspace filesystem for atomic os.replace.
+    Temporary files and rollback hard links live in their respective
+    destination directories (including protected subdirectories), permitting
+    same-filesystem atomic os.replace without weakening parent access rules.
     Rollback hard links retain the original inodes and security metadata;
     staged replacements must reproduce that metadata before commit. This
     protects against ordinary I/O exceptions, not crashes or concurrent writes.
@@ -550,7 +555,7 @@ def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
                     continue
                 # A hard-linked backup preserves the original inode's entire
                 # metadata on rollback (including ownership and ACLs).
-                backups[destination] = _stage_install_rollback(root, destination)
+                backups[destination] = _stage_install_rollback(destination)
             else:
                 old_mode = None
             staged[destination] = _stage_install_file(destination.parent, data, old_mode)
