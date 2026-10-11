@@ -73,16 +73,15 @@ def managed_rules(existing: bytes) -> bytes:
     return result.encode("utf-8")
 
 def _active_claude_import_lines(text: str) -> set[int]:
-    """Find standalone imports outside fences and HTML comments.
+    """Find usable standalone imports, ignoring Markdown code and HTML comments.
 
-    Return original line offsets so a managed block cannot be validated by
-    some *other* active @AGENTS.md elsewhere in the document. Treat nested
-    comments conservatively to avoid mistaking an inert import for an active
-    one when a marker comment is wrapped in another HTML comment.
+    Track positions (rather than only a boolean) so another active import cannot
+    incorrectly validate a disabled installer-owned import.
     """
     active = set()
     fence_char = None
     fence_width = 0
+    inline_ticks = None
     comment_depth = 0
     offset = 0
     for raw_line in text.splitlines(keepends=True):
@@ -90,16 +89,14 @@ def _active_claude_import_lines(text: str) -> set[int]:
         offset += len(raw_line)
         line = raw_line.rstrip("\r\n")
         if fence_char is not None:
-            closing = r" {0,3}" + re.escape(fence_char) + "{" + str(fence_width) + r",}[ \t]*"
+            # A fence opened on a list item can close under that list's indent.
+            closing = r" *" + re.escape(fence_char) + "{" + str(fence_width) + r",}[ \t]*"
             if re.fullmatch(closing, line):
                 fence_char = None
             continue
-        if not comment_depth:
-            opener = re.match(r" {0,3}(`{3,}|~{3,})", line)
-            if opener:
-                fence_char = opener.group(1)[0]
-                fence_width = len(opener.group(1))
-                continue
+
+        # Strip comments before parsing code or imports, handling outer comments
+        # around installer marker comments conservatively.
         visible = ""
         rest = line
         while rest:
@@ -121,8 +118,46 @@ def _active_claude_import_lines(text: str) -> set[int]:
                 visible += rest[:opened]
                 comment_depth = 1
                 rest = rest[opened + 4:]
-        if re.fullmatch(r" {0,3}@AGENTS\.md[ \t]*", visible):
+
+        if inline_ticks is None:
+            # Remove optional Markdown list markers when finding an opening
+            # fenced code block, e.g. "- \x60\x60\x60md". Continuation lines
+            # with <=3 indentation also use the ordinary fence rule.
+            candidate = visible
+            while True:
+                item = re.match(r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", candidate)
+                if not item:
+                    break
+                candidate = candidate[item.end():]
+            opener = re.match(r" {0,3}(\x60{3,}|~{3,})", candidate)
+            if opener:
+                fence_char = opener.group(1)[0]
+                fence_width = len(opener.group(1))
+                continue
+
+        if inline_ticks is None and re.fullmatch(r" {0,3}@AGENTS\.md[ \t]*", visible):
             active.add(start)
+
+        # Markdown inline code can span lines. While inside a backtick run,
+        # neither imports nor fence openers are active. Fail closed if the
+        # span remains unclosed before the installer-owned import.
+        i = 0
+        while i < len(visible):
+            if visible[i] == "\\":
+                i += 2
+                continue
+            if visible[i] != "\x60":
+                i += 1
+                continue
+            j = i + 1
+            while j < len(visible) and visible[j] == "\x60":
+                j += 1
+            width = j - i
+            if inline_ticks is None:
+                inline_ticks = width
+            elif inline_ticks == width:
+                inline_ticks = None
+            i = j
     return active
 
 
@@ -160,7 +195,7 @@ def managed_claude_rules(existing: bytes) -> bytes:
     if import_start not in _active_claude_import_lines(result):
         raise ValueError(
             "CLAUDE.md managed @AGENTS.md import is inactive inside a "
-            "Markdown fence or HTML comment; move the managed block outside "
+            "Markdown code span/fence or HTML comment; move the managed block outside "
             "that context before reinstalling"
         )
     return result.encode("utf-8")
