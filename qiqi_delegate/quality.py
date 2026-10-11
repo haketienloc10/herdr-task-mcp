@@ -121,6 +121,9 @@ def parse_peer_report(raw: Any, criteria: tuple[str, ...],
         raise ValueError("Peer response is not TaskExecutionReport JSON") from exc
     if not isinstance(report, dict) or set(report) != {
         "schema_version", "summary", "criterion_results", "unresolved_items"
+    } and set(report) != {
+        "schema_version", "summary", "criterion_results", "unresolved_items",
+        "resolved_items"
     } or report["schema_version"] != 1:
         raise ValueError("Peer must return TaskExecutionReport v1")
     if not isinstance(report["summary"], str) or not report["summary"].strip():
@@ -187,12 +190,36 @@ def parse_peer_report(raw: Any, criteria: tuple[str, ...],
                        for v in item["attempted_methods"])):
             raise ValueError("invalid unresolved work item")
         ids.add(item["id"])
+    resolutions = report.setdefault("resolved_items", [])
+    if not isinstance(resolutions, list):
+        raise ValueError("resolved_items must be an array")
+    resolved_ids = set()
+    for item in resolutions:
+        if not isinstance(item, dict) or set(item) != {"id", "evidence", "rationale"}:
+            raise ValueError("malformed resolved item")
+        if (not isinstance(item["id"], str) or not item["id"].strip()
+                or item["id"] in resolved_ids or item["id"] in ids
+                or not isinstance(item["rationale"], str)
+                or not item["rationale"].strip()
+                or not isinstance(item["evidence"], list)
+                or not item["evidence"]):
+            raise ValueError("resolved item needs id, rationale and evidence")
+        for ref in item["evidence"]:
+            if (not isinstance(ref, dict) or
+                    set(ref) != {"kind", "repository", "path", "locator"} or
+                    ref["kind"] != "repo_file" or
+                    any(not isinstance(ref[k], str) or not ref[k].strip()
+                        for k in ("repository", "path", "locator")) or
+                    ref["path"].startswith("/") or ".." in ref["path"].split("/")):
+                raise ValueError("invalid resolution evidence locator")
+        resolved_ids.add(item["id"])
     # A non-done criterion must remain visible as unresolved work, even if
     # Peer omitted it from the separate discovered-issues list.
     return report
 
 
-def validate_lead_review(report: dict[str, Any], reviews: tuple[dict[str, Any], ...]) -> None:
+def validate_lead_review(report: dict[str, Any], reviews: tuple[dict[str, Any], ...],
+                         open_findings: set[str] | None = None) -> None:
     results = report["criterion_results"]
     if len(reviews) != len(results):
         raise ValueError("ACCEPT requires a Lead review of every criterion")
@@ -221,6 +248,8 @@ def validate_lead_review(report: dict[str, Any], reviews: tuple[dict[str, Any], 
             raise ValueError("Lead evidence must reference captured Peer turn")
     if report["unresolved_items"]:
         raise ValueError("ACCEPT cannot waive unresolved work; RETRY/REPLAN/BLOCK")
+    if open_findings is not None and {item["id"] for item in report["resolved_items"]} != open_findings:
+        raise ValueError("ACCEPT must explicitly resolve every previously reported issue")
     return None
 
 
@@ -278,6 +307,23 @@ def persist_decision(conn: sqlite3.Connection, run_id: str, node_id: str,
         conn.execute("INSERT INTO quality_events(graph_run_id,item_id,event,attempt_id,reason,created_at_ns) "
                      "VALUES (?,?,?,?,?,?)",
                      (run_id, uid, "reported:" + action, attempt_id, item["reason"], now))
+    for item in report["resolved_items"]:
+        uid = item["id"]
+        existing = conn.execute(
+            "SELECT kind,state,node_id FROM quality_items WHERE graph_run_id=? AND item_id=?",
+            (run_id, uid),
+        ).fetchone()
+        if (existing is None or existing[0] != "discovered" or
+                existing[1] in ("superseded", "verified")):
+            raise ValueError("resolution references unknown or inactive discovered issue")
+        conn.execute(
+            "UPDATE quality_items SET state='not_verified',details=?,evidence_json=?,updated_at_ns=? "
+            "WHERE graph_run_id=? AND item_id=?",
+            (item["rationale"], _json(item["evidence"]), now, run_id, uid),
+        )
+        conn.execute("INSERT INTO quality_events(graph_run_id,item_id,event,attempt_id,reason,created_at_ns) "
+                     "VALUES (?,?,?,?,?,?)",
+                     (run_id, uid, "resolution_claim:" + action, attempt_id, item["rationale"], now))
     if action == "accept":
         conn.execute(
             "UPDATE quality_items SET state='not_verified',updated_at_ns=? "
@@ -327,7 +373,7 @@ def assert_no_open_work(db_path: Any, run_id: str) -> dict[str, Any]:
         return current
     open_items = [
         item["item_id"] for item in current["items"]
-        if item["kind"] != "requirement" and item["state"] != "not_verified"
+        if item["kind"] != "requirement" and item["state"] not in ("not_verified", "superseded")
     ]
     if open_items:
         raise ValueError("Quality Gate has unfinished/unresolved work: " +
