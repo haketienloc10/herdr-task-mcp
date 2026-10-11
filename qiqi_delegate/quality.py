@@ -482,3 +482,42 @@ def outstanding_for_node(db_path: Any, run_id: str, node_id: str) -> set[str]:
                 (run_id, node_id),
             )
         }
+
+
+def final_coverage(db_path: Any, run_id: str) -> dict[str, Any] | None:
+    """Immutable target list for one independent final evaluation."""
+    current = status(db_path, run_id)
+    if current["quality_policy"] != "strict_v1":
+        return None
+    return {
+        "revision": current["quality_revision"],
+        "criteria": {
+            item["item_id"]: item for item in current["items"]
+            if item["kind"] == "criterion" and item["state"] != "superseded"
+        },
+        "discovered": {
+            item["item_id"]: item for item in current["items"]
+            if item["kind"] == "discovered" and item["state"] != "superseded"
+        },
+    }
+
+
+def assert_current(conn: sqlite3.Connection, run_id: str,
+                   expected_revision: int | None) -> None:
+    if not is_strict(conn, run_id):
+        if expected_revision is not None:
+            raise RuntimeError("missing strict Quality Gate")
+        return
+    row = conn.execute(
+        "SELECT revision FROM quality_policies WHERE graph_run_id=?", (run_id,),
+    ).fetchone()
+    if expected_revision is None or row[0] != expected_revision:
+        raise RuntimeError("stale quality ledger revision; rerun independent evaluation")
+    missing = conn.execute(
+        "SELECT item_id FROM quality_items WHERE graph_run_id=? "
+        "AND kind!='requirement' AND state NOT IN ('not_verified','superseded','verified') "
+        "LIMIT 8", (run_id,),
+    ).fetchall()
+    if missing:
+        raise RuntimeError("unresolved quality obligations: " +
+                           ", ".join(r[0] for r in missing))
