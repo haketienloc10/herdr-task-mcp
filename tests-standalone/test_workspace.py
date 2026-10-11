@@ -63,7 +63,7 @@ def test_installed_rules_keep_one_task_schema_and_guide_task_specific_criteria()
 
 
 def test_task_type_policy_stays_aligned_across_three_surfaces():
-    # Read the MCP instructions without importing server.py (which starts its runtime).
+    # server.py initializes its runtime at import time; inspect static MCP instructions.
     root = Path(__file__).resolve().parents[1]
     server_ast = ast.parse((root / "qiqi_delegate" / "server.py").read_text(encoding="utf-8"))
     mcp_call = next(
@@ -77,20 +77,68 @@ def test_task_type_policy_stays_aligned_across_three_surfaces():
     )
     readme = (root / "README.md").read_text(encoding="utf-8")
     readme_policy = readme.split("### Chính sách giao việc theo loại nhiệm vụ", 1)[1].split("\n## ", 1)[0]
-    for text in (managed_rules(b"").decode("utf-8"), instructions, readme_policy):
-        normalized = text.lower()
-        for keyword in ("taskpacket", "acceptance_criteria", "constraints",
-                        "analysis", "coding", "testing", "documentation"):
-            assert keyword in normalized
 
-    assert "chỉ chọn các tiêu chí áp dụng" in RULES
-    assert "không áp checklist không liên quan" in RULES
-    assert "request only applicable evidence" in instructions
-    assert "simple lookups require only direct evidence" in instructions
-    assert "Avoid irrelevant criteria and verbose reports for simple tasks" in instructions
-    assert "Chỉ yêu cầu nội dung liên quan" in readme_policy
-    assert "Với task đơn giản" in readme_policy
-    assert "Không áp checklist đầy đủ cho mọi task" in readme_policy
+    # Each entry captures a task-specific obligation, not just the task name.
+    # Check it independently on every published policy surface.
+    expected = {
+        "installed AGENTS.md": {
+            "schema": ("một schema `TaskPacket`",),
+            "proportional criteria": ("Chọn `acceptance_criteria` và `constraints` theo mục tiêu thực tế",),
+            "analysis": ("Với analysis/discovery/review: chỉ chọn các tiêu chí áp dụng",
+                         "task tra cứu đơn giản chỉ cần câu trả lời với bằng chứng trực tiếp"),
+            "read-only": ("Nếu task chỉ đọc, ghi rõ không sửa file trong `constraints`",),
+            "coding": ("Với coding: nêu hành vi cần triển khai, phạm vi thay đổi, contract phải giữ",
+                       "tiêu chí kiểm thử liên quan; Peer báo cáo file thay đổi, test đã chạy"),
+            "testing": ("Với testing: xác định hành vi/test cases cần kiểm tra, việc tạo hoặc sửa test",
+                        "cách báo cáo pass/fail, lỗi, test chưa chạy; không suy diễn pass khi chưa thực thi"),
+            "documentation": ("Với documentation: yêu cầu nội dung khớp implementation/contract đã xác minh",
+                              "ví dụ đúng thực tế và các thay đổi tài liệu cụ thể"),
+            "mixed work": ("Với task kết hợp nhiều loại việc, ghép các tiêu chí liên quan",),
+            "simple work": ("không áp checklist không liên quan hoặc báo cáo dài cho nhiệm vụ đơn giản",),
+        },
+        "MCP instructions": {
+            "schema": ("Use one TaskPacket schema",),
+            "proportional criteria": ("tailor acceptance_criteria and constraints to the objective",),
+            "analysis": ("For analysis/discovery/review request only applicable evidence and explanations",
+                         "simple lookups require only direct evidence, not a full system trace"),
+            "read-only": ("For read-only tasks explicitly prohibit file changes",),
+            "coding": ("For coding require scoped changes, contract compatibility and relevant test evidence",),
+            "testing": ("For testing specify cases, permitted test edits/execution, pass/fail results",
+                        "and unrun cases; never imply an unrun test passed"),
+            "documentation": ("For documentation require implementation-grounded claims and accurate examples",),
+            "mixed work": ("including mixed tasks",),
+            "simple work": ("Avoid irrelevant criteria and verbose reports for simple tasks",),
+        },
+        "README policy": {
+            "schema": ("một schema `TaskPacket`",),
+            "proportional criteria": ("Lead chọn nội dung `objective`, `scope`, `acceptance_criteria` và `constraints` theo mục tiêu",),
+            "analysis": ("| Analysis / Discovery / Review | Chỉ yêu cầu nội dung liên quan đến mục tiêu",
+                         "Với task đơn giản như xác nhận vị trí một khóa cấu hình"),
+            "read-only": ("Với task chỉ đọc, đặt `constraints` cấm sửa file",),
+            "coding": ("| Coding | Mô tả hành vi phải triển khai, phạm vi thay đổi, contract cần giữ, test liên quan",
+                       "phân biệt test đã chạy và chưa chạy"),
+            "testing": ("| Testing | Nêu test cases, trường hợp biên, kết quả pass/fail và test chưa chạy",
+                        "Xác định rõ có được thêm/sửa test và chạy lệnh kiểm thử hay không"),
+            "documentation": ("| Documentation | Đối chiếu implementation/contract thực tế",
+                              "yêu cầu tài liệu và ví dụ chính xác"),
+            "mixed work": ("Với task kết hợp, chỉ ghép các tiêu chí thực sự liên quan",),
+            "simple work": ("Không áp checklist đầy đủ cho mọi task",),
+        },
+    }
+    surfaces = {
+        "installed AGENTS.md": managed_rules(b"").decode("utf-8"),
+        "MCP instructions": instructions,
+        "README policy": readme_policy,
+    }
+    invariant_names = set(expected["installed AGENTS.md"])
+    assert all(set(checks) == invariant_names for checks in expected.values())
+    for surface, checks in expected.items():
+        normalized = " ".join(surfaces[surface].casefold().split())
+        for invariant, clauses in checks.items():
+            for clause in clauses:
+                assert " ".join(clause.casefold().split()) in normalized, (
+                    f"Missing {invariant} on {surface}: {clause}"
+                )
 
 
 @pytest.mark.parametrize("broken", [
