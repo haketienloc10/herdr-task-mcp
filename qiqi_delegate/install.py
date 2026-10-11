@@ -72,6 +72,49 @@ def managed_rules(existing: bytes) -> bytes:
         result = text + suffix + (newline if text else "") + block + newline
     return result.encode("utf-8")
 
+def _has_active_claude_import(text: str) -> bool:
+    """Only trust a standalone @AGENTS.md outside Markdown code/comment blocks.
+
+    Conservative detection is intentional: ambiguous examples cause us to
+    append a managed import rather than silently leave Claude without rules.
+    """
+    fence_char = None
+    fence_width = 0
+    in_comment = False
+    for line in text.splitlines():
+        if fence_char is not None:
+            closing = r" {0,3}" + re.escape(fence_char) + "{" + str(fence_width) + r",}[ \t]*"
+            if re.fullmatch(closing, line):
+                fence_char = None
+            continue
+        opener = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if opener:
+            fence_char = opener.group(1)[0]
+            fence_width = len(opener.group(1))
+            continue
+        # Ignore imports in HTML comments, including multiline comments.
+        visible = ""
+        rest = line
+        while rest:
+            if in_comment:
+                end = rest.find("-->")
+                if end < 0:
+                    break
+                in_comment = False
+                rest = rest[end + 3:]
+            else:
+                begin = rest.find("<!--")
+                if begin < 0:
+                    visible += rest
+                    break
+                visible += rest[:begin]
+                in_comment = True
+                rest = rest[begin + 4:]
+        if re.fullmatch(r" {0,3}@AGENTS\.md[ \t]*", visible):
+            return True
+    return False
+
+
 def managed_claude_rules(existing: bytes) -> bytes:
     """Import the shared AGENTS.md into Claude while preserving user content."""
     text = existing.decode("utf-8")
@@ -90,8 +133,8 @@ def managed_claude_rules(existing: bytes) -> bytes:
         ):
             raise ValueError("CLAUDE.md markers must occupy complete lines")
         return (text[:a] + block + text[b + len(CLAUDE_END):]).encode("utf-8")
-    # An existing explicit import already guarantees the common policy.
-    if re.search(r"(?m)^[ \t]*@AGENTS\.md[ \t]*$", text):
+    # Preserve an existing active import, but not a code/example occurrence.
+    if _has_active_claude_import(text):
         return existing
     suffix = "" if not text else ("" if text.endswith(("\n", "\r")) else newline)
     return (text + suffix + (newline if text else "") + block + newline).encode("utf-8")
