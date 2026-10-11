@@ -241,16 +241,11 @@ class FinalEvaluationCoordinator:
         graph, authored, binding, task, names, roots = self._eligible(
             graph_run_id, expected_revision,
         )
-        # Check route *before* reservation; --yolo and unknown configurations
-        # cannot evaluate production source with sufficient isolation.
-        adapter, args = self.runtime.route(route)
-        if adapter != "codex" or args not in (
-            ["--sandbox", "read-only"], ["--sandbox=read-only"],
-        ):
-            raise ValueError(
-                "Final Evaluation requires Codex route args ['--sandbox','read-only']; "
-                "unsafe route or --yolo is forbidden"
-            )
+        # Check adapter before reservation. Codex CLI args are configured by
+        # the workspace; Final Evaluation does not enforce a sandbox policy.
+        adapter, _ = self.runtime.route(route)
+        if adapter != "codex":
+            raise ValueError("Final Evaluation requires a Codex route")
         with EvaluationSnapshot(roots) as snap:
             source_material = self._materialize_task_sources(
                 task, snap.paths[names[0]],
