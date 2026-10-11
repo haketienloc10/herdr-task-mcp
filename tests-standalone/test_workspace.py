@@ -540,6 +540,60 @@ def test_closed_multiline_code_span_allows_new_managed_import():
     assert managed_claude_rules(result) == result
 
 
+@pytest.mark.parametrize("example", [
+    b"\x60\x60\x60md\n    \x60\x60\x60\n@AGENTS.md\n\x60\x60\x60\n",
+    b"~~~md\n    ~~~\n@AGENTS.md\n~~~\n",
+    b"\x60\x60\x60md\n\t\x60\x60\x60\n@AGENTS.md\n\x60\x60\x60\n",
+])
+def test_four_space_fence_closer_cannot_expose_inactive_import(example):
+    # The apparent closer is code content, so the import is an example.
+    result = managed_claude_rules(example)
+    assert result.startswith(example)
+    assert result.count(b"@AGENTS.md") == 2
+    assert result.count(CLAUDE_START.encode()) == 1
+    assert managed_claude_rules(result) == result
+
+
+def test_unclosed_fence_with_four_space_false_closer_fails_before_any_write(tmp_path):
+    existing = b"\x60\x60\x60md\n    \x60\x60\x60\n@AGENTS.md\n"
+    (tmp_path / "CLAUDE.md").write_bytes(existing)
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == existing
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".codex").exists()
+
+
+@pytest.mark.parametrize("existing", [
+    b"The token \x60<!--\x60 starts a comment.\n@AGENTS.md\n",
+    b"\x60\x60<!--\x60\x60\n@AGENTS.md\n",
+    b"\x60\n<!--\n\x60\n@AGENTS.md\n",
+    b"Example \x60<!--\x60 text.\r\n@AGENTS.md\r\n",
+])
+def test_html_comment_delimiter_in_inline_code_does_not_hide_real_import(existing):
+    assert managed_claude_rules(existing) == existing
+
+
+def test_inline_code_comment_example_still_allows_managed_import():
+    original = b"Documentation: \x60<!--\x60 is a token, not a comment.\n"
+    installed = managed_claude_rules(original)
+    assert installed.startswith(original)
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert installed.count(b"@AGENTS.md") == 1
+    assert managed_claude_rules(installed) == installed
+
+
+@pytest.mark.parametrize("closer", [
+    b"\x60\x60\x60",
+    b" \x60\x60\x60",
+    b"  \x60\x60\x60",
+    b"   \x60\x60\x60",
+])
+def test_legal_top_level_fence_closers_allow_import(closer):
+    existing = b"\x60\x60\x60md\n" + closer + b"\n@AGENTS.md\n"
+    assert managed_claude_rules(existing) == existing
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
