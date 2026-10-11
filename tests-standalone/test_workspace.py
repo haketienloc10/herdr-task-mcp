@@ -724,6 +724,39 @@ def test_lazy_list_continuation_is_not_trusted_as_standalone_import():
     assert managed_claude_rules(installed) == installed
 
 
+@pytest.mark.parametrize("existing", [
+    b"@AGENTS.md\n---\n",
+    b"@AGENTS.md\n===\n",
+    b"@AGENTS.md\r\n---\r\n",
+    b"@AGENTS.md\n   ---\n",
+])
+def test_setext_heading_is_not_accepted_as_active_claude_import(existing):
+    # CommonMark renders these as top-level headings, not paragraphs,
+    # despite their inline tokens also having level == 1.
+    installed = managed_claude_rules(existing)
+    assert installed.startswith(existing)
+    assert installed.count(b"@AGENTS.md") == 2
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert managed_claude_rules(installed) == installed
+
+
+def test_setext_heading_and_real_paragraph_import_are_distinct():
+    existing = b"@AGENTS.md\n---\n\n@AGENTS.md\n"
+    assert managed_claude_rules(existing) == existing
+
+
+def test_setext_heading_inside_managed_claude_block_fails_before_write(tmp_path):
+    owned = (CLAUDE_START + "\n@AGENTS.md\n---\n" + CLAUDE_END + "\n").encode()
+    (tmp_path / "AGENTS.md").write_bytes(b"# Existing lead rules\n")
+    (tmp_path / "CLAUDE.md").write_bytes(owned)
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == owned
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# Existing lead rules\n"
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
