@@ -184,11 +184,13 @@ def test_snapshots_include_untracked_work_and_stale_pass_cannot_finalize(tmp_pat
         coordinator.finalize(gid, outcome["evaluation_id"], revision)
 
 
-def test_unsafe_route_and_unbound_graph_cannot_start(tmp_path):
-    _runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+def test_non_codex_route_and_unbound_graph_cannot_start(tmp_path):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    with (runtime.root / "agent-routing.yaml").open("a", encoding="utf-8") as config:
+        config.write('  claude-evaluator:\n    agent: claude\n    args: []\n')
     revision = graph_rt.get_graph(gid)["revision"]
-    with pytest.raises(ValueError, match="requires Codex route"):
-        asyncio.run(coordinator.start(gid, "codex-balanced", revision))
+    with pytest.raises(ValueError, match="requires a Codex route"):
+        asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
     assert coordinator.store.latest(gid) is None
     other = tmp_path / "other"
     other.mkdir()
@@ -199,6 +201,29 @@ def test_unsafe_route_and_unbound_graph_cannot_start(tmp_path):
         asyncio.run(coordinator2.start(
             gid2, "codex-evaluator", graph_rt2.get_graph(gid2)["revision"],
         ))
+
+
+def test_codex_yolo_route_can_evaluate(tmp_path, monkeypatch):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path, multi=False)
+
+    async def fake_delegate(**kwargs):
+        assert kwargs["route"] == "codex-balanced"
+        coordinator.store.bind_turn(kwargs["evaluation_id"], "yolo-eval-turn")
+        state = coordinator.store.get(kwargs["evaluation_id"])
+        body = json.dumps(report(state["manifest"]))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("yolo-eval-turn", "native-evaluator", "backend",
+                 "codex-balanced", "settled", body, 125),
+            )
+        return {"state": "settled", "turn_id": "yolo-eval-turn",
+                "agent_response": body}
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    outcome = asyncio.run(coordinator.start(gid, "codex-balanced", revision))
+    assert outcome["status"] == "passed"
 
 
 def test_invalid_report_is_inconclusive_and_cannot_finalize(tmp_path, monkeypatch):
@@ -399,6 +424,11 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
     from qiqi_delegate.core import build_task_packet
 
     runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    (runtime.root / "agent-routing.yaml").write_text(
+        'routes:\n  codex-evaluator:\n    agent: codex\n'
+        '    args: ["--yolo", "-c", "model_reasoning_effort=high"]\n',
+        encoding="utf-8",
+    )
     repos = runtime.repos()
     binding = requests.graph_binding(gid)
     graph_revision = graph_rt.get_graph(gid)["revision"]
@@ -451,6 +481,8 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
         argv = captured["argv"]
         assert argv[argv.index("--add-dir") + 1] == str(snap.paths["frontend"])
         assert str(repos["frontend"]) not in argv
-        assert "--sandbox" in argv
-        assert argv[argv.index("--sandbox") + 1] == "read-only"
-        assert "--yolo" not in argv
+        assert "--sandbox" not in argv
+        assert "--yolo" in argv
+        i = argv.index("--yolo")
+        assert argv[i:i + 3] == ["--yolo", "-c", "model_reasoning_effort=high"]
+        assert "--skip-git-repo-check" in argv
