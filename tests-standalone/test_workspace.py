@@ -11,7 +11,10 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from qiqi_delegate.install import START, END, RULES, managed_rules, install_workspace
+from qiqi_delegate.install import (
+    START, END, CLAUDE_START, CLAUDE_END, RULES,
+    managed_rules, managed_claude_rules, install_workspace,
+)
 from qiqi_delegate.runtime import DelegateRuntime
 
 def setup_git(path: Path):
@@ -155,6 +158,7 @@ def test_install_workspace_preserves_unrelated_agent_rules_and_mcp(tmp_path: Pat
     root = tmp_path
     original = b"# Existing project instructions\n\nNever change this section.\n"
     (root / "AGENTS.md").write_bytes(original)
+    (root / "CLAUDE.md").write_bytes(b"# Existing Claude instructions\r\n\r\nKeep this.\r\n")
     (root / ".mcp.json").write_text(json.dumps({
         "mcpServers": {"other": {"command": "other", "args": []}},
         "unrelated": {"keep": True}
@@ -168,6 +172,10 @@ def test_install_workspace_preserves_unrelated_agent_rules_and_mcp(tmp_path: Pat
     previous_front = tuple((root / "frontend").rglob("*"))
     first = asyncio.run(install_workspace(root))
     agents = (root / "AGENTS.md").read_bytes()
+    claude_rules = (root / "CLAUDE.md").read_bytes()
+    assert claude_rules.startswith(b"# Existing Claude instructions\r\n\r\nKeep this.\r\n")
+    assert claude_rules.count(b"@AGENTS.md") == 1
+    assert claude_rules.count(CLAUDE_START.encode()) == 1
     assert agents.startswith(original)
     assert agents.count(START.encode()) == 1
     assert first["mcp"] == "qiqi_delegate"
@@ -179,6 +187,7 @@ def test_install_workspace_preserves_unrelated_agent_rules_and_mcp(tmp_path: Pat
     assert first["python"] == os.path.abspath(sys.executable)
     asyncio.run(install_workspace(root))
     assert (root / "AGENTS.md").read_bytes() == agents
+    assert (root / "CLAUDE.md").read_bytes() == claude_rules
     assert (root / ".codex" / "config.toml").read_text() == toml
     assert tuple((root / "frontend").rglob("*")) == previous_front
     assert "repositories: []" in (root / "repos.yaml").read_text()
@@ -191,6 +200,9 @@ def test_installer_enables_default_agent_flags_without_overwriting_existing_rout
     assert rt.route("claude-balanced") == (
         "claude", ["--permission-mode", "auto"]
     )
+    from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
+    assert rt.route("codex-evaluator") == ("codex", ["--sandbox", "read-only"])
+    assert rt.route("claude-evaluator") == ("claude", list(CLAUDE_EVALUATOR_ARGS))
 
     routing = tmp_path / "agent-routing.yaml"
     custom = (
@@ -408,3 +420,40 @@ def test_no_supervisor_modules_in_package():
     import qiqi_delegate
     root = Path(qiqi_delegate.__file__).parent
     assert not list(root.glob("*supervisor*"))
+
+
+def test_claude_import_preserves_user_content_and_is_idempotent():
+    original = b"# User Claude rules\r\nDo not modify.  \r\n"
+    managed = managed_claude_rules(original)
+    assert managed.startswith(original)
+    assert managed.count(b"@AGENTS.md") == 1
+    assert managed.count(CLAUDE_START.encode()) == 1
+    assert managed.count(CLAUDE_END.encode()) == 1
+    assert managed_claude_rules(managed) == managed
+    assert managed_claude_rules(b"Other rules\n@AGENTS.md\n") == b"Other rules\n@AGENTS.md\n"
+    assert managed_claude_rules(b"").count(b"@AGENTS.md") == 1
+
+
+@pytest.mark.parametrize("broken", [
+    CLAUDE_START.encode() + b"\n",
+    CLAUDE_END.encode() + b"\n",
+    (CLAUDE_END + "\n" + CLAUDE_START).encode(),
+    (CLAUDE_START + "\n" + CLAUDE_START + "\n" + CLAUDE_END).encode(),
+])
+def test_malformed_claude_import_fails_before_any_workspace_changes(tmp_path, broken):
+    (tmp_path / "AGENTS.md").write_bytes(b"# Existing Codex rules\n")
+    (tmp_path / "CLAUDE.md").write_bytes(broken)
+    with pytest.raises(ValueError, match="CLAUDE.md"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# Existing Codex rules\n"
+    assert (tmp_path / "CLAUDE.md").read_bytes() == broken
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / ".codex").exists()
+
+
+def test_claude_import_refuses_symlink(tmp_path):
+    (tmp_path / "actual.md").write_text("keep")
+    (tmp_path / "CLAUDE.md").symlink_to(tmp_path / "actual.md")
+    with pytest.raises(ValueError, match="symlink"):
+        asyncio.run(install_workspace(tmp_path))
+    assert not (tmp_path / "AGENTS.md").exists()
