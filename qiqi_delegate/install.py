@@ -11,6 +11,8 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 from pathlib import Path
 
+from markdown_it import MarkdownIt
+
 from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
 
 START = "<!-- BEGIN HERDR-TASK-MCP RULES -->"
@@ -72,7 +74,7 @@ def managed_rules(existing: bytes) -> bytes:
         result = text + suffix + (newline if text else "") + block + newline
     return result.encode("utf-8")
 
-def _active_claude_import_lines(text: str) -> set[int]:
+def _conservative_claude_import_lines(text: str) -> set[int]:
     """Find standalone imports outside Markdown code and HTML comments.
 
     Record exact line offsets: another active import cannot validate an
@@ -167,6 +169,40 @@ def _active_claude_import_lines(text: str) -> set[int]:
             else:
                 i += 1
     return active
+
+
+def _active_claude_import_lines(text: str) -> set[int]:
+    """Verify candidate imports against CommonMark block/inline parsing.
+
+    The conservative lexical scanner rejects ambiguous nested HTML comments
+    and unmatched code spans. The CommonMark parser independently rejects
+    fenced/code-block imports, including continuation lines of list items
+    whose containers end before a new top-level fence begins.
+    """
+    candidates = _conservative_claude_import_lines(text)
+    if not candidates:
+        return set()
+    lines = text.splitlines(keepends=True)
+    starts = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+    confirmed = set()
+    for token in MarkdownIt("commonmark").parse(text):
+        if token.type != "inline" or not token.map:
+            continue
+        # Require actual text, not code_inline/html_inline/image content.
+        if not any(
+            child.type == "text" and "@AGENTS.md" in child.content
+            for child in (token.children or [])
+        ):
+            continue
+        first, last = token.map
+        for index in range(first, min(last, len(lines))):
+            if starts[index] in candidates:
+                confirmed.add(starts[index])
+    return confirmed
 
 
 def _has_active_claude_import(text: str) -> bool:
