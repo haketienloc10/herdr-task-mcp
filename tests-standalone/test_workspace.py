@@ -521,9 +521,21 @@ def test_managed_claude_import_inside_nested_code_is_rejected(before, after, err
 @pytest.mark.parametrize("unclosed", [
     b"\x60\nexample\n",
     b"\x60\x60\nexample\n",
-    b"- \x60\x60\x60md\n  example\n",
 ])
-def test_installer_rejects_unclosed_inline_or_list_code_without_partial_writes(tmp_path, unclosed):
+def test_installer_ends_unclosed_inline_span_at_new_paragraph(tmp_path, unclosed):
+    (tmp_path / "CLAUDE.md").write_bytes(unclosed)
+    asyncio.run(install_workspace(tmp_path))
+    installed = (tmp_path / "CLAUDE.md").read_bytes()
+    assert installed.startswith(unclosed)
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert installed.count(b"@AGENTS.md") == 1
+    # The blank separator starts a new Markdown paragraph. Reruns remain stable.
+    asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == installed
+
+
+def test_installer_rejects_unclosed_list_fence_without_partial_writes(tmp_path):
+    unclosed = b"- \x60\x60\x60md\n  example\n"
     (tmp_path / "CLAUDE.md").write_bytes(unclosed)
     with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
         asyncio.run(install_workspace(tmp_path))
