@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
+import tempfile
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
@@ -421,6 +423,97 @@ repositories: []
 #     path: ../backend
 """
 
+def _stage_install_file(root: Path, content: bytes, mode: int | None = None) -> Path:
+    """Allocate and fully write a replacement/rollback image before commit."""
+    fd, name = tempfile.mkstemp(prefix=".qiqi-install-", dir=root)
+    staged = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(staged, mode)
+        return staged
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+
+
+def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
+    """Stage everything before writes; restore all earlier files on failure.
+
+    Temporary files are on the workspace filesystem for atomic os.replace.
+    Backups are staged up front so rollback does not need free disk space.
+    This protects against ordinary I/O exceptions, not system crashes or
+    concurrent external writers.
+    """
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path] = {}
+    replaced: list[Path] = []
+    created_dirs: list[Path] = []
+    failed_restores: set[Path] = set()
+    try:
+        for destination, data in files.items():
+            if destination.exists():
+                if not destination.is_file():
+                    raise ValueError(f"expected regular install file: {destination}")
+                old_mode = stat.S_IMODE(destination.stat().st_mode)
+                # os.replace may bypass a file's read-only flag on POSIX if
+                # its parent directory is writable; honor user intent.
+                if not old_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+                    raise PermissionError(f"refusing read-only install file: {destination}")
+                old_data = destination.read_bytes()
+                if old_data == data:
+                    continue
+                backups[destination] = _stage_install_file(root, old_data, old_mode)
+            else:
+                old_mode = None
+            staged[destination] = _stage_install_file(root, data, old_mode)
+
+        for directory, mode in (
+            (root / ".codex", None),
+            (root / ".herdr-task-mcp", 0o700),
+        ):
+            if not directory.exists():
+                directory.mkdir(mode=mode or 0o777)
+                created_dirs.append(directory)
+            elif not directory.is_dir():
+                raise ValueError(f"expected install directory: {directory}")
+
+        for destination, replacement in staged.items():
+            os.replace(replacement, destination)
+            replaced.append(destination)
+    except BaseException as error:
+        restore_errors = []
+        for destination in reversed(replaced):
+            try:
+                if destination in backups:
+                    os.replace(backups[destination], destination)
+                else:
+                    destination.unlink()
+            except OSError as restore_error:
+                failed_restores.add(destination)
+                restore_errors.append(f"{destination}: {restore_error}")
+        for directory in reversed(created_dirs):
+            try:
+                directory.rmdir()
+            except OSError as restore_error:
+                restore_errors.append(f"{directory}: {restore_error}")
+        if restore_errors:
+            raise RuntimeError(
+                "workspace install failed and rollback was incomplete: "
+                + "; ".join(restore_errors)
+            ) from error
+        raise
+    finally:
+        for temporary in (*staged.values(), *(
+            backup for destination, backup in backups.items()
+            if destination not in failed_restores
+        )):
+            temporary.unlink(missing_ok=True)
+
+
 async def install_workspace(root: Path, python: Path | None = None,
                             herdr_session: str | None = None) -> dict:
     root = root.resolve(strict=True)
@@ -455,18 +548,18 @@ async def install_workspace(root: Path, python: Path | None = None,
     lead_new = managed_claude_rules(lead_old)
     c_new = codex_config(c_old, python, root, herdr_session=herdr_session)
     m_new = claude_config(m_old, python, root, herdr_session=herdr_session)
-    (root / ".codex").mkdir(exist_ok=True)
-    state = root / ".herdr-task-mcp"
-    state.mkdir(mode=0o700, exist_ok=True)
-    (state / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
-    agents.write_bytes(a_new)
-    claude_rules.write_bytes(lead_new)
-    codex.write_text(c_new, encoding="utf-8")
-    claude.write_text(m_new, encoding="utf-8")
+    files = {
+        agents: a_new,
+        claude_rules: lead_new,
+        codex: c_new.encode("utf-8"),
+        claude: m_new.encode("utf-8"),
+        root / ".herdr-task-mcp" / ".gitignore": b"*\n!.gitignore\n",
+    }
     for name, value in (("repos.yaml", REPOS), ("agent-routing.yaml", ROUTES)):
         path = root / name
         if not path.exists():
-            path.write_text(value, encoding="utf-8")
+            files[path] = value.encode("utf-8")
+    _commit_workspace_files(root, files)
     return {"workspace": str(root), "mcp": SERVER,
             "agents_marker": START, "python": str(python),
             "herdr_session": herdr_session}
