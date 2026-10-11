@@ -745,16 +745,18 @@ def test_setext_heading_and_real_paragraph_import_are_distinct():
     assert managed_claude_rules(existing) == existing
 
 
-def test_setext_heading_inside_managed_claude_block_fails_before_write(tmp_path):
+def test_setext_heading_inside_managed_claude_block_is_repaired(tmp_path):
     owned = (CLAUDE_START + "\n@AGENTS.md\n---\n" + CLAUDE_END + "\n").encode()
     (tmp_path / "AGENTS.md").write_bytes(b"# Existing lead rules\n")
     (tmp_path / "CLAUDE.md").write_bytes(owned)
-    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
-        asyncio.run(install_workspace(tmp_path))
-    assert (tmp_path / "CLAUDE.md").read_bytes() == owned
-    assert (tmp_path / "AGENTS.md").read_bytes() == b"# Existing lead rules\n"
-    assert not (tmp_path / ".codex").exists()
-    assert not (tmp_path / ".mcp.json").exists()
+    asyncio.run(install_workspace(tmp_path))
+    repaired = (tmp_path / "CLAUDE.md").read_bytes()
+    # Installer owns the entire marker block and replaces the Setext
+    # heading with a genuine standalone paragraph import.
+    assert repaired == (CLAUDE_START + "\n@AGENTS.md\n" + CLAUDE_END + "\n").encode()
+    assert (tmp_path / "AGENTS.md").read_bytes().startswith(b"# Existing lead rules\n")
+    asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == repaired
 
 
 def test_claude_import_preserves_user_content_and_is_idempotent():
