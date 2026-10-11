@@ -488,6 +488,54 @@ def test_installer_does_not_append_import_into_unclosed_markdown(tmp_path, unfin
     assert not (tmp_path / ".codex").exists()
 
 
+@pytest.mark.parametrize("example", [
+    b"- \x60\x60\x60md\n  @AGENTS.md\n  \x60\x60\x60\n",
+    b"1. ~~~md\n   @AGENTS.md\n   ~~~\n",
+    b"- - \x60\x60\x60md\n    @AGENTS.md\n    \x60\x60\x60\n",
+    b"\x60\x60\n@AGENTS.md\n\x60\x60\n",
+    b"Some text \x60\n@AGENTS.md\n\x60\n",
+])
+def test_claude_list_fences_and_multiline_spans_are_not_active_imports(example):
+    result = managed_claude_rules(example)
+    assert result.startswith(example)
+    assert result.count(CLAUDE_START.encode()) == 1
+    assert result.count(b"@AGENTS.md") == 2
+    assert managed_claude_rules(result) == result
+
+
+@pytest.mark.parametrize("before,after", [
+    (b"\x60\nExample line\n", b"\n\x60\n"),
+    (b"\x60\x60\nExample line\n", b"\n\x60\x60\n"),
+    (b"- \x60\x60\x60md\n  ", b"\n  \x60\x60\x60\n"),
+])
+def test_managed_claude_import_inside_nested_code_is_rejected(before, after):
+    owned = (CLAUDE_START + "\n@AGENTS.md\n" + CLAUDE_END).encode()
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        managed_claude_rules(before + owned + after)
+
+
+@pytest.mark.parametrize("unclosed", [
+    b"\x60\nexample\n",
+    b"\x60\x60\nexample\n",
+    b"- \x60\x60\x60md\n  example\n",
+])
+def test_installer_rejects_unclosed_inline_or_list_code_without_partial_writes(tmp_path, unclosed):
+    (tmp_path / "CLAUDE.md").write_bytes(unclosed)
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == unclosed
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_closed_multiline_code_span_allows_new_managed_import():
+    original = b"\x60\nnot an active import\n\x60\n"
+    result = managed_claude_rules(original)
+    assert result.startswith(original)
+    assert result.count(CLAUDE_START.encode()) == 1
+    assert managed_claude_rules(result) == result
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
