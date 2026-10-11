@@ -633,6 +633,8 @@ async def _graph_execute(
                 "{method,performed,outcome,artifact_ref}, and details. "
                 "Include EVERY unfinished/unverified/inaccessible task as unresolved_items "
                 "with id,kind,description,affected_requirement_ids,reason,attempted_methods,next_action. "
+                "For previously reported issues now resolved, include resolved_items: "
+                "[{id:discovered:<node_id>:<issue_id>,evidence:[{kind,repository,path,locator}],rationale}]. "
                 "Do not claim an unrun check passed or omit an unresolved issue. "
                 "If work is incomplete, say so clearly instead of returning success."
             )
@@ -740,6 +742,8 @@ async def reconcile_graph(
     result = graph_runtime.reconcile_graph(
         graph_run_id, authored, repository_names=runtime.repos().keys(),
         expected_revision=expected_revision,
+        requirement_map=requirement_map,
+        successor_map=successor_map,
     )
     if binding is not None:
         task_requests.bind_graph(
