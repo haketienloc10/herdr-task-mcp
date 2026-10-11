@@ -470,6 +470,11 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
             assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep"
             assert argv[argv.index("--allowedTools") + 1] == "Read,Glob,Grep"
             assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
+            assert "--strict-mcp-config" in argv
+            assert "--mcp-config" not in argv
+            assert "--settings" in argv
+            capture_settings = json.loads(argv[argv.index("--settings") + 1])
+            assert {"Stop", "StopFailure"} <= set(capture_settings["hooks"])
             assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
             assert "--disable-slash-commands" in argv
             assert "--skip-git-repo-check" not in argv
@@ -479,6 +484,8 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
     ("codex", ["--yolo"]),
     ("claude", ["--permission-mode", "plan"]),
     ("claude", list(CLAUDE_EVALUATOR_ARGS) + ["--dangerously-skip-permissions"]),
+    ("claude", [flag for flag in CLAUDE_EVALUATOR_ARGS if flag != "--strict-mcp-config"]),
+    ("claude", list(CLAUDE_EVALUATOR_ARGS) + ["--mcp-config", '{"mcpServers":{}}']),
     ("claude", [arg for arg in CLAUDE_EVALUATOR_ARGS if arg != "--restricted"]),
     ("claude", list(CLAUDE_EVALUATOR_ARGS[:-1])),
 ])
