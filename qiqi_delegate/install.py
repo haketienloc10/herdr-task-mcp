@@ -4,15 +4,24 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import stat
 import sys
+import tempfile
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 from pathlib import Path
 
+from markdown_it import MarkdownIt
+
+from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
+
 START = "<!-- BEGIN HERDR-TASK-MCP RULES -->"
 END = "<!-- END HERDR-TASK-MCP RULES -->"
+CLAUDE_START = "<!-- BEGIN HERDR-TASK-MCP CLAUDE IMPORT -->"
+CLAUDE_END = "<!-- END HERDR-TASK-MCP CLAUDE IMPORT -->"
 MCP_START = "# >>> qiqi-delegate MCP (managed)"
 MCP_END = "# <<< qiqi-delegate MCP (managed)"
 SERVER = "qiqi_delegate"
@@ -67,6 +76,189 @@ def managed_rules(existing: bytes) -> bytes:
         suffix = "" if not text else ("" if text.endswith(("\n", "\r")) else newline)
         result = text + suffix + (newline if text else "") + block + newline
     return result.encode("utf-8")
+
+def _conservative_claude_import_lines(text: str) -> set[int]:
+    """Find standalone imports outside Markdown code and HTML comments.
+
+    Record exact line offsets: another active import cannot validate an
+    inactive installer-owned block. This conservative scanner is not a full
+    CommonMark renderer; uncertain contexts must not authorize imports.
+    """
+    active: set[int] = set()
+    fence_char: str | None = None
+    fence_width = 0
+    fence_base_indent = 0
+    inline_ticks: int | None = None
+    comment_depth = 0
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        start = offset
+        offset += len(raw_line)
+        line = raw_line.rstrip("\r\n")
+        if fence_char is not None:
+            # CommonMark closers allow at most three columns of indentation
+            # relative to the container. A tab can advance to the next
+            # 4-column stop; it is not equivalent to a single space.
+            closing = re.fullmatch(
+                r"([ \t]*)" + re.escape(fence_char)
+                + "{" + str(fence_width) + r",}[ \t]*", line
+            )
+            if closing:
+                columns = len(closing.group(1).expandtabs(4))
+                if fence_base_indent <= columns <= fence_base_indent + 3:
+                    fence_char = None
+            continue
+
+        # Blank lines end Markdown paragraphs and unmatched inline-code spans.
+        # HTML comments, unlike inline spans, can continue past blank lines.
+        if not line.strip():
+            inline_ticks = None
+
+        if inline_ticks is None and not comment_depth:
+            candidate = line
+            list_prefix_length = 0
+            while True:
+                item = re.match(
+                    r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", candidate
+                )
+                if not item:
+                    break
+                list_prefix_length += item.end()
+                candidate = candidate[item.end():]
+            opener = re.match(r" {0,3}(\x60{3,}|~{3,})", candidate)
+            if opener:
+                fence_char = opener.group(1)[0]
+                fence_width = len(opener.group(1))
+                # List marker indentation is measured in *columns*, not
+                # characters. E.g. "-\\t" starts its content at column 4.
+                fence_base_indent = len(line[:list_prefix_length].expandtabs(4))
+                continue
+
+        if (
+            inline_ticks is None and not comment_depth
+            and re.fullmatch(r" {0,3}@AGENTS\.md[ \t]*", line)
+        ):
+            active.add(start)
+
+        # Process delimiters in source order: an HTML-comment opener inside
+        # inline code must not start a comment spanning subsequent lines.
+        i = 0
+        while i < len(line):
+            if comment_depth:
+                if line.startswith("<!--", i):
+                    comment_depth += 1
+                    i += 4
+                elif line.startswith("-->", i):
+                    comment_depth -= 1
+                    i += 3
+                else:
+                    i += 1
+            elif inline_ticks is None and line[i] == "\\" and i + 1 < len(line):
+                # Markdown escapes apply outside code spans only.
+                i += 2
+            elif line[i] == "\x60":
+                end = i + 1
+                while end < len(line) and line[end] == "\x60":
+                    end += 1
+                width = end - i
+                if inline_ticks is None:
+                    inline_ticks = width
+                elif inline_ticks == width:
+                    inline_ticks = None
+                i = end
+            elif inline_ticks is None and line.startswith("<!--", i):
+                comment_depth = 1
+                i += 4
+            else:
+                i += 1
+    return active
+
+
+def _active_claude_import_lines(text: str) -> set[int]:
+    """Verify candidate imports against CommonMark block/inline parsing.
+
+    The conservative lexical scanner rejects ambiguous nested HTML comments
+    and unmatched code spans. The CommonMark parser independently rejects
+    fenced/code-block imports, including continuation lines of list items
+    whose containers end before a new top-level fence begins.
+    """
+    candidates = _conservative_claude_import_lines(text)
+    if not candidates:
+        return set()
+    lines = text.splitlines(keepends=True)
+    starts = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+    confirmed = set()
+    tokens = MarkdownIt("commonmark").parse(text)
+    for index, token in enumerate(tokens):
+        # A top-level Setext heading also has an inline token at level 1.
+        # Only a real top-level paragraph may contain an active import.
+        # Requiring its immediate paragraph_open parent excludes headings,
+        # list continuations, HTML blocks and other Markdown containers.
+        if (
+            token.type != "inline"
+            or token.level != 1
+            or not token.map
+            or index == 0
+            or tokens[index - 1].type != "paragraph_open"
+            or tokens[index - 1].level != 0
+        ):
+            continue
+        # Require actual text, not code_inline/html_inline/image content.
+        if not any(
+            child.type == "text" and "@AGENTS.md" in child.content
+            for child in (token.children or [])
+        ):
+            continue
+        first, last = token.map
+        for index in range(first, min(last, len(lines))):
+            if starts[index] in candidates:
+                confirmed.add(starts[index])
+    return confirmed
+
+
+def _has_active_claude_import(text: str) -> bool:
+    """True only for an import that Claude can actually use."""
+    return bool(_active_claude_import_lines(text))
+
+
+def managed_claude_rules(existing: bytes) -> bytes:
+    """Import the shared AGENTS.md into Claude while preserving user content."""
+    text = existing.decode("utf-8")
+    starts, ends = text.count(CLAUDE_START), text.count(CLAUDE_END)
+    if (starts, ends) not in ((0, 0), (1, 1)):
+        raise ValueError("CLAUDE.md has malformed or duplicate qiqi_delegate markers; no changes written")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    block = CLAUDE_START + newline + "@AGENTS.md" + newline + CLAUDE_END
+    if starts:
+        a, b = text.index(CLAUDE_START), text.index(CLAUDE_END)
+        if b < a:
+            raise ValueError("CLAUDE.md marker ordering is invalid")
+        if (a and text[a - 1] not in "\r\n") or (
+            b + len(CLAUDE_END) < len(text)
+            and text[b + len(CLAUDE_END)] not in "\r\n"
+        ):
+            raise ValueError("CLAUDE.md markers must occupy complete lines")
+        result = text[:a] + block + text[b + len(CLAUDE_END):]
+    else:
+        # Preserve an existing active import, but not a code/example occurrence.
+        if _has_active_claude_import(text):
+            return existing
+        suffix = "" if not text else ("" if text.endswith(("\n", "\r")) else newline)
+        result = text + suffix + (newline if text else "") + block + newline
+    # Check the exact owned import, not just any other active import in the file.
+    import_start = result.index(CLAUDE_START) + len(CLAUDE_START) + len(newline)
+    if import_start not in _active_claude_import_lines(result):
+        raise ValueError(
+            "CLAUDE.md managed @AGENTS.md import is inactive inside a "
+            "Markdown code span/fence or HTML comment; move the managed block outside "
+            "that context before reinstalling"
+        )
+    return result.encode("utf-8")
+
 
 def _strip_own_section(text: str) -> str:
     count_start, count_end = text.count(MCP_START), text.count(MCP_END)
@@ -213,7 +405,12 @@ routes:
   claude-balanced:
     agent: claude
     args: ["--permission-mode", "auto"]
-"""
+  codex-evaluator:
+    agent: codex
+    args: ["--sandbox", "read-only"]
+  claude-evaluator:
+    agent: claude
+    args: """ + json.dumps(list(CLAUDE_EVALUATOR_ARGS)) + "\n"
 
 REPOS = """# Register existing Git roots relative to THIS workspace.
 # Child repositories: path: frontend. Sibling repositories: path: ../frontend.
@@ -226,6 +423,184 @@ repositories: []
 #   - name: backend
 #     path: ../backend
 """
+
+def _stage_install_file(directory: Path, content: bytes, mode: int | None = None) -> Path:
+    """Stage within the destination parent, retaining its creation semantics.
+
+    A new file uses O_CREAT with mode 0666 so the actual umask, setgid parent
+    and default ACL govern ownership and permissions as with a direct write.
+    Existing files instead receive their original metadata before commit.
+    """
+    if mode is None:
+        for _ in range(10):
+            staged = directory / (".qiqi-install-" + secrets.token_hex(16))
+            try:
+                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise FileExistsError(f"unable to allocate staging file in {directory}")
+    else:
+        fd, name = tempfile.mkstemp(prefix=".qiqi-install-", dir=directory)
+        staged = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(staged, mode)
+        return staged
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+
+
+def _stage_install_rollback(original: Path) -> Path:
+    """Hard-link the original inode inside its protected destination parent.
+
+    Placing backups in the workspace root could expose readable files from
+    restricted subdirectories. A direct link with an unpredictable name also
+    avoids the unlink-then-link gap of a temporary placeholder.
+    """
+    for _ in range(10):
+        backup = original.parent / (".qiqi-install-" + secrets.token_hex(16))
+        try:
+            os.link(original, backup)
+            return backup
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"unable to allocate rollback link in {original.parent}")
+
+
+def _preserve_install_metadata(original: Path, staged: Path) -> None:
+    """Clone and verify metadata before any target file can be replaced.
+
+    POSIX ACLs on Linux are xattrs. Refuse files on platforms where we cannot
+    inspect/copy them rather than silently changing their security metadata.
+    """
+    required = ("listxattr", "getxattr", "setxattr")
+    if not all(hasattr(os, name) for name in required):
+        raise ValueError(f"cannot safely preserve file xattrs: {original}")
+    source = original.stat()
+    target = staged.stat()
+    if (target.st_uid, target.st_gid) != (source.st_uid, source.st_gid):
+        os.chown(staged, source.st_uid, source.st_gid)
+    os.chmod(staged, stat.S_IMODE(source.st_mode))
+    # Explicitly copy all visible xattrs, including POSIX ACL/security attrs,
+    # then verify no source attributes were dropped or unexpected ones added.
+    source_attrs = set(os.listxattr(original))
+    for name in source_attrs:
+        os.setxattr(staged, name, os.getxattr(original, name))
+    if set(os.listxattr(staged)) != source_attrs:
+        raise ValueError(f"cannot safely reproduce file xattrs: {original}")
+    for name in source_attrs:
+        if os.getxattr(staged, name) != os.getxattr(original, name):
+            raise ValueError(f"cannot safely reproduce file xattr {name}: {original}")
+    verified = staged.stat()
+    if (
+        (verified.st_uid, verified.st_gid) != (source.st_uid, source.st_gid)
+        or stat.S_IMODE(verified.st_mode) != stat.S_IMODE(source.st_mode)
+    ):
+        raise ValueError(f"cannot safely reproduce file ownership/mode: {original}")
+
+
+def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
+    """Stage everything before writes; restore all earlier files on failure.
+
+    Temporary files and rollback hard links live in their respective
+    destination directories (including protected subdirectories), permitting
+    same-filesystem atomic os.replace without weakening parent access rules.
+    Rollback hard links retain the original inodes and security metadata;
+    staged replacements must reproduce that metadata before commit. This
+    protects against ordinary I/O exceptions, not crashes or concurrent writes.
+    """
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path] = {}
+    replaced: list[Path] = []
+    created_dirs: list[Path] = []
+    failed_restores: set[Path] = set()
+    try:
+        # Create parents before staging so all new files inherit the metadata
+        # of their actual destination directory, not the workspace root.
+        # No pre-existing file is replaced until all staging is successful.
+        for directory, mode in (
+            (root / ".codex", None),
+            (root / ".herdr-task-mcp", 0o700),
+        ):
+            if directory.is_symlink():
+                raise ValueError(f"refusing symlink: {directory}")
+            if not directory.exists():
+                directory.mkdir(mode=mode or 0o777)
+                created_dirs.append(directory)
+            elif not directory.is_dir():
+                raise ValueError(f"expected install directory: {directory}")
+
+        for destination, data in files.items():
+            # exists() follows symlinks and returns False for dangling ones.
+            # Reject all managed symlinks before inspecting or linking inodes.
+            if destination.is_symlink():
+                raise ValueError(f"refusing symlink: {destination}")
+            if destination.exists():
+                if not destination.is_file():
+                    raise ValueError(f"expected regular install file: {destination}")
+                old_mode = stat.S_IMODE(destination.stat().st_mode)
+                # os.replace may bypass a file's read-only flag on POSIX if
+                # its parent directory is writable; honor user intent.
+                if not old_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+                    raise PermissionError(f"refusing read-only install file: {destination}")
+                old_data = destination.read_bytes()
+                if old_data == data:
+                    continue
+                # A hard-linked backup preserves the original inode's entire
+                # metadata on rollback (including ownership and ACLs).
+                backups[destination] = _stage_install_rollback(destination)
+            else:
+                old_mode = None
+            staged[destination] = _stage_install_file(destination.parent, data, old_mode)
+            if destination in backups:
+                _preserve_install_metadata(destination, staged[destination])
+
+        for destination, replacement in staged.items():
+            os.replace(replacement, destination)
+            replaced.append(destination)
+    except BaseException as error:
+        restore_errors = []
+        for destination in reversed(replaced):
+            try:
+                if destination in backups:
+                    os.replace(backups[destination], destination)
+                else:
+                    destination.unlink()
+            except OSError as restore_error:
+                failed_restores.add(destination)
+                restore_errors.append(f"{destination}: {restore_error}")
+        # Staged files now live inside their destination parents. Remove
+        # uncommitted stages before attempting to remove newly made parents.
+        for temporary in staged.values():
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                restore_errors.append(f"{temporary}: {cleanup_error}")
+        for directory in reversed(created_dirs):
+            try:
+                directory.rmdir()
+            except OSError as restore_error:
+                restore_errors.append(f"{directory}: {restore_error}")
+        if restore_errors:
+            raise RuntimeError(
+                "workspace install failed and rollback was incomplete: "
+                + "; ".join(restore_errors)
+            ) from error
+        raise
+    finally:
+        for temporary in (*staged.values(), *(
+            backup for destination, backup in backups.items()
+            if destination not in failed_restores
+        )):
+            temporary.unlink(missing_ok=True)
+
 
 async def install_workspace(root: Path, python: Path | None = None,
                             herdr_session: str | None = None) -> dict:
@@ -240,13 +615,16 @@ async def install_workspace(root: Path, python: Path | None = None,
     if not root.is_dir():
         raise ValueError("workspace root must be a directory")
     agents = root / "AGENTS.md"
+    claude_rules = root / "CLAUDE.md"
     codex = root / ".codex" / "config.toml"
     claude = root / ".mcp.json"
-    for path in (agents, codex, claude, root / ".codex",
-                 root / ".herdr-task-mcp"):
+    for path in (agents, claude_rules, codex, claude, root / ".codex",
+                 root / ".herdr-task-mcp", root / ".herdr-task-mcp" / ".gitignore",
+                 root / "repos.yaml", root / "agent-routing.yaml"):
         if path.is_symlink():
             raise ValueError(f"refusing symlink: {path}")
     a_old = agents.read_bytes() if agents.exists() else b""
+    lead_old = claude_rules.read_bytes() if claude_rules.exists() else b""
     c_old = codex.read_text(encoding="utf-8") if codex.exists() else ""
     m_old = claude.read_text(encoding="utf-8") if claude.exists() else ""
     # Complete all validations before modifying any file.
@@ -256,19 +634,21 @@ async def install_workspace(root: Path, python: Path | None = None,
         else _existing_herdr_session(c_old, m_old)
     )
     a_new = managed_rules(a_old)
+    lead_new = managed_claude_rules(lead_old)
     c_new = codex_config(c_old, python, root, herdr_session=herdr_session)
     m_new = claude_config(m_old, python, root, herdr_session=herdr_session)
-    (root / ".codex").mkdir(exist_ok=True)
-    state = root / ".herdr-task-mcp"
-    state.mkdir(mode=0o700, exist_ok=True)
-    (state / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
-    agents.write_bytes(a_new)
-    codex.write_text(c_new, encoding="utf-8")
-    claude.write_text(m_new, encoding="utf-8")
+    files = {
+        agents: a_new,
+        claude_rules: lead_new,
+        codex: c_new.encode("utf-8"),
+        claude: m_new.encode("utf-8"),
+        root / ".herdr-task-mcp" / ".gitignore": b"*\n!.gitignore\n",
+    }
     for name, value in (("repos.yaml", REPOS), ("agent-routing.yaml", ROUTES)):
         path = root / name
         if not path.exists():
-            path.write_text(value, encoding="utf-8")
+            files[path] = value.encode("utf-8")
+    _commit_workspace_files(root, files)
     return {"workspace": str(root), "mcp": SERVER,
             "agents_marker": START, "python": str(python),
             "herdr_session": herdr_session}

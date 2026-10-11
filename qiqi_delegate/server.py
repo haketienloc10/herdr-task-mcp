@@ -129,8 +129,9 @@ mcp = MCPServer(
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
         "After all TaskGraph nodes are satisfied, graph_state complete only means "
         "execution complete: call start_final_evaluation with a deliberately configured "
-        "Codex --sandbox read-only route, get_final_evaluation, and only then finalize_graph "
-        "with a current independently evaluated PASS. Peer reports and Lead ACCEPT are "
+        "safe Codex or restricted Claude evaluator route, get_final_evaluation, "
+        "and only then finalize_graph with a current independently evaluated PASS. "
+        "Peer reports and Lead ACCEPT are "
         "not substitutes for final source verification. "
         "Use one TaskPacket schema for analysis, coding, testing and documentation; "
         "tailor acceptance_criteria and constraints to the objective, including mixed tasks. "
@@ -527,7 +528,7 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
 async def start_final_evaluation(
     graph_run_id: str, route: str, expected_revision: int,
 ) -> dict[str, Any]:
-    """One fresh, read-only Codex Evaluator across ALL TaskGraph repositories.
+    """One fresh, read-only Codex or restricted Claude Evaluator across ALL TaskGraph repositories.
 
     Runs only on completed context-bound graphs. Refuses --yolo routes;
     source snapshots include dirty/untracked files and are never live Git roots.

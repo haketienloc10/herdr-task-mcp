@@ -35,6 +35,7 @@ Installer tạo hoặc cập nhật:
 ~~~text
 qiqi-control/
 ├── AGENTS.md
+├── CLAUDE.md
 ├── .codex/config.toml
 ├── .mcp.json
 ├── repos.yaml
@@ -43,14 +44,15 @@ qiqi-control/
     └── .gitignore
 ~~~
 
-- `AGENTS.md` chứa quy tắc Lead trong cặp marker do installer quản lý.
+- `AGENTS.md` chứa quy tắc Lead dùng chung trong cặp marker do installer quản lý.
+- `CLAUDE.md` import `@AGENTS.md` để Claude Lead dùng cùng quy tắc; installer giữ nguyên nội dung khác và không coi ví dụ trong fenced code (kể cả trong list), multiline inline-code spans hoặc HTML comments là import có hiệu lực. Nếu **managed block** nằm trong các ngữ cảnh này, hoặc một code span/fence/comment chưa đóng khiến import mới không thể kích hoạt, installer báo lỗi trước khi ghi file; hãy di chuyển/đóng khối Markdown rồi chạy lại.
 - `.codex/config.toml` đăng ký MCP `qiqi_delegate` cho Codex.
 - `.mcp.json` đăng ký MCP `qiqi_delegate` cho Claude.
 - `repos.yaml` liệt kê Git repository được phép nhận việc.
 - `agent-routing.yaml` định nghĩa cách khởi động Peer.
 - `.herdr-task-mcp/` giữ SQLite và trạng thái cục bộ.
 
-Installer chỉ cập nhật vùng marker trong `AGENTS.md`. Installer kiểm tra cấu hình trước khi ghi. Không sửa các Git repository được giao việc.
+Installer chỉ cập nhật vùng marker trong `AGENTS.md` và `CLAUDE.md` (hoặc giữ nguyên import `@AGENTS.md` đã có). Để tránh công nhận nhầm import trong list/code, installer xác minh bằng parser **CommonMark** (`markdown-it-py`) cùng bộ kiểm tra fail-closed; khi hai cách kiểm tra không thống nhất, installer từ chối trước khi ghi thay vì coi import là hợp lệ. Đối với lỗi I/O thông thường, installer stage file thay thế và tạo hard-link inode cũ làm bản khôi phục **ngay trong thư mục đích tương ứng** trước khi ghi đè, để không làm lộ nội dung từ thư mục được bảo vệ ra workspace root. File thay thế phải sao chép và xác minh quyền, UID/GID và extended attributes (bao gồm POSIX ACL được lưu qua xattr); nếu không thể bảo toàn metadata thì từ chối trước khi ghi. Nếu commit một file sau đó thất bại, installer phục hồi các inode gốc. File mới được stage trong thư mục đích để kế thừa group, default ACL và quyền tạo file thông thường (0666 & umask), kể cả thư mục setgid; installer từ chối managed symlink, bao gồm `.herdr-task-mcp/.gitignore`. Không cam kết giao dịch xuyên qua mất điện, lỗi hệ thống hoặc ghi đồng thời từ tiến trình khác. Không sửa các Git repository được giao việc.
 
 Nếu cần Herdr session riêng, chạy:
 
@@ -97,6 +99,12 @@ routes:
   claude-balanced:
     agent: claude
     args: ["--permission-mode", "auto"]
+  codex-evaluator:
+    agent: codex
+    args: ["--sandbox", "read-only"]
+  claude-evaluator:
+    agent: claude
+    args: ["--restricted", "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep", "--disallowedTools", "mcp__*", "--strict-mcp-config", "--disable-slash-commands"]
 ~~~
 
 Trong lời gọi MCP, truyền **tên route** như `codex-balanced`. Không truyền `codex` thay cho tên route.
@@ -335,18 +343,28 @@ including cross-module contracts, before delivery is finalized.
    ineligible for independent final PASS; their old APIs remain usable.
 2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
    `graph_state="complete"` remains an execution-only state, not a final PASS.
-3. Configure a dedicated safe Codex route in workspace `agent-routing.yaml`:
-   
-   ```yaml
-   routes:
-     codex-evaluator:
-       agent: codex
-       args: ["--sandbox", "read-only"]
-   ```
+3. Chọn route evaluator riêng trong `agent-routing.yaml`. Workspace mới tạo sẵn
+   `codex-evaluator` và `claude-evaluator` (xem phần khai báo route). Workspace
+   đã cài phải thêm route thủ công vì installer không ghi đè `agent-routing.yaml`.
 
-   Final Evaluation fails closed for `--yolo`, Claude and arbitrary CLI/config
-   overrides. This route must genuinely enforce read-only agent execution.
-4. Call `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`.
+   - Codex: chỉ chấp nhận `--sandbox read-only`.
+   - Claude: chỉ chấp nhận đúng profile `--restricted`,
+     `--permission-mode dontAsk`, `--tools Read,Glob,Grep`,
+     `--allowedTools Read,Glob,Grep`, `--disallowedTools mcp__*`,
+     `--strict-mcp-config` (không có `--mcp-config`) và
+     `--disable-slash-commands`. Yêu cầu Claude Code từ phiên bản `2.1.248`
+     (có `--restricted`); bản cũ sẽ không khởi động evaluator.
+
+   Claude evaluator chỉ được gọi tool đọc file, chặn MCP tool calls và không
+   nạp MCP server từ cấu hình user/project thông thường. `--disallowedTools`
+   **không ngăn server khởi động**; `--strict-mcp-config` mới giới hạn nguồn
+   cấu hình MCP. Một số chính sách managed MCP/hook cấp hệ thống có thể có
+   quyền ưu tiên riêng. Đây là ràng buộc ở tầng Claude CLI, **không phải
+   OS-level read-only sandbox**. Không chạy evaluator với untrusted managed
+   hooks/chính sách cục bộ có thể thực hiện side effect. Runtime từ chối
+   cờ thiếu, thừa hoặc thay đổi thứ tự.
+4. Gọi `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`
+   hoặc đổi route thành `"claude-evaluator"`.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
    **one fresh native Evaluator session** with snapshot CWD + `--add-dir`
@@ -566,7 +584,8 @@ GitHub Actions chạy test trên Python **3.10, 3.12 và 3.13**. Workflow nằm 
 
 | Đường dẫn | Vai trò |
 |---|---|
-| `qiqi_delegate/install.py` | Tạo cấu hình MCP và quy tắc workspace |
+| `qiqi_delegate/install.py` | Tạo cấu hình MCP và quy tắc Lead dùng chung cho Claude/Codex |
+| `qiqi_delegate/evaluator_routes.py` | Profile CLI an toàn cho Codex/Claude Final Evaluator |
 | `qiqi_delegate/server.py` | Khai báo MCP tools |
 | `qiqi_delegate/core.py` | Kiểm tra TaskPacket và phân tích native capture |
 | `qiqi_delegate/result_hook.py` | Ghi sự kiện native Stop |

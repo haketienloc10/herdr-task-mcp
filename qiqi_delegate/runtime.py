@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 import yaml
 
+from qiqi_delegate.evaluator_routes import validate_evaluator_route
 from qiqi_delegate.core import (
     TaskPacket, render_task_prompt, codex_stop_hook_hash,
     codex_session_hook_key, load_capture_events, resolve_capture_events,
@@ -550,18 +551,12 @@ class DelegateRuntime:
                    root.resolve() in repos.values()
                    for root in evaluation_roots.values()):
                 raise ValueError("unsafe evaluation snapshot root")
-            # Prompt-only no-write is not protection. Reject unsafe Herdr
-            # routes: allow a deliberately configured Codex read-only sandbox
-            # and disallow arbitrary config overrides and bypass flags.
-            if adapter != "codex" or args not in (
-                ["--sandbox", "read-only"],
-                ["--sandbox=read-only"],
-            ):
-                raise ValueError(
-                    "Final Evaluator requires a configured Codex route with "
-                    "exactly --sandbox read-only and no --yolo/overrides"
-                )
-            args = list(args) + ["--skip-git-repo-check"]
+            # Revalidate before the native launch. Untrusted CLI overrides
+            # cannot bypass the Codex sandbox or Claude restricted profile.
+            validate_evaluator_route(adapter, args)
+            args = list(args)
+            if adapter == "codex":
+                args.append("--skip-git-repo-check")
             for name in evaluation_repositories:
                 if name != repository:
                     args += ["--add-dir", str(evaluation_roots[name])]

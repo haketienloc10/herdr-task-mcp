@@ -8,6 +8,7 @@ import pytest
 
 from test_task_readiness import workspace
 from qiqi_delegate.final_eval import FinalEvaluationCoordinator
+from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS, validate_evaluator_route
 from qiqi_delegate.final_eval_snapshot import (
     EvaluationSnapshot, inspect_roots, manifest_digest,
 )
@@ -28,7 +29,11 @@ def setup_graph(tmp_path, *, multi=True, with_request=True):
         'routes:\n  codex-balanced:\n    agent: codex\n'
         '    args: ["--yolo"]\n'
         '  codex-evaluator:\n    agent: codex\n'
-        '    args: ["--sandbox", "read-only"]\n', encoding="utf-8",
+        '    args: ["--sandbox", "read-only"]\n'
+        '  claude-evaluator:\n    agent: claude\n'
+        f'    args: {json.dumps(list(CLAUDE_EVALUATOR_ARGS))}\n'
+        '  claude-unsafe:\n    agent: claude\n'
+        '    args: ["--permission-mode", "plan"]\n', encoding="utf-8",
     )
     graph_rt = GraphRuntime(
         GraphRuntimeStore(runtime.db),
@@ -113,7 +118,8 @@ def report(manifest, *, valid=True, verdict="pass"):
     }
 
 
-def test_one_fresh_cross_repo_evaluation_and_finalize(tmp_path, monkeypatch):
+@pytest.mark.parametrize("route", ["codex-evaluator", "claude-evaluator"])
+def test_one_fresh_cross_repo_evaluation_and_finalize(tmp_path, monkeypatch, route):
     runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
     seen = []
     original_backend = (runtime.repos()["backend"] / "orders.py").read_bytes()
@@ -134,14 +140,14 @@ def test_one_fresh_cross_repo_evaluation_and_finalize(tmp_path, monkeypatch):
             db.execute(
                 "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
                 ("final-native-turn", "native-evaluator", "backend",
-                 "codex-evaluator", "settled", body, 123),
+                 route, "settled", body, 123),
             )
         return {"state": "settled", "turn_id": "final-native-turn",
                 "agent_response": body}
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
     revision = graph_rt.get_graph(gid)["revision"]
-    outcome = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
+    outcome = asyncio.run(coordinator.start(gid, route, revision))
     assert outcome["status"] == "passed"
     assert len(seen) == 1
     assert outcome["is_current"] is True
@@ -187,8 +193,10 @@ def test_snapshots_include_untracked_work_and_stale_pass_cannot_finalize(tmp_pat
 def test_unsafe_route_and_unbound_graph_cannot_start(tmp_path):
     _runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
     revision = graph_rt.get_graph(gid)["revision"]
-    with pytest.raises(ValueError, match="requires Codex route"):
+    with pytest.raises(ValueError, match="requires a safe Codex or Claude"):
         asyncio.run(coordinator.start(gid, "codex-balanced", revision))
+    with pytest.raises(ValueError, match="requires a safe Codex or Claude"):
+        asyncio.run(coordinator.start(gid, "claude-unsafe", revision))
     assert coordinator.store.latest(gid) is None
     other = tmp_path / "other"
     other.mkdir()
@@ -392,8 +400,9 @@ def test_duplicate_active_evaluation_does_not_dispatch_again(tmp_path, monkeypat
 
 
 
+@pytest.mark.parametrize("route", ["codex-evaluator", "claude-evaluator"])
 def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, route,
 ):
     import qiqi_delegate.runtime as runtime_module
     from qiqi_delegate.core import build_task_packet
@@ -406,7 +415,7 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
     with EvaluationSnapshot(repos) as snap:
         reserved, _created = coordinator.store.reserve(
             gid, graph_revision, binding["request_id"],
-            binding["request_revision"], "codex-evaluator",
+            binding["request_revision"], route,
             snap.manifest, snap.digest,
         )
         eid = reserved["evaluation_id"]
@@ -436,7 +445,7 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
         monkeypatch.setattr(runtime, "_run", fake_run)
         with pytest.raises(RuntimeError, match="without launching"):
             asyncio.run(runtime.delegate(
-                repository="backend", route="codex-evaluator",
+                repository="backend", route=route,
                 packet=build_task_packet(
                     objective="Independent review",
                     scope=["backend", "frontend"],
@@ -451,6 +460,35 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
         argv = captured["argv"]
         assert argv[argv.index("--add-dir") + 1] == str(snap.paths["frontend"])
         assert str(repos["frontend"]) not in argv
-        assert "--sandbox" in argv
-        assert argv[argv.index("--sandbox") + 1] == "read-only"
+        assert captured["adapter"] == ("codex" if route == "codex-evaluator" else "claude")
         assert "--yolo" not in argv
+        if route == "codex-evaluator":
+            assert argv[argv.index("--sandbox") + 1] == "read-only"
+            assert "--skip-git-repo-check" in argv
+        else:
+            assert "--restricted" in argv
+            assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep"
+            assert argv[argv.index("--allowedTools") + 1] == "Read,Glob,Grep"
+            assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
+            assert "--strict-mcp-config" in argv
+            assert "--mcp-config" not in argv
+            assert "--settings" in argv
+            capture_settings = json.loads(argv[argv.index("--settings") + 1])
+            assert {"Stop", "StopFailure"} <= set(capture_settings["hooks"])
+            assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+            assert "--disable-slash-commands" in argv
+            assert "--skip-git-repo-check" not in argv
+
+
+@pytest.mark.parametrize("adapter,args", [
+    ("codex", ["--yolo"]),
+    ("claude", ["--permission-mode", "plan"]),
+    ("claude", list(CLAUDE_EVALUATOR_ARGS) + ["--dangerously-skip-permissions"]),
+    ("claude", [flag for flag in CLAUDE_EVALUATOR_ARGS if flag != "--strict-mcp-config"]),
+    ("claude", list(CLAUDE_EVALUATOR_ARGS) + ["--mcp-config", '{"mcpServers":{}}']),
+    ("claude", [arg for arg in CLAUDE_EVALUATOR_ARGS if arg != "--restricted"]),
+    ("claude", list(CLAUDE_EVALUATOR_ARGS[:-1])),
+])
+def test_evaluator_route_profiles_reject_unsafe_or_modified_args(adapter, args):
+    with pytest.raises(ValueError, match="unsafe route or CLI overrides"):
+        validate_evaluator_route(adapter, args)

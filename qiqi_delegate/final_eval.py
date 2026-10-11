@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.core import build_task_packet
+from qiqi_delegate.evaluator_routes import validate_evaluator_route
 from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot, inspect_roots, manifest_digest
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from qiqi_delegate.runtime import AgentStartupBlocked
@@ -241,16 +242,9 @@ class FinalEvaluationCoordinator:
         graph, authored, binding, task, names, roots = self._eligible(
             graph_run_id, expected_revision,
         )
-        # Check route *before* reservation; --yolo and unknown configurations
-        # cannot evaluate production source with sufficient isolation.
+        # Require an exact safe profile before reserving evaluation.
         adapter, args = self.runtime.route(route)
-        if adapter != "codex" or args not in (
-            ["--sandbox", "read-only"], ["--sandbox=read-only"],
-        ):
-            raise ValueError(
-                "Final Evaluation requires Codex route args ['--sandbox','read-only']; "
-                "unsafe route or --yolo is forbidden"
-            )
+        validate_evaluator_route(adapter, args)
         with EvaluationSnapshot(roots) as snap:
             source_material = self._materialize_task_sources(
                 task, snap.paths[names[0]],
