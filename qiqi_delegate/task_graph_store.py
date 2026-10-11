@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.core import build_task_packet
+from qiqi_delegate import quality
 from qiqi_delegate.task_graph import GraphNode, TaskGraph
 from qiqi_delegate.task_graph_scheduler import GraphSnapshot, NodeState, derive_graph_state
 
@@ -545,6 +546,7 @@ class GraphRuntimeStore:
         dispositions: tuple[dict[str, Any], ...],
         decision_node_ids: tuple[str, ...] = (),
         retry_plans: dict[str, dict[str, Any]] | None = None,
+        quality_updates: tuple[dict[str, Any], ...] = (),
     ) -> None:
         """Persist Lead decisions and pending retry intent in one SQLite transaction."""
         with self._connect() as conn:
@@ -618,6 +620,11 @@ class GraphRuntimeStore:
                     "INSERT INTO graph_retry_plans(graph_run_id, node_id, plan_json, updated_at_ns) "
                     "VALUES (?, ?, ?, ?)",
                     (graph_run_id, node_id, _result_json(plan), time.time_ns()),
+                )
+            for update in quality_updates:
+                quality.persist_decision(
+                    conn, graph_run_id, update["node_id"], update["attempt_id"],
+                    update["action"], update["report"], update["reviews"],
                 )
             for decision in dispositions:
                 conn.execute(
