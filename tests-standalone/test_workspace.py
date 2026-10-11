@@ -594,6 +594,74 @@ def test_legal_top_level_fence_closers_allow_import(closer):
     assert managed_claude_rules(existing) == existing
 
 
+@pytest.mark.parametrize("existing", [
+    b"\x60\n\n@AGENTS.md\n",
+    b"\x60\x60\n  \n@AGENTS.md\n",
+    b"\x60 before paragraph break\n\n@AGENTS.md\n",
+])
+def test_paragraph_break_ends_inline_code_before_real_import(existing):
+    # Unmatched code ticks are not active across a blank paragraph separator.
+    assert managed_claude_rules(existing) == existing
+
+
+@pytest.mark.parametrize("example", [
+    b"\x60\n\n<!--\n\x60\n@AGENTS.md\n-->\n",
+    b"\x60\x60\n\n<!--\n\x60\x60\n@AGENTS.md\n-->\n",
+    b"\x60\n  \n<!--\n\x60\n@AGENTS.md\n-->\n",
+])
+def test_paragraph_break_does_not_hide_subsequent_html_comment(example):
+    # The import is a commented example. A fresh active managed block is needed.
+    installed = managed_claude_rules(example)
+    assert installed.startswith(example)
+    assert installed.count(b"@AGENTS.md") == 2
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert managed_claude_rules(installed) == installed
+
+
+def test_paragraph_break_does_not_clear_real_html_comment():
+    example = b"<!--\n\n@AGENTS.md\n-->\n"
+    installed = managed_claude_rules(example)
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert installed.startswith(example)
+
+
+@pytest.mark.parametrize("list_start,fake_closer,real_closer", [
+    (b"-\t\x60\x60\x60md\n", b"  \x60\x60\x60\n", b"    \x60\x60\x60\n"),
+    (b"1.\t~~~md\n", b" \x7e\x7e\x7e\n", b"    ~~~\n"),
+    (b"- \t\x60\x60\x60md\n", b"  \x60\x60\x60\n", b"    \x60\x60\x60\n"),
+])
+def test_tab_list_indent_cannot_close_fence_early(list_start, fake_closer, real_closer):
+    example = list_start + fake_closer + b"@AGENTS.md\n" + real_closer
+    installed = managed_claude_rules(example)
+    assert installed.startswith(example)
+    assert installed.count(b"@AGENTS.md") == 2
+    assert installed.count(CLAUDE_START.encode()) == 1
+    assert managed_claude_rules(installed) == installed
+
+
+@pytest.mark.parametrize("list_start,closing", [
+    (b"-\t\x60\x60\x60md\n", b"    \x60\x60\x60\n"),
+    (b"1.\t~~~md\n", b"\t~~~\n"),
+    (b"- \t\x60\x60\x60md\n", b"    \x60\x60\x60\n"),
+])
+def test_tab_list_indent_with_real_closer_allows_active_import(list_start, closing):
+    existing = list_start + closing + b"@AGENTS.md\n"
+    assert managed_claude_rules(existing) == existing
+
+
+def test_tab_list_fence_inactive_marked_import_fails_without_writes(tmp_path):
+    owned = (CLAUDE_START + "\n@AGENTS.md\n" + CLAUDE_END).encode()
+    existing = b"-\t\x60\x60\x60md\n  \x60\x60\x60\n" + owned + b"\n    \x60\x60\x60\n"
+    (tmp_path / "CLAUDE.md").write_bytes(existing)
+    (tmp_path / "AGENTS.md").write_bytes(b"# Custom rules\n")
+    with pytest.raises(ValueError, match="managed @AGENTS.md import is inactive"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "CLAUDE.md").read_bytes() == existing
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# Custom rules\n"
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+
+
 def test_claude_import_preserves_user_content_and_is_idempotent():
     original = b"# User Claude rules\r\nDo not modify.  \r\n"
     managed = managed_claude_rules(original)
