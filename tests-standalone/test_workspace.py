@@ -221,6 +221,105 @@ def test_installer_enables_default_agent_flags_without_overwriting_existing_rout
     assert rt.route("claude-balanced") == ("claude", [])
 
 
+@pytest.mark.parametrize("failure", ["CLAUDE.md", ".mcp.json", ".herdr-task-mcp/.gitignore"])
+def test_install_rolls_back_all_files_when_later_replace_fails(tmp_path, monkeypatch, failure):
+    # All old files must be restored, even when the failure occurs after
+    # earlier atomic replacements completed.
+    agent = tmp_path / "AGENTS.md"
+    lead = tmp_path / "CLAUDE.md"
+    agent.write_bytes(b"# existing AGENTS policy\n")
+    lead.write_bytes(b"# existing CLAUDE policy\n")
+    old_agent, old_lead = agent.read_bytes(), lead.read_bytes()
+    import qiqi_delegate.install as installer
+    real_replace = installer.os.replace
+    failed = False
+
+    def failing_replace(source, destination):
+        nonlocal failed
+        if Path(destination) == tmp_path / failure and not failed:
+            failed = True
+            raise OSError("injected I/O failure during replace")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(installer.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="injected I/O failure"):
+        asyncio.run(install_workspace(tmp_path))
+    assert failed
+    assert agent.read_bytes() == old_agent
+    assert lead.read_bytes() == old_lead
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".herdr-task-mcp").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / "repos.yaml").exists()
+    assert not (tmp_path / "agent-routing.yaml").exists()
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
+def test_install_restore_existing_codex_and_claude_config_on_last_replace_failure(tmp_path, monkeypatch):
+    # A failed update to an existing workspace must retain every prior byte.
+    asyncio.run(install_workspace(tmp_path))
+    originals = {
+        name: (tmp_path / name).read_bytes()
+        for name in ("AGENTS.md", "CLAUDE.md", ".mcp.json",
+                     ".codex/config.toml", ".herdr-task-mcp/.gitignore")
+    }
+    import qiqi_delegate.install as installer
+    real_replace = installer.os.replace
+    failed = False
+
+    def failing_replace(source, destination):
+        nonlocal failed
+        if Path(destination) == tmp_path / ".mcp.json" and not failed:
+            failed = True
+            raise OSError("simulated ENOSPC")
+        return real_replace(source, destination)
+
+    # Force updates to all four managed files so the rollback needs backups.
+    monkeypatch.setattr(installer.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="simulated ENOSPC"):
+        asyncio.run(install_workspace(tmp_path, herdr_session="different-session"))
+    assert failed
+    for name, old in originals.items():
+        assert (tmp_path / name).read_bytes() == old
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
+def test_install_refuses_readonly_claude_before_any_write(tmp_path):
+    agent = tmp_path / "AGENTS.md"
+    lead = tmp_path / "CLAUDE.md"
+    agent.write_bytes(b"# preserved AGENTS\n")
+    lead.write_bytes(b"# preserved CLAUDE\n")
+    lead.chmod(0o444)
+    with pytest.raises(PermissionError, match="read-only"):
+        asyncio.run(install_workspace(tmp_path))
+    assert agent.read_bytes() == b"# preserved AGENTS\n"
+    assert lead.read_bytes() == b"# preserved CLAUDE\n"
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".herdr-task-mcp").exists()
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
+def test_install_stage_failure_leaves_files_and_directories_intact(tmp_path, monkeypatch):
+    agent = tmp_path / "AGENTS.md"
+    agent.write_bytes(b"# Existing shared Lead policy\n")
+    import qiqi_delegate.install as installer
+    stage = installer._stage_install_file
+
+    def failing_stage(root, content, mode=None):
+        if b"<!-- BEGIN HERDR-TASK-MCP CLAUDE IMPORT -->" in content:
+            raise OSError("simulated ENOSPC while staging")
+        return stage(root, content, mode)
+
+    monkeypatch.setattr(installer, "_stage_install_file", failing_stage)
+    with pytest.raises(OSError, match="simulated ENOSPC while staging"):
+        asyncio.run(install_workspace(tmp_path))
+    assert agent.read_bytes() == b"# Existing shared Lead policy\n"
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".herdr-task-mcp").exists()
+    assert not list(tmp_path.glob(".qiqi-install-*"))
+
+
 def test_installer_preserves_uv_venv_python_symlink_and_repairs_prior_config(tmp_path: Path):
     """A venv Python symlink must not be resolved to uv's base interpreter."""
     venv_bin = tmp_path / "tools" / "qiqi-venv" / "bin"
