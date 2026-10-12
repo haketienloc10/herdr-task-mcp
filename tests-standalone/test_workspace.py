@@ -144,6 +144,79 @@ def test_task_type_policy_stays_aligned_across_three_surfaces():
                 )
 
 
+def test_lead_decomposition_policy_is_aligned_across_surfaces():
+    root = Path(__file__).resolve().parents[1]
+    server_ast = ast.parse((root / "qiqi_delegate" / "server.py").read_text(encoding="utf-8"))
+    mcp_call = next(
+        node.value for node in server_ast.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "mcp" for target in node.targets)
+    )
+    instructions = ast.literal_eval(
+        next(keyword.value for keyword in mcp_call.keywords if keyword.arg == "instructions")
+    )
+    surfaces = {
+        "AGENTS": managed_rules(b"").decode("utf-8"),
+        "MCP": instructions,
+        "README": (root / "README.md").read_text(encoding="utf-8"),
+    }
+    expected = {
+        "AGENTS": (
+            "Lead chọn `SINGLE_TASK` (một Peer) hoặc `MULTI_TASK`",
+            "Readiness `direct` chỉ xác nhận đủ điều kiện giao việc",
+            "Với coding, bắt buộc `MULTI_TASK`",
+            "Không chia theo module, layer hoặc file",
+            "Với analysis, chỉ chia câu hỏi",
+            "Giữ một Peer để truy vết một flow trong cùng Git root",
+            "Mọi `repo_task` chỉ làm việc trong một Git root",
+            "kể cả testing/documentation-only",
+            "Với analysis xuyên root đã `direct`, giao task từng root",
+            "chỉ dùng Discovery nếu có blocker và assessment phù hợp",
+            "không gọi Discovery khi assessment `direct`",
+            "Không bắt buộc chia theo kết quả chức năng cho review",
+        ),
+        "MCP": (
+            "choose SINGLE_TASK (one Peer) or MULTI_TASK",
+            "readiness direct means actionable",
+            "MUST choose MULTI_TASK",
+            "do not split by module, layer or file",
+            "Each repo_task accesses only one Git root",
+            "testing-only and documentation-only",
+            "For actionable multi-root analysis",
+            "synthesize captured evidence as Lead",
+            "do not use delegate_discovery for readiness direct",
+            "only when assessment has blockers",
+            "need no functional decomposition",
+        ),
+        "README": (
+            "Lead chọn `SINGLE_TASK` (một Peer) hoặc `MULTI_TASK`",
+            "Readiness `direct` chỉ cho phép giao việc",
+            "Bắt buộc `MULTI_TASK`",
+            "Không chia theo module, layer hoặc file",
+            "Mọi `repo_task` chỉ dùng một Git root",
+            "kể cả testing-only và documentation-only",
+            "Với analysis đã `direct`, giao từng root",
+            "assessment là `targeted_discovery` hoặc `full_discovery` và có blocker",
+            "giới hạn Git root vẫn áp dụng",
+        ),
+    }
+    for surface, snippets in expected.items():
+        normalized = " ".join(surfaces[surface].casefold().split())
+        for snippet in snippets:
+            assert " ".join(snippet.casefold().split()) in normalized, (
+                f"Missing decomposition rule on {surface}: {snippet}"
+            )
+
+    # Readiness cannot imply a single Peer: this was the original PR review finding.
+    for source in ("AGENTS", "README"):
+        for misleading in ("assessment DIRECT", "giao DIRECT", "→ DIRECT"):
+            assert misleading not in surfaces[source]
+    readme = surfaces["README"]
+    assert "### Ví dụ A: Yêu cầu rõ, không document → readiness `direct`" in readme
+    assert "### Ví dụ C: Context inline → readiness `direct`" in readme
+    assert "readiness vẫn là `direct`. Lead phải chọn `MULTI_TASK`" in readme
+
+
 @pytest.mark.parametrize("broken", [
     b"<!-- BEGIN HERDR-TASK-MCP RULES -->\n",
     b"<!-- END HERDR-TASK-MCP RULES -->\n",
