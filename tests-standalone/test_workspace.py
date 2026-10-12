@@ -144,6 +144,66 @@ def test_task_type_policy_stays_aligned_across_three_surfaces():
                 )
 
 
+
+def test_lead_decomposition_policy_is_aligned_across_surfaces():
+    root = Path(__file__).resolve().parents[1]
+    server_ast = ast.parse((root / "qiqi_delegate" / "server.py").read_text(encoding="utf-8"))
+    mcp_call = next(
+        node.value for node in server_ast.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "mcp" for target in node.targets)
+    )
+    instructions = ast.literal_eval(
+        next(keyword.value for keyword in mcp_call.keywords if keyword.arg == "instructions")
+    )
+    surfaces = {
+        "AGENTS": managed_rules(b"").decode("utf-8"),
+        "MCP": instructions,
+        "README": (root / "README.md").read_text(encoding="utf-8"),
+    }
+    expected = {
+        "AGENTS": (
+            "Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE`",
+            "Readiness `direct` không quyết định cách chia task",
+            "Với coding, bắt buộc `DECOMPOSE`",
+            "Không chia mặc định theo module, layer hoặc file",
+            "Với analysis, chỉ chia",
+            "Với Discovery, ưu tiên một `delegate_discovery`",
+            "đánh giá lại readiness sau mỗi lượt",
+            "Chỉ khai báo `depends_on` cho dependency thực",
+            "Không áp chính sách phân rã này cho review, testing-only hoặc documentation-only",
+        ),
+        "MCP": (
+            "choose DIRECT (one Peer) or DECOMPOSE (multiple tasks)",
+            "readiness decision direct does not mean one task",
+            "MUST DECOMPOSE coding",
+            "do not split by module, layer or file",
+            "For analysis split only independent evidence questions",
+            "For Discovery prefer one delegate_discovery",
+            "reassess readiness after each",
+            "use depends_on only for real dependencies",
+            "Review, testing-only and documentation-only do not require decomposition",
+        ),
+        "README": (
+            "Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE`",
+            "Readiness `direct` không quyết định số task",
+            "Bắt buộc `DECOMPOSE`",
+            "Không chia theo module, layer hoặc file",
+            "**Analysis:** Chỉ chia các câu hỏi",
+            "**Discovery:** Ưu tiên một `delegate_discovery`",
+            "Đánh giá lại readiness sau mỗi lượt",
+            "Chỉ đặt `depends_on` khi có dependency thực",
+            "Review, testing-only và documentation-only không bắt buộc",
+        ),
+    }
+    for surface, snippets in expected.items():
+        normalized = " ".join(surfaces[surface].casefold().split())
+        for snippet in snippets:
+            assert " ".join(snippet.casefold().split()) in normalized, (
+                f"Missing decomposition rule on {surface}: {snippet}"
+            )
+
+
 @pytest.mark.parametrize("broken", [
     b"<!-- BEGIN HERDR-TASK-MCP RULES -->\n",
     b"<!-- END HERDR-TASK-MCP RULES -->\n",
