@@ -141,7 +141,7 @@ mcp = MCPServer(
         "required upstream ACCEPT checkpoints, or costly shared retries of separable work. "
         "Keep one tightly coupled outcome and its tests together; do not split by module, layer or file. "
         "For analysis split only independent evidence questions; preserve end-to-end flow tracing. "
-        "For Discovery prefer one delegate_discovery when boundaries are unknown or roots span; "
+        "For Discovery prefer one delegate_discovery when boundaries are unknown or investigation spans roots; "
         "split only independent investigations and reassess readiness after each. "
         "Review, testing-only and documentation-only do not require decomposition. "
         "For each split task provide its own objective, scope and acceptance_criteria; "
