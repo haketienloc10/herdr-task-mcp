@@ -137,7 +137,7 @@ mcp = MCPServer(
         "tailor acceptance_criteria and constraints to the objective, including mixed tasks. "
         "Before coding delegation choose DIRECT (one Peer) or DECOMPOSE (multiple tasks); "
         "readiness decision direct does not mean one task. "
-        "DECOMPOSE coding for independently acceptable behaviors, multiple Git roots, "
+        "MUST DECOMPOSE coding for independently acceptable behaviors, multiple Git roots, "
         "required upstream ACCEPT checkpoints, or costly shared retries of separable work. "
         "Keep one tightly coupled outcome and its tests together; do not split by module, layer or file. "
         "For analysis split only independent evidence questions; preserve end-to-end flow tracing. "
