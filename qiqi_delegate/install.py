@@ -44,6 +44,14 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 - Với testing: xác định hành vi/test cases cần kiểm tra, việc tạo hoặc sửa test có được phép hay không, lệnh kiểm thử phù hợp và cách báo cáo pass/fail, lỗi, test chưa chạy; không suy diễn pass khi chưa thực thi.
 - Với documentation: yêu cầu nội dung khớp implementation/contract đã xác minh, ví dụ đúng thực tế và các thay đổi tài liệu cụ thể; không bịa đặt tính năng hay kết quả kiểm thử.
 - Với task kết hợp nhiều loại việc, ghép các tiêu chí liên quan; không áp checklist không liên quan hoặc báo cáo dài cho nhiệm vụ đơn giản.
+- Trước khi giao coding, Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE` (nhiều task). Readiness `direct` không quyết định cách chia task.
+- Với coding, bắt buộc `DECOMPOSE` nếu có ít nhất hai hành vi có thể implement và ACCEPT riêng; cần sửa nhiều Git root; hoặc phải ACCEPT một giai đoạn trước giai đoạn sau.
+- Với coding, cũng chọn `DECOMPOSE` nếu các phần có thể retry độc lập và retry cả task gây lặp đáng kể công việc.
+- Với coding, chọn `DIRECT` khi chỉ có một kết quả chức năng, các thay đổi gắn chặt và không cần checkpoint. Không chia mặc định theo module, layer hoặc file. Giữ code và test liên quan cùng task.
+- Với analysis, chỉ chia khi có nhiều câu hỏi hoặc giả thuyết độc lập với evidence riêng. Giữ một Peer khi phải truy vết một execution flow xuyên component.
+- Với Discovery, ưu tiên một `delegate_discovery` khi chưa rõ ranh giới hoặc cần đọc nhiều Git root. Chỉ tách lượt điều tra nếu các câu hỏi độc lập; đánh giá lại readiness sau mỗi lượt.
+- Khi chia task, Lead nêu `objective`, `scope`, `acceptance_criteria` riêng. Chỉ khai báo `depends_on` cho dependency thực. Review từng node và REPLAN khi phát hiện dependency mới.
+- Không áp chính sách phân rã này cho review, testing-only hoặc documentation-only.
 - Trước ACCEPT, Lead phải đọc `agent_response` của đúng attempt qua `get_node_reviews`, đối chiếu từng acceptance criterion với bằng chứng. Nếu thiếu chi tiết, thiếu chứng cứ hoặc còn mâu thuẫn thì RETRY với feedback cụ thể; không ACCEPT chỉ vì Peer đã `settled`.
 - Khi tổng hợp nhiều Peer, Lead giữ lại cơ chế hoạt động, chứng cứ nguồn và giới hạn xác minh quan trọng. Liên kết kết quả giữa các repository chỉ dựa trên evidence được Peer cung cấp; không đọc trực tiếp repository đích, không suy đoán contract chưa được kiểm chứng.
 - Implementation Peer chỉ làm việc trong Git root và phạm vi được giao. Discovery Peer chỉ được đọc những Git root được cấp rõ ràng trong --add-dir; không sửa bất kỳ repo nào. Không tự điều phối Peer khác.
