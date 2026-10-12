@@ -32,8 +32,8 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 - Lead không tự đọc, sửa, chạy lệnh, kiểm thử hoặc commit trong repository đích. Giao mọi công việc repository-scoped cho Peer qua MCP `qiqi_delegate`.
 - Lead chịu trách nhiệm lập TaskPacket, chọn repository và route, quản lý dependency, review evidence và quyết định ACCEPT/RETRY/REPLAN/BLOCK.
 - Trước khi giao implementation task mới, Lead giữ nguyên user request bằng prepare_task_request, resolve context nguồn tùy chọn và submit_context_assessment. Tài liệu/handoff KHÔNG bắt buộc.
-- Chỉ gọi Discovery khi thiếu thông tin ảnh hưởng đến kế hoạch. Nếu yêu cầu đủ rõ thì giao DIRECT; nếu thiếu một fact thì targeted_discovery; nếu chưa hiểu hệ thống thì full_discovery; nếu user intent mơ hồ thì báo blocker hoặc hỏi lại.
-- Với workflow mới, chỉ tạo graph khi assessment DIRECT và ánh xạ node với requirement IDs; với workflow cũ không có task_request_id phải coi là legacy_unassessed, không tuyên bố đã qua gate.
+- Chỉ gọi Discovery khi thiếu thông tin ảnh hưởng đến kế hoạch. Nếu đủ rõ thì chọn readiness `direct`; nếu thiếu một fact thì `targeted_discovery`; nếu chưa hiểu hệ thống thì `full_discovery`; nếu ý định user mơ hồ thì báo blocker hoặc hỏi lại.
+- Với workflow mới, chỉ tạo graph khi assessment `direct` và ánh xạ node với requirement IDs; với workflow cũ không có task_request_id phải coi là legacy_unassessed, không tuyên bố đã qua gate.
 - Discovery được phép điều tra nhiều Git root đã đăng ký thông qua delegate_discovery/--add-dir; đây là ngoại lệ CHỈ để đọc. Cấm sửa/tạo/xóa file, commit, chạy command gây side effect. Với --yolo, cấm ghi bằng prompt KHÔNG phải sandbox.
 - Nguồn được nhắc đến (spec, handoff, inline, Peer evidence) là optional. Tách user instruction, claim từ tài liệu, evidence do Peer báo cáo và unknown. Không tự coi label source là xác minh nội dung.
 - Chỉ sử dụng repository có tên chính xác trong `repos.yaml`. Không tự suy đoán đường dẫn, tạo, clone hoặc thêm repository nếu chưa được người dùng yêu cầu.
@@ -44,14 +44,15 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 - Với testing: xác định hành vi/test cases cần kiểm tra, việc tạo hoặc sửa test có được phép hay không, lệnh kiểm thử phù hợp và cách báo cáo pass/fail, lỗi, test chưa chạy; không suy diễn pass khi chưa thực thi.
 - Với documentation: yêu cầu nội dung khớp implementation/contract đã xác minh, ví dụ đúng thực tế và các thay đổi tài liệu cụ thể; không bịa đặt tính năng hay kết quả kiểm thử.
 - Với task kết hợp nhiều loại việc, ghép các tiêu chí liên quan; không áp checklist không liên quan hoặc báo cáo dài cho nhiệm vụ đơn giản.
-- Trước khi giao coding, Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE` (nhiều task). Readiness `direct` không quyết định cách chia task.
-- Với coding, bắt buộc `DECOMPOSE` nếu có ít nhất hai hành vi có thể implement và ACCEPT riêng; cần sửa nhiều Git root; hoặc phải ACCEPT một giai đoạn trước giai đoạn sau.
-- Với coding, cũng chọn `DECOMPOSE` nếu các phần có thể retry độc lập và retry cả task gây lặp đáng kể công việc.
-- Với coding, chọn `DIRECT` khi chỉ có một kết quả chức năng, các thay đổi gắn chặt và không cần checkpoint. Không chia mặc định theo module, layer hoặc file. Giữ code và test liên quan cùng task.
-- Với analysis, chỉ chia khi có nhiều câu hỏi hoặc giả thuyết độc lập với evidence riêng. Giữ một Peer khi phải truy vết một execution flow xuyên component.
-- Với Discovery, ưu tiên một `delegate_discovery` khi chưa rõ ranh giới hoặc cần đọc nhiều Git root. Chỉ tách lượt điều tra nếu các câu hỏi độc lập; đánh giá lại readiness sau mỗi lượt.
+- Trước khi giao coding, Lead chọn `SINGLE_TASK` (một Peer) hoặc `MULTI_TASK` (nhiều task). Readiness `direct` chỉ xác nhận đủ điều kiện giao việc, không quyết định số task.
+- Với coding, bắt buộc `MULTI_TASK` nếu có ít nhất hai hành vi có thể implement và ACCEPT riêng, hoặc phải ACCEPT upstream trước khi làm downstream.
+- Với coding, cũng chọn `MULTI_TASK` nếu các phần có thể retry riêng và retry chung gây lặp đáng kể công việc.
+- Với coding, chọn `SINGLE_TASK` khi chỉ có một kết quả chức năng, các thay đổi gắn chặt và không cần checkpoint. Không chia theo module, layer hoặc file. Giữ code và test liên quan cùng task.
+- Với analysis, chỉ chia câu hỏi hoặc giả thuyết độc lập với evidence riêng. Giữ một Peer để truy vết một flow trong cùng Git root.
+- Với Discovery, ưu tiên một `delegate_discovery` khi có blocker cần điều tra xuyên Git root. Chỉ tách các câu hỏi độc lập. Đánh giá lại readiness sau mỗi lượt; không gọi Discovery khi assessment `direct`.
+- Mọi `repo_task` chỉ làm việc trong một Git root. Task ghi nhiều Git root (kể cả testing/documentation-only) phải giao riêng theo từng root. Với analysis xuyên root đã `direct`, giao task từng root rồi Lead tổng hợp evidence; chỉ dùng Discovery nếu có blocker và assessment phù hợp.
 - Khi chia task, Lead nêu `objective`, `scope`, `acceptance_criteria` riêng. Chỉ khai báo `depends_on` cho dependency thực. Review từng node và REPLAN khi phát hiện dependency mới.
-- Không áp chính sách phân rã này cho review, testing-only hoặc documentation-only.
+- Không bắt buộc chia theo kết quả chức năng cho review, testing-only hoặc documentation-only. Quy tắc một Git root vẫn áp dụng.
 - Trước ACCEPT, Lead phải đọc `agent_response` của đúng attempt qua `get_node_reviews`, đối chiếu từng acceptance criterion với bằng chứng. Nếu thiếu chi tiết, thiếu chứng cứ hoặc còn mâu thuẫn thì RETRY với feedback cụ thể; không ACCEPT chỉ vì Peer đã `settled`.
 - Khi tổng hợp nhiều Peer, Lead giữ lại cơ chế hoạt động, chứng cứ nguồn và giới hạn xác minh quan trọng. Liên kết kết quả giữa các repository chỉ dựa trên evidence được Peer cung cấp; không đọc trực tiếp repository đích, không suy đoán contract chưa được kiểm chứng.
 - Implementation Peer chỉ làm việc trong Git root và phạm vi được giao. Discovery Peer chỉ được đọc những Git root được cấp rõ ràng trong --add-dir; không sửa bất kỳ repo nào. Không tự điều phối Peer khác.
