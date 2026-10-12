@@ -144,7 +144,6 @@ def test_task_type_policy_stays_aligned_across_three_surfaces():
                 )
 
 
-
 def test_lead_decomposition_policy_is_aligned_across_surfaces():
     root = Path(__file__).resolve().parents[1]
     server_ast = ast.parse((root / "qiqi_delegate" / "server.py").read_text(encoding="utf-8"))
@@ -163,37 +162,42 @@ def test_lead_decomposition_policy_is_aligned_across_surfaces():
     }
     expected = {
         "AGENTS": (
-            "Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE`",
-            "Readiness `direct` không quyết định cách chia task",
-            "Với coding, bắt buộc `DECOMPOSE`",
-            "Không chia mặc định theo module, layer hoặc file",
-            "Với analysis, chỉ chia",
-            "Với Discovery, ưu tiên một `delegate_discovery`",
-            "đánh giá lại readiness sau mỗi lượt",
-            "Chỉ khai báo `depends_on` cho dependency thực",
-            "Không áp chính sách phân rã này cho review, testing-only hoặc documentation-only",
+            "Lead chọn `SINGLE_TASK` (một Peer) hoặc `MULTI_TASK`",
+            "Readiness `direct` chỉ xác nhận đủ điều kiện giao việc",
+            "Với coding, bắt buộc `MULTI_TASK`",
+            "Không chia theo module, layer hoặc file",
+            "Với analysis, chỉ chia câu hỏi",
+            "Giữ một Peer để truy vết một flow trong cùng Git root",
+            "Mọi `repo_task` chỉ làm việc trong một Git root",
+            "kể cả testing/documentation-only",
+            "Với analysis xuyên root đã `direct`, giao task từng root",
+            "chỉ dùng Discovery nếu có blocker và assessment phù hợp",
+            "không gọi Discovery khi assessment `direct`",
+            "Không bắt buộc chia theo kết quả chức năng cho review",
         ),
         "MCP": (
-            "choose DIRECT (one Peer) or DECOMPOSE (multiple tasks)",
-            "readiness decision direct does not mean one task",
-            "MUST DECOMPOSE coding",
+            "choose SINGLE_TASK (one Peer) or MULTI_TASK",
+            "readiness direct means actionable",
+            "MUST choose MULTI_TASK",
             "do not split by module, layer or file",
-            "For analysis split only independent evidence questions",
-            "For Discovery prefer one delegate_discovery",
-            "reassess readiness after each",
-            "use depends_on only for real dependencies",
-            "Review, testing-only and documentation-only do not require decomposition",
+            "Each repo_task accesses only one Git root",
+            "testing-only and documentation-only",
+            "For actionable multi-root analysis",
+            "synthesize captured evidence as Lead",
+            "do not use delegate_discovery for readiness direct",
+            "only when assessment has blockers",
+            "need no functional decomposition",
         ),
         "README": (
-            "Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE`",
-            "Readiness `direct` không quyết định số task",
-            "Bắt buộc `DECOMPOSE`",
+            "Lead chọn `SINGLE_TASK` (một Peer) hoặc `MULTI_TASK`",
+            "Readiness `direct` chỉ cho phép giao việc",
+            "Bắt buộc `MULTI_TASK`",
             "Không chia theo module, layer hoặc file",
-            "**Analysis:** Chỉ chia các câu hỏi",
-            "**Discovery:** Ưu tiên một `delegate_discovery`",
-            "Đánh giá lại readiness sau mỗi lượt",
-            "Chỉ đặt `depends_on` khi có dependency thực",
-            "Review, testing-only và documentation-only không bắt buộc",
+            "Mọi `repo_task` chỉ dùng một Git root",
+            "kể cả testing-only và documentation-only",
+            "Với analysis đã `direct`, giao từng root",
+            "assessment là `targeted_discovery` hoặc `full_discovery` và có blocker",
+            "giới hạn Git root vẫn áp dụng",
         ),
     }
     for surface, snippets in expected.items():
@@ -202,6 +206,15 @@ def test_lead_decomposition_policy_is_aligned_across_surfaces():
             assert " ".join(snippet.casefold().split()) in normalized, (
                 f"Missing decomposition rule on {surface}: {snippet}"
             )
+
+    # Readiness cannot imply a single Peer: this was the original PR review finding.
+    for source in ("AGENTS", "README"):
+        for misleading in ("assessment DIRECT", "giao DIRECT", "→ DIRECT"):
+            assert misleading not in surfaces[source]
+    readme = surfaces["README"]
+    assert "### Ví dụ A: Yêu cầu rõ, không document → readiness `direct`" in readme
+    assert "### Ví dụ C: Context inline → readiness `direct`" in readme
+    assert "readiness vẫn là `direct`. Lead phải chọn `MULTI_TASK`" in readme
 
 
 @pytest.mark.parametrize("broken", [
