@@ -128,7 +128,7 @@ TaskGraph hợp lệ không chứng minh task đúng ý user. Workflow mới gi�
 5. `targeted_discovery` nếu thiếu một fact có thể đổi kế hoạch; `full_discovery` nếu chưa hiểu hệ thống. Gọi `delegate_discovery(request_id, repository_names, route, questions, mode)`. Một Peer có thể đọc các Git root đã đăng ký qua `--add-dir`. Peer result được capture/append vào request; **assessment cũ bị invalidated**, QiQi review và reassess trước khi triển khai.
 6. `blocked` nếu thiếu quyết định nghiệp vụ mà đọc code cũng không giải quyết. Yêu cầu user làm rõ, không tự tưởng tượng.
 
-### Ví dụ A: Yêu cầu rõ, không document → DIRECT
+### Ví dụ A: Yêu cầu rõ, không document → readiness `direct`
 
 ~~~json
 {"user_request":"Trong backend, retry HTTP 429 và 503 tối đa 3 lần, giữ public API và viết regression tests"}
@@ -149,7 +149,9 @@ Không cần sources. Assessment sau `prepare_task_request` (giả sử `revisio
  }}
 ~~~
 
-Sau assessment dùng revision mới (ví dụ 2). Graph node `retry-backend` gắn `requirement_map={"retry-backend":["R1","R2"]}` và có TaskPacket tự đủ nghĩa. **Không gọi Discovery**.
+Sau assessment dùng revision mới (ví dụ 2). Retry là một hành vi thống nhất nên có thể chọn `SINGLE_TASK`. Graph node `retry-backend` gắn `requirement_map={"retry-backend":["R1","R2"]}`. **Không gọi Discovery**.
+
+Nếu yêu cầu gồm `Create Order` và `Cancel Order` độc lập, readiness vẫn là `direct`. Lead phải chọn `MULTI_TASK` và tạo hai node có acceptance criteria riêng.
 
 ### Ví dụ B: Chưa rõ nguyên nhân → FULL DISCOVERY
 
@@ -166,7 +168,7 @@ QiQi đánh giá `decision="full_discovery"`, `blocking_unknowns=["Không biết
 
 Sau captured response, QiQi tạo assessment mới, quyết định triển khai theo evidence thay vì phỏng đoán. Nếu chỉ thiếu một contract/idempotency detail, dùng `targeted_discovery`.
 
-### Ví dụ C: Context inline → DIRECT
+### Ví dụ C: Context inline → readiness `direct`
 
 ~~~json
 {"user_request":"Implement theo spec được cung cấp, giữ API",
@@ -174,7 +176,7 @@ Sau captured response, QiQi tạo assessment mới, quyết định triển khai
              "text":"Retry HTTP 503 only, max 2 attempts. No public API changes."}]}
 ~~~
 
-Dùng `sources[0].id` trả về làm `evidence_refs`. `verification=reported` chỉ cho biết nội dung được **cung cấp**, không đồng nghĩa đã chứng minh trong code. Nếu đã đủ để giao Peer thì DIRECT.
+Dùng `sources[0].id` trả về làm `evidence_refs`. `verification=reported` chỉ cho biết nội dung được **cung cấp**, không đồng nghĩa đã chứng minh trong code. Nếu đã đủ điều kiện giao Peer thì assessment là `direct`. Lead vẫn phải chọn số task riêng.
 
 ### Ví dụ D: Handoff/spec chỉ là nguồn tùy chọn
 
@@ -267,14 +269,15 @@ Không áp checklist đầy đủ cho mọi task. Lead đánh giá theo `accepta
 
 ### Quy tắc phân rã nhiệm vụ
 
-Trước khi giao coding, Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE` (nhiều task). Readiness `direct` không quyết định số task.
+Trước khi giao coding, Lead chọn `SINGLE_TASK` (một Peer) hoặc `MULTI_TASK` (nhiều task). Readiness `direct` chỉ cho phép giao việc, không quyết định số task.
 
-- **Coding:** Bắt buộc `DECOMPOSE` khi có từ hai hành vi có thể ACCEPT riêng, nhiều Git root hoặc checkpoint upstream cần ACCEPT. Cũng chia khi retry chung gây lặp đáng kể công việc độc lập. Chọn `DIRECT` cho một kết quả gắn chặt, không cần checkpoint.
-- **Analysis:** Chỉ chia các câu hỏi hoặc giả thuyết độc lập có evidence riêng. Giữ cùng Peer để truy vết một execution flow.
-- **Discovery:** Ưu tiên một `delegate_discovery` khi chưa rõ ranh giới hoặc cần đọc nhiều Git root. Chỉ tách lượt điều tra độc lập. Đánh giá lại readiness sau mỗi lượt.
-- **Khi chia:** Giao mỗi task một `objective`, `scope` và `acceptance_criteria`. Chỉ đặt `depends_on` khi có dependency thực. Lead review từng node và REPLAN khi xuất hiện dependency mới.
+- **Coding:** Bắt buộc `MULTI_TASK` khi có từ hai hành vi có thể ACCEPT riêng, checkpoint upstream hoặc retry chung gây lặp đáng kể công việc độc lập. Chọn `SINGLE_TASK` cho một kết quả gắn chặt, không cần checkpoint.
+- **Analysis:** Chỉ chia câu hỏi hoặc giả thuyết độc lập. Giữ cùng Peer để truy vết một flow trong cùng Git root.
+- **Discovery:** Chỉ gọi `delegate_discovery` khi assessment là `targeted_discovery` hoặc `full_discovery` và có blocker. Một Peer có thể điều tra nhiều Git root. Sau đó đánh giá lại readiness.
+- **Nhiều Git root:** Mọi `repo_task` chỉ dùng một Git root. Task ghi nhiều repository, kể cả testing-only và documentation-only, phải tách theo Git root. Với analysis đã `direct`, giao từng root rồi Lead tổng hợp evidence. Nếu thiếu fact xuyên root ảnh hưởng kế hoạch, chọn Discovery trước khi giao việc.
+- **Khi chia:** Mỗi task có `objective`, `scope` và `acceptance_criteria`. Chỉ đặt `depends_on` khi có dependency thực. Lead review và REPLAN khi dependency thay đổi.
 
-Không chia theo module, layer hoặc file chỉ để tăng số task. Giữ code và test liên quan trong cùng task. Review, testing-only và documentation-only không bắt buộc áp dụng quy tắc này.
+Không chia theo module, layer hoặc file chỉ để tăng số task. Giữ code và test liên quan trong cùng task. Review, testing-only và documentation-only không bắt buộc phân rã theo kết quả chức năng; giới hạn Git root vẫn áp dụng.
 
 ## Điều phối nhiều công việc bằng TaskGraph
 
