@@ -265,6 +265,17 @@ Ví dụ phần `TaskPacket` cho coding (vẫn dùng `delegate_repo_task` hoặc
 
 Không áp checklist đầy đủ cho mọi task. Lead đánh giá theo `acceptance_criteria` đã giao và evidence thực tế; trạng thái Peer `settled` không đồng nghĩa với `ACCEPT`.
 
+### Quy tắc phân rã nhiệm vụ
+
+Trước khi giao coding, Lead chọn `DIRECT` (một Peer) hoặc `DECOMPOSE` (nhiều task). Readiness `direct` không quyết định số task.
+
+- **Coding:** Bắt buộc `DECOMPOSE` khi có các hành vi có thể ACCEPT riêng, nhiều Git root hoặc checkpoint upstream cần ACCEPT. Cũng chia khi retry chung gây lặp đáng kể công việc độc lập. Chọn `DIRECT` cho một kết quả gắn chặt, không cần checkpoint.
+- **Analysis:** Chỉ chia các câu hỏi hoặc giả thuyết độc lập có evidence riêng. Giữ cùng Peer để truy vết một execution flow.
+- **Discovery:** Ưu tiên một `delegate_discovery` khi chưa rõ ranh giới hoặc cần đọc nhiều Git root. Chỉ tách lượt điều tra độc lập. Đánh giá lại readiness sau mỗi lượt.
+- **Khi chia:** Giao mỗi task một `objective`, `scope` và `acceptance_criteria`. Chỉ đặt `depends_on` khi có dependency thực. Lead review từng node và REPLAN khi xuất hiện dependency mới.
+
+Không chia theo module, layer hoặc file chỉ để tăng số task. Giữ code và test liên quan trong cùng task. Review, testing-only và documentation-only không bắt buộc áp dụng quy tắc này.
+
 ## Điều phối nhiều công việc bằng TaskGraph
 
 `TaskGraph` là DAG gồm các node `repo_task`. Mỗi node khai báo repository, route, TaskPacket và các dependency.
