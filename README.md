@@ -130,6 +130,7 @@ hoặc chẩn đoán.
 - `submit_workflow` cũng nhận `discovery` khi decision là `targeted_discovery` hoặc
   `full_discovery`; server vẫn gọi pipeline Discovery hiện hữu. Kết quả được capture
   và gắn source, assessment cũ bị invalidated. Lead **phải review và reassess**
+  bằng `continue_workflow` trên **chính request_id đã có** để không bỏ provenance
   trước khi giao implementation. `blocked` không dispatch Peer.
 - `get_review_bundle`: trả graph state, chính xác attempt hiện hành và một đoạn
   evidence hữu hạn (mặc định 3.000 ký tự/review, tối đa 4 review). Khi
@@ -197,8 +198,13 @@ Khi `decision=targeted_discovery/full_discovery`, thay `single_task` bằng:
 }
 ~~~
 
-Lead đọc `captured_source_id` qua `get_task_source`, đánh giá lại readiness
-và tạo workflow implementation mới khi đủ điều kiện. Không đổi chính sách
+Lead đọc `captured_source_id` qua `get_task_source`, rồi gọi
+`continue_workflow(request_id, expected_revision, assessment, single_task/graph)`
+để lưu assessment mới và dispatch wave đầu trong một call. Dùng source ID đã
+được capture trong `assessment.requirements[].evidence_refs`; không tạo một
+Task Request mới hoặc sao chép evidence không cần thiết. Nếu vẫn thiếu fact,
+`continue_workflow` cũng chấp nhận một `discovery` khác với assessment phù hợp.
+Không đổi chính sách
 Discovery chỉ đọc bằng prompt (chưa có sandbox enforce). Analysis đã actionable
 vẫn dùng `decision=direct` với `single_task` hoặc `graph`, TaskPacket nêu rõ
 phạm vi chỉ đọc và acceptance criteria về evidence.
