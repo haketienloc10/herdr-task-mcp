@@ -440,7 +440,7 @@ class TaskRequestStore:
             )
         return self.get(request_id)
 
-    def get(self, request_id: str) -> dict[str, Any]:
+    def get(self, request_id: str, *, include_content: bool = True) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute("SELECT * FROM task_requests WHERE request_id=?",
                              (_text(request_id, "request_id"),)).fetchone()
@@ -476,7 +476,10 @@ class TaskRequestStore:
         ]
         return {
             "request_id": row["request_id"], "user_request": row["user_request"],
-            "revision": row["revision"], "sources": sources,
+            "revision": row["revision"], "sources": (sources if include_content else [
+                {key: value for key, value in source.items() if key != "content"}
+                for source in sources
+            ]),
             "stale_sources": stale, "discoveries": discoveries,
             "assessment": json.loads(row["assessment_json"]) if row["assessment_json"] else None,
         }
@@ -570,11 +573,8 @@ class TaskRequestStore:
                     raise RuntimeError("Discovery reservation was concurrently recovered")
         return self.get(request_id)
 
-    def assess(self, request_id: str, expected_revision: int,
-               assessment: dict[str, Any]) -> dict[str, Any]:
-        current = self.get(request_id)
-        if current["revision"] != expected_revision:
-            raise RuntimeError("stale task context revision")
+    def _check_assessment(self, current: dict[str, Any], assessment: dict[str, Any]) -> None:
+        """Validate one evidence-linked assessment before persistence."""
         if not isinstance(assessment, dict) or set(assessment) != {
             "requirements", "blocking_unknowns", "decision", "rationale"
         }:
@@ -612,7 +612,58 @@ class TaskRequestStore:
             used_sources = {ref for item in requirements for ref in item["evidence_refs"]}
             if used_sources.intersection(current["stale_sources"]):
                 raise ValueError("assessment depends on stale sources")
+
+    def assess(self, request_id: str, expected_revision: int,
+               assessment: dict[str, Any]) -> dict[str, Any]:
+        current = self.get(request_id)
+        if current["revision"] != expected_revision:
+            raise RuntimeError("stale task context revision")
+        self._check_assessment(current, assessment)
         return self._write(request_id, expected_revision, assessment=assessment)
+
+    def create_assessed(self, user_request: str, sources: list[dict[str, Any]],
+                        assessment: dict[str, Any], *,
+                        source_aliases: list[str] | None = None) -> dict[str, Any]:
+        """Atomically register intent, snapshots and validated direct/Discovery readiness.
+
+        A high-level Lead tool may create sources and reference them by aliases without
+        exposing an intermediate request revision or persisting a half-assessed request.
+        """
+        if (not isinstance(user_request, str) or not user_request.strip()
+                or len(user_request) > MAX_REQUEST_CHARS):
+            raise ValueError("user_request must be nonempty and within limit")
+        if not isinstance(sources, list) or len(sources) > MAX_CONTEXT_SOURCES:
+            raise ValueError(f"sources must be a list of at most {MAX_CONTEXT_SOURCES} entries")
+        resolved = [self._resolve_source(source) for source in sources]
+        if source_aliases is not None:
+            if (len(source_aliases) != len(resolved) or
+                    any(not isinstance(a, str) or not a.strip() or
+                        len(a) > 64 or ":" in a for a in source_aliases) or
+                    len(set(source_aliases)) != len(source_aliases)):
+                raise ValueError("source_aliases must be unique nonempty names matching sources")
+            aliases = {
+                "alias:" + alias: source["id"]
+                for alias, source in zip(source_aliases, resolved)
+            }
+            assessment = {
+                **assessment,
+                "requirements": [
+                    {**item, "evidence_refs": [
+                        aliases.get(ref, ref) for ref in item["evidence_refs"]
+                    ]}
+                    for item in assessment["requirements"]
+                ],
+            }
+        current = {"revision": 1, "sources": resolved, "stale_sources": []}
+        self._check_assessment(current, assessment)
+        request_id = str(uuid.uuid4())
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO task_requests VALUES (?, ?, ?, ?, 2, ?)",
+                (request_id, user_request, json.dumps(resolved, ensure_ascii=False),
+                 json.dumps(assessment, ensure_ascii=False), time.time_ns()),
+            )
+        return self.get(request_id, include_content=False)
 
     def assert_ready(self, request_id: str, revision: int | None = None) -> dict[str, Any]:
         current = self.get(request_id)

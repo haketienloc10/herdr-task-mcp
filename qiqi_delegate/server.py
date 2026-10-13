@@ -16,6 +16,7 @@ from qiqi_delegate.task_graph_runtime import (
 )
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_graph import GraphNode
+from qiqi_delegate.task_graph_validation import validate_task_graph
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval import FinalEvaluationCoordinator
 
@@ -57,7 +58,41 @@ class Graph(BaseModel):
     model_config = ConfigDict(extra="forbid")
     nodes: list[Node] = Field(min_length=1)
 
-class RequestSource(BaseModel):
+class InlineSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["inline"]
+    text: str
+    label: str | None = None
+
+
+class RepoFileSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["repo_file"]
+    repository: str
+    path: str
+
+
+class WorkspaceFileSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["workspace_file"]
+    path: str
+
+
+class PeerTurnSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["peer_turn"]
+    turn_id: str
+
+
+class AcceptedGraphNodeSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["accepted_graph_node"]
+    graph_run_id: str
+    node_id: str
+
+
+class LegacyRequestSource(BaseModel):
+    """Old MCP source shape accepts irrelevant null keys, but not non-null extras."""
     model_config = ConfigDict(extra="forbid")
     kind: Literal["inline", "repo_file", "workspace_file", "peer_turn", "accepted_graph_node"]
     text: str | None = None
@@ -67,6 +102,28 @@ class RequestSource(BaseModel):
     turn_id: str | None = None
     graph_run_id: str | None = None
     node_id: str | None = None
+
+
+RequestSource = Annotated[
+    InlineSource | RepoFileSource | WorkspaceFileSource |
+    PeerTurnSource | AcceptedGraphNodeSource,
+    Field(discriminator="kind"),
+]
+
+
+class WorkflowSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    alias: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    source: RequestSource
+
+
+class DiscoveryPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repository_names: list[str]
+    route: str
+    questions: list[str]
+    mode: Literal["targeted_discovery", "full_discovery"]
+
 
 class RequirementInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -120,12 +177,19 @@ mcp = MCPServer(
         "Lead owns technical acceptance. Native result hooks are the only answer source. "
         "No terminal scraping, Supervisor, or sibling repository reads. "
         "Call workspace_info first for registered repositories and route names. "
-        "For new work, register the user request and optional sources using "
-        "prepare_task_request; assess readiness before implementation. "
+        "For new work prefer submit_workflow: atomically register request, sources, "
+        "evidence-linked assessment and direct single/multiple tasks, or a Discovery plan. "
+        "Use alias:<name> for source evidence references in submit_workflow only. "
+        "After Discovery use continue_workflow on the existing request_id to reassess "
+        "and dispatch without losing captured provenance. "
+        "Legacy prepare_task_request and submit_context_assessment remain available. "
         "Set readiness decision direct for actionable requirements; this does not choose task count. "
         "Use targeted/full Discovery only with blocking unknowns and a matching assessment. "
         "A document or handoff is never required. "
-        "For multiple nodes: start_graph, delegate_next, get_node_reviews, submit_decisions. "
+        "For direct work use one submit_workflow call to dispatch the first wave, "
+        "inspect the bounded review bundle, then submit_decisions(auto_continue=True). "
+        "Use get_review_evidence for further exact response chunks before ACCEPT. "
+        "Keep start_graph, delegate_next and get_node_reviews for recovery or legacy flows. "
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
         "After all TaskGraph nodes are satisfied, graph_state complete only means "
         "execution complete: call start_final_evaluation with a deliberately configured "
@@ -160,7 +224,8 @@ mcp = MCPServer(
         "and unrun cases; never imply an unrun test passed. "
         "For documentation require implementation-grounded claims and accurate examples. "
         "Avoid irrelevant criteria and verbose reports for simple tasks. "
-        "Before ACCEPT, read the exact captured Peer response via get_node_reviews, "
+        "Before ACCEPT, read exact captured evidence via the review bundle and, "
+        "when truncated, get_review_evidence (or legacy get_node_reviews), "
         "check evidence against the criteria and RETRY with targeted feedback if shallow. "
         "In the final answer, preserve concrete findings and citations across Peer reports; "
         "do not replace them with a generic high-level paraphrase. "
@@ -218,6 +283,17 @@ def _public_tool_errors(func):
                 f"code={code}; {public_detail}; action={action}"
             ) from exc
     return wrapper
+
+
+def _compact_task_request(value: dict[str, Any]) -> dict[str, Any]:
+    """Never repeat raw source contents in routine Lead MCP responses."""
+    return {
+        **value,
+        "sources": [
+            {key: content for key, content in source.items() if key != "content"}
+            for source in value.get("sources", [])
+        ],
+    }
 
 
 def _to_packet(value: Packet):
@@ -309,9 +385,9 @@ async def workspace_info() -> dict[str, Any]:
 @_public_tool_errors
 async def prepare_task_request(
     user_request: str,
-    sources: list[RequestSource] | None = None,
+    sources: list[LegacyRequestSource] | None = None,
 ) -> dict[str, Any]:
-    """Preserve raw user intent and optional context sources without Discovery."""
+    """Legacy source shape and full-content response remain unchanged."""
     return task_requests.create(
         user_request, [source.model_dump(exclude_none=True) for source in (sources or [])]
     )
@@ -319,17 +395,48 @@ async def prepare_task_request(
 
 @mcp.tool()
 @_public_tool_errors
-async def get_task_request(request_id: str) -> dict[str, Any]:
-    """Read intent, source snapshots, assessment and current staleness."""
-    return task_requests.get(request_id)
+async def get_task_request(request_id: str, include_content: bool = True) -> dict[str, Any]:
+    """Legacy behavior: full sources unless compact is explicitly requested."""
+    return task_requests.get(request_id, include_content=include_content)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def get_task_request_summary(request_id: str) -> dict[str, Any]:
+    """Compact task context metadata for new Lead clients."""
+    return task_requests.get(request_id, include_content=False)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def get_task_source(
+    request_id: str, source_id: str, offset: int = 0, max_chars: int = 12000,
+) -> dict[str, Any]:
+    """Read a bounded, exact slice of a persisted source (never a repository path)."""
+    if offset < 0 or not 1 <= max_chars <= 24000:
+        raise ValueError("offset must be nonnegative and max_chars in 1..24000")
+    current = task_requests.get(request_id)
+    source = next((s for s in current["sources"] if s["id"] == source_id), None)
+    if source is None:
+        raise ValueError("source_id does not belong to task request")
+    content = source["content"]
+    if offset > len(content):
+        raise ValueError("source offset exceeds content length")
+    end = min(len(content), offset + max_chars)
+    return {
+        "request_id": request_id, "source_id": source_id,
+        "sha256": source["sha256"], "offset": offset,
+        "content": content[offset:end], "total_chars": len(content),
+        "next_offset": end if end < len(content) else None,
+    }
 
 
 @mcp.tool()
 @_public_tool_errors
 async def add_task_source(
-    request_id: str, expected_revision: int, source: RequestSource,
+    request_id: str, expected_revision: int, source: LegacyRequestSource,
 ) -> dict[str, Any]:
-    """Append an explicit source; invalidate previous readiness assessment."""
+    """Legacy append: preserve full response and optional null source keys."""
     return task_requests.append(
         request_id, expected_revision, source.model_dump(exclude_none=True),
     )
@@ -447,6 +554,311 @@ async def delegate_discovery(
     }
 
 
+def _preflight_bound_packets(
+    authored, current: dict[str, Any], requirement_map: dict[str, list[str]],
+) -> None:
+    """Fail before graph persistence if current bound evidence cannot fit any node."""
+    for node in authored.nodes:
+        selected = [
+            req for req in current["assessment"]["requirements"]
+            if req["id"] in requirement_map[node.node_id]
+        ]
+        additions = [
+            "Original user request (verbatim): " + current["user_request"],
+            "Requirements for this node: " + " | ".join(r["text"] for r in selected),
+            *_source_context_lines(current["sources"], selected),
+        ]
+        payload = node.task_packet.as_dict()
+        payload["constraints"] = list(payload.get("constraints", [])) + additions
+        _contextual_packet(**payload)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def get_review_bundle(
+    graph_run_id: str,
+    expected_revision: int | None = None,
+    max_reviews: int = 4,
+    max_chars_per_review: int = 3000,
+    review_offset: int = 0,
+) -> dict[str, Any]:
+    """One bounded graph state + exact attempt evidence read for Lead semantic review."""
+    if (not 1 <= max_reviews <= 8 or not 1 <= max_chars_per_review <= 8000
+            or review_offset < 0):
+        raise ValueError("max_reviews must be 1..8, max_chars_per_review 1..8000 and review_offset >= 0")
+    if review_offset > 0 and expected_revision is None:
+        raise ValueError(
+            "expected_revision is required for review_offset > 0; "
+            "use the revision from the first review bundle"
+        )
+    current = graph_runtime.get_graph(graph_run_id)
+    if expected_revision is not None and current["revision"] != expected_revision:
+        raise RuntimeError("stale graph snapshot revision")
+    required = current["review_required"]
+    if review_offset > len(required):
+        raise ValueError("review_offset exceeds review count")
+    selected = required[review_offset:review_offset + max_reviews]
+    hydrated = []
+    if selected:
+        raw = graph_runtime.get_node_reviews(
+            graph_run_id,
+            [(node["node_id"], node["attempt_id"]) for node in selected],
+            expected_revision=current["revision"],
+        )
+        for review in raw["reviews"]:
+            result = dict(review["result"])
+            response = result.get("agent_response")
+            if isinstance(response, str):
+                result["agent_response"] = response[:max_chars_per_review]
+                result["total_response_chars"] = len(response)
+                result["response_truncated"] = len(response) > max_chars_per_review
+                result["next_offset"] = (
+                    max_chars_per_review if result["response_truncated"] else None
+                )
+            hydrated.append({**review, "result": result})
+    return {
+        "graph_run_id": graph_run_id, "revision": current["revision"],
+        "graph_state": current["graph_state"],
+        "runnable_nodes": current["runnable_nodes"],
+        "nodes": current["nodes"],
+        "review_required_count": len(required),
+        "more_reviews": review_offset + len(selected) < len(required),
+        "next_review_offset": (review_offset + len(selected)
+                               if review_offset + len(selected) < len(required) else None),
+        "reviews": hydrated,
+    }
+
+
+@mcp.tool()
+@_public_tool_errors
+async def get_review_evidence(
+    graph_run_id: str, node_id: str, attempt_id: str,
+    offset: int = 0, max_chars: int = 12000,
+    expected_revision: int | None = None,
+) -> dict[str, Any]:
+    """Read a further exact slice, never accept ambiguous, failed or stale evidence."""
+    if offset < 0 or not 1 <= max_chars <= 24000:
+        raise ValueError("offset must be nonnegative and max_chars 1..24000")
+    raw = graph_runtime.get_node_reviews(
+        graph_run_id, [(node_id, attempt_id)],
+        expected_revision=expected_revision,
+    )
+    review = raw["reviews"][0]
+    response = review["result"].get("agent_response")
+    if not isinstance(response, str):
+        raise ValueError("attempt has no captured agent_response")
+    if offset > len(response):
+        raise ValueError("review evidence offset exceeds response length")
+    end = min(len(response), offset + max_chars)
+    return {
+        "graph_run_id": graph_run_id, "revision": raw["revision"],
+        "node_id": node_id, "attempt_id": attempt_id,
+        "offset": offset, "agent_response": response[offset:end],
+        "total_chars": len(response),
+        "next_offset": end if end < len(response) else None,
+    }
+
+
+def _validate_workflow_plan(
+    assessment: ReadinessAssessment,
+    single_task: Node | None,
+    graph: Graph | None,
+    requirement_map: dict[str, list[str]] | None,
+    discovery: DiscoveryPlan | None,
+):
+    """Keep the same direct/Discovery/blocked policy for new and continued requests."""
+    decision = assessment.decision
+    direct = decision == "direct"
+    if direct:
+        if discovery is not None or (single_task is None) == (graph is None):
+            raise ValueError("direct needs exactly one single_task or graph; no discovery")
+    elif single_task is not None or graph is not None or requirement_map is not None:
+        raise ValueError("non-direct workflow cannot dispatch implementation tasks")
+    if decision in {"targeted_discovery", "full_discovery"}:
+        if discovery is None or discovery.mode != decision:
+            raise ValueError("Discovery requires a matching discovery plan")
+        if not discovery.repository_names or not discovery.questions:
+            raise ValueError("Discovery requires repository_names and questions")
+        if len(set(discovery.repository_names)) != len(discovery.repository_names):
+            raise ValueError("Discovery repositories must be unique")
+        if any(r not in runtime.repos() for r in discovery.repository_names):
+            raise ValueError("Discovery references an unregistered repository")
+        runtime.route(discovery.route)
+    elif discovery is not None:
+        raise ValueError("Discovery plan requires targeted_discovery/full_discovery readiness")
+
+    selected_graph = None
+    authored_graph = None
+    if direct:
+        selected_graph = Graph(nodes=[single_task]) if single_task is not None else graph
+        authored_graph = task_graph_from_payload(
+            selected_graph.model_dump(exclude_none=True)
+        )
+        _check_graph_routes(authored_graph)
+        validate_task_graph(authored_graph, repository_names=runtime.repos().keys())
+        if single_task is not None and requirement_map is None:
+            requirement_map = {
+                single_task.node_id: [req.id for req in assessment.requirements]
+            }
+        if requirement_map is None:
+            raise ValueError("multi-node workflow requires a requirement_map")
+        task_requests._check_map(
+            {"assessment": {"requirements": [
+                {"id": req.id} for req in assessment.requirements
+            ]}},
+            [node.node_id for node in authored_graph.nodes], requirement_map,
+        )
+    return selected_graph, authored_graph, requirement_map
+
+
+async def _advance_assessed_workflow(
+    registered: dict[str, Any],
+    selected_graph: Graph | None,
+    authored_graph,
+    requirement_map: dict[str, list[str]] | None,
+    discovery: DiscoveryPlan | None,
+    auto_dispatch: bool,
+    source_aliases: dict[str, str],
+) -> dict[str, Any]:
+    """Dispatch from a persisted assessment, never infer ACCEPT from Peer completion."""
+    request_id = registered["request_id"]
+    if registered["assessment"]["decision"] != "direct":
+        if discovery is None:
+            return {"task_request": registered, "source_aliases": source_aliases,
+                    "state": "blocked", "next_step": "user_decision"}
+        try:
+            result = await delegate_discovery(
+                request_id, discovery.repository_names, discovery.route,
+                discovery.questions, discovery.mode,
+            )
+        except (ValueError, RuntimeError, ToolError) as exc:
+            return {
+                "task_request": task_requests.get(request_id, include_content=False),
+                "source_aliases": source_aliases,
+                "state": "discovery_failed", "discovery_error": str(exc),
+                "next_step": "inspect persisted discovery and recover or reassess",
+            }
+        updated = result.get("task_request")
+        captured_source = None
+        if updated is not None:
+            before = {source["id"] for source in registered["sources"]}
+            captured_source = next(
+                (source["id"] for source in updated["sources"]
+                 if source["id"] not in before),
+                None,
+            )
+        return {
+            "task_request": _compact_task_request(updated) if updated else registered,
+            "source_aliases": source_aliases,
+            "state": "discovery_complete" if captured_source else "discovery_needs_attention",
+            "discovery_id": result["discovery_id"],
+            "turn_id": result["result"].get("turn_id"),
+            "result_state": result["result"].get("state"),
+            "captured_source_id": captured_source,
+            "attachment_error": result["attachment_error"],
+            "next_step": "review discovery evidence and reassess readiness",
+        }
+
+    current = task_requests.assert_ready(request_id, registered["revision"])
+    _preflight_bound_packets(authored_graph, current, requirement_map)
+    started = await start_graph(
+        selected_graph, request_id, registered["revision"], requirement_map,
+    )
+    answer = {
+        "task_request": registered, "source_aliases": source_aliases,
+        "graph_run_id": started["graph_run_id"], "state": "ready",
+    }
+    if auto_dispatch:
+        try:
+            await delegate_next(started["graph_run_id"])
+        except (ValueError, RuntimeError, ToolError) as exc:
+            # Always return the graph identity after persistence; never duplicate
+            # a dispatched Peer just because the first tool call reported an error.
+            answer["dispatch_error"] = str(exc)
+        answer["review_bundle"] = await get_review_bundle(started["graph_run_id"])
+        answer["state"] = (
+            "dispatch_failed" if "dispatch_error" in answer
+            else answer["review_bundle"]["graph_state"]
+        )
+    return answer
+
+
+@mcp.tool()
+@_public_tool_errors
+async def submit_workflow(
+    user_request: str,
+    assessment: ReadinessAssessment,
+    sources: list[WorkflowSource] | None = None,
+    single_task: Node | None = None,
+    graph: Graph | None = None,
+    requirement_map: dict[str, list[str]] | None = None,
+    discovery: DiscoveryPlan | None = None,
+    auto_dispatch: bool = True,
+) -> dict[str, Any]:
+    """One Lead entry point: atomic request+sources+readiness then optional dispatch.
+
+    Evidence refs may use alias:<name> for sources in this call only.
+    """
+    selected_graph, authored_graph, requirement_map = _validate_workflow_plan(
+        assessment, single_task, graph, requirement_map, discovery,
+    )
+    entries = sources or []
+    aliases = [entry.alias for entry in entries]
+    if len(set(aliases)) != len(aliases):
+        raise ValueError("workflow source aliases must be unique")
+    registered = task_requests.create_assessed(
+        user_request,
+        [entry.source.model_dump(exclude_none=True) for entry in entries],
+        assessment.model_dump(),
+        source_aliases=aliases,
+    )
+    return await _advance_assessed_workflow(
+        registered, selected_graph, authored_graph, requirement_map,
+        discovery, auto_dispatch,
+        {alias: source["id"] for alias, source in zip(aliases, registered["sources"])},
+    )
+
+
+@mcp.tool()
+@_public_tool_errors
+async def continue_workflow(
+    request_id: str,
+    expected_revision: int,
+    assessment: ReadinessAssessment,
+    single_task: Node | None = None,
+    graph: Graph | None = None,
+    requirement_map: dict[str, list[str]] | None = None,
+    discovery: DiscoveryPlan | None = None,
+    auto_dispatch: bool = True,
+) -> dict[str, Any]:
+    """Reassess and resume the SAME request after Discovery/context revision.
+
+    Source refs must be persisted source UUIDs, not submit_workflow aliases.
+    Prior Discovery captures and request provenance stay attached to this request.
+    """
+    selected_graph, authored_graph, requirement_map = _validate_workflow_plan(
+        assessment, single_task, graph, requirement_map, discovery,
+    )
+    current = task_requests.get(request_id)
+    if current["revision"] != expected_revision:
+        raise RuntimeError("stale task context revision")
+    authored_assessment = assessment.model_dump()
+    task_requests._check_assessment(current, authored_assessment)
+    if authored_graph is not None:
+        # Preflight before the assessment changes, so a bad packet does not leave
+        # a fresh, unused readiness revision behind.
+        _preflight_bound_packets(
+            authored_graph, {**current, "assessment": authored_assessment},
+            requirement_map,
+        )
+    updated = task_requests.assess(request_id, expected_revision, authored_assessment)
+    registered = _compact_task_request(updated)
+    return await _advance_assessed_workflow(
+        registered, selected_graph, authored_graph, requirement_map,
+        discovery, auto_dispatch, {},
+    )
+
+
 @mcp.tool()
 @_public_tool_errors
 async def delegate_repo_task(
@@ -515,6 +927,8 @@ async def start_graph(
         )
     elif task_request_revision is not None or requirement_map is not None:
         raise ValueError("task_request_id is required for context-bound graph")
+    if task_request_id is not None:
+        _preflight_bound_packets(authored, current, requirement_map)
     result = graph_runtime.start_graph(
         authored, repository_names=runtime.repos().keys(),
     )
@@ -645,7 +1059,8 @@ async def delegate_next(graph_run_id: str) -> dict[str, Any]:
 @mcp.tool()
 @_public_tool_errors
 async def submit_decisions(graph_run_id: str, decisions: list[Decision],
-                           expected_revision: int) -> dict[str, Any]:
+                           expected_revision: int,
+                           auto_continue: bool = False) -> dict[str, Any]:
     """Record Lead decisions after semantic review of exact captured Peer reports.
 
     For action='block' or 'replan', set owner and return_checkpoint.
@@ -683,10 +1098,32 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
                 if decision.action in {"replan", "block"} else None
             ),
         })
-    return graph_runtime.submit_decisions(
+    result = graph_runtime.submit_decisions(
         graph_run_id, parsed, expected_revision=expected_revision,
         lead_dispositions=tuple(dispositions),
     )
+    if not auto_continue:
+        return result
+    # The semantic decisions are already durable. If a subsequent dispatch
+    # fails, report the error as a separate continuation outcome so Lead does
+    # not mistake a committed ACCEPT/RETRY for an uncommitted decision.
+    continuation = None
+    continuation_error = None
+    if (result["graph_state"] in {"ready", "awaiting_review"}
+            and result["runnable_nodes"]
+            and not any(node["semantic_state"] == "blocked" for node in result["nodes"])):
+        try:
+            continuation = await delegate_next(graph_run_id)
+        except (ValueError, RuntimeError, ToolError) as exc:
+            continuation_error = str(exc)
+    return {
+        "graph_run_id": graph_run_id,
+        "decision_outcomes": result["decision_outcomes"],
+        "replan_required_nodes": result["replan_required_nodes"],
+        "continuation_results": continuation["results"] if continuation else [],
+        "continuation_error": continuation_error,
+        "review_bundle": await get_review_bundle(graph_run_id),
+    }
 
 @mcp.tool()
 @_public_tool_errors

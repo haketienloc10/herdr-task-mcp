@@ -965,13 +965,23 @@ class GraphRuntime:
             self.readiness_guard(graph_run_id)
         _, snapshot, revision = self._snapshot(graph_run_id)
         graph_state = derive_graph_state(snapshot)
-        if graph_state != "ready":
+        # Replan/block is a fail-closed boundary for the ENTIRE authored graph.
+        # derive_graph_state can report awaiting_review when another node is
+        # reviewable, so checking only the aggregate graph state is insufficient.
+        if any(node.semantic_state == "blocked" for node in snapshot.node_states):
+            raise RuntimeError(
+                "graph has blocked/replanned nodes; reconcile or resolve before delegation"
+            )
+        # A node awaiting Lead review blocks its dependents, NOT unrelated
+        # pending+idle nodes, provided no node has crossed a fail-closed boundary.
+        # The store still enforces one active wave per graph.
+        if graph_state not in {"ready", "awaiting_review"}:
             raise RuntimeError(
                 f"graph is not ready for delegation: state={graph_state!r}"
             )
         candidates = runnable_nodes(snapshot)
         if not candidates:
-            raise RuntimeError("graph is ready but has no runnable node")
+            raise RuntimeError("graph has no runnable node; review pending evidence first")
         if not callable(executor):
             raise ValueError("repo-task executor must be callable")
 
