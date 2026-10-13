@@ -600,6 +600,9 @@ def test_adaptive_budget_pages_metadata_without_dropping_attempts(
 
     for _ in range(5):
         asyncio.run(gr.delegate_next(gid, executor=executor))
+    # Never return an empty page with next_review_offset unchanged.
+    with pytest.raises(ToolError, match="one review's metadata exceeds"):
+        asyncio.run(server.get_review_bundle(gid, max_total_chars=5000))
     first = asyncio.run(server.get_review_bundle(gid, max_total_chars=14000))
     assert 0 < len(first["reviews"]) < 5
     assert first["more_reviews"]
