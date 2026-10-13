@@ -167,6 +167,8 @@ mcp = MCPServer(
         "For new work prefer submit_workflow: atomically register request, sources, "
         "evidence-linked assessment and direct single/multiple tasks, or a Discovery plan. "
         "Use alias:<name> for source evidence references in submit_workflow only. "
+        "After Discovery use continue_workflow on the existing request_id to reassess "
+        "and dispatch without losing captured provenance. "
         "Legacy prepare_task_request and submit_context_assessment remain available. "
         "Set readiness decision direct for actionable requirements; this does not choose task count. "
         "Use targeted/full Discovery only with blocking unknowns and a matching assessment. "
@@ -632,24 +634,14 @@ async def get_review_evidence(
     }
 
 
-@mcp.tool()
-@_public_tool_errors
-async def submit_workflow(
-    user_request: str,
+def _validate_workflow_plan(
     assessment: ReadinessAssessment,
-    sources: list[WorkflowSource] | None = None,
-    single_task: Node | None = None,
-    graph: Graph | None = None,
-    requirement_map: dict[str, list[str]] | None = None,
-    discovery: DiscoveryPlan | None = None,
-    auto_dispatch: bool = True,
-) -> dict[str, Any]:
-    """One Lead entry point; preserve direct, targeted/full Discovery and BLOCKED.
-
-    Alias evidence refs use `alias:<source_alias>`; stored refs remain source UUIDs.
-    Graph and single_task are mutually exclusive. Dispatch is synchronous so Peer
-    execution remains owned by the request (no unsafe in-process background task).
-    """
+    single_task: Node | None,
+    graph: Graph | None,
+    requirement_map: dict[str, list[str]] | None,
+    discovery: DiscoveryPlan | None,
+):
+    """Keep the same direct/Discovery/blocked policy for new and continued requests."""
     decision = assessment.decision
     direct = decision == "direct"
     if direct:
@@ -670,6 +662,7 @@ async def submit_workflow(
     elif discovery is not None:
         raise ValueError("Discovery plan requires targeted_discovery/full_discovery readiness")
 
+    selected_graph = None
     authored_graph = None
     if direct:
         selected_graph = Graph(nodes=[single_task]) if single_task is not None else graph
@@ -690,7 +683,100 @@ async def submit_workflow(
             ]}},
             [node.node_id for node in authored_graph.nodes], requirement_map,
         )
+    return selected_graph, authored_graph, requirement_map
 
+
+async def _advance_assessed_workflow(
+    registered: dict[str, Any],
+    selected_graph: Graph | None,
+    authored_graph,
+    requirement_map: dict[str, list[str]] | None,
+    discovery: DiscoveryPlan | None,
+    auto_dispatch: bool,
+    source_aliases: dict[str, str],
+) -> dict[str, Any]:
+    """Dispatch from a persisted assessment, never infer ACCEPT from Peer completion."""
+    request_id = registered["request_id"]
+    if registered["assessment"]["decision"] != "direct":
+        if discovery is None:
+            return {"task_request": registered, "source_aliases": source_aliases,
+                    "state": "blocked", "next_step": "user_decision"}
+        try:
+            result = await delegate_discovery(
+                request_id, discovery.repository_names, discovery.route,
+                discovery.questions, discovery.mode,
+            )
+        except (ValueError, RuntimeError, ToolError) as exc:
+            return {
+                "task_request": task_requests.get(request_id, include_content=False),
+                "source_aliases": source_aliases,
+                "state": "discovery_failed", "discovery_error": str(exc),
+                "next_step": "inspect persisted discovery and recover or reassess",
+            }
+        updated = result.get("task_request")
+        captured_source = None
+        if updated is not None:
+            before = {source["id"] for source in registered["sources"]}
+            captured_source = next(
+                (source["id"] for source in updated["sources"]
+                 if source["id"] not in before),
+                None,
+            )
+        return {
+            "task_request": _compact_task_request(updated) if updated else registered,
+            "source_aliases": source_aliases,
+            "state": "discovery_complete" if captured_source else "discovery_needs_attention",
+            "discovery_id": result["discovery_id"],
+            "turn_id": result["result"].get("turn_id"),
+            "result_state": result["result"].get("state"),
+            "captured_source_id": captured_source,
+            "attachment_error": result["attachment_error"],
+            "next_step": "review discovery evidence and reassess readiness",
+        }
+
+    current = task_requests.assert_ready(request_id, registered["revision"])
+    _preflight_bound_packets(authored_graph, current, requirement_map)
+    started = await start_graph(
+        selected_graph, request_id, registered["revision"], requirement_map,
+    )
+    answer = {
+        "task_request": registered, "source_aliases": source_aliases,
+        "graph_run_id": started["graph_run_id"], "state": "ready",
+    }
+    if auto_dispatch:
+        try:
+            await delegate_next(started["graph_run_id"])
+        except (ValueError, RuntimeError, ToolError) as exc:
+            # Always return the graph identity after persistence; never duplicate
+            # a dispatched Peer just because the first tool call reported an error.
+            answer["dispatch_error"] = str(exc)
+        answer["review_bundle"] = await get_review_bundle(started["graph_run_id"])
+        answer["state"] = (
+            "dispatch_failed" if "dispatch_error" in answer
+            else answer["review_bundle"]["graph_state"]
+        )
+    return answer
+
+
+@mcp.tool()
+@_public_tool_errors
+async def submit_workflow(
+    user_request: str,
+    assessment: ReadinessAssessment,
+    sources: list[WorkflowSource] | None = None,
+    single_task: Node | None = None,
+    graph: Graph | None = None,
+    requirement_map: dict[str, list[str]] | None = None,
+    discovery: DiscoveryPlan | None = None,
+    auto_dispatch: bool = True,
+) -> dict[str, Any]:
+    """One Lead entry point: atomic request+sources+readiness then optional dispatch.
+
+    Evidence refs may use alias:<name> for sources in this call only.
+    """
+    selected_graph, authored_graph, requirement_map = _validate_workflow_plan(
+        assessment, single_task, graph, requirement_map, discovery,
+    )
     entries = sources or []
     aliases = [entry.alias for entry in entries]
     if len(set(aliases)) != len(aliases):
@@ -701,72 +787,51 @@ async def submit_workflow(
         assessment.model_dump(),
         source_aliases=aliases,
     )
-    request_id = registered["request_id"]
-    aliases_to_id = {
-        alias: source["id"]
-        for alias, source in zip(aliases, registered["sources"])
-    }
-    if not direct:
-        if discovery is None:
-            return {"task_request": registered, "source_aliases": aliases_to_id,
-                    "state": "blocked", "next_step": "user_decision"}
-        try:
-            result = await delegate_discovery(
-                request_id, discovery.repository_names, discovery.route,
-                discovery.questions, discovery.mode,
-            )
-        except (ValueError, RuntimeError, ToolError) as exc:
-            return {
-                "task_request": task_requests.get(request_id, include_content=False),
-                "source_aliases": aliases_to_id,
-                "state": "discovery_failed", "discovery_error": str(exc),
-                "next_step": "inspect persisted discovery and recover or reassess",
-            }
-        updated = result.get("task_request")
-        captured_source = None
-        if updated is not None:
-            before = {s["id"] for s in registered["sources"]}
-            captured_source = next(
-                (s["id"] for s in updated["sources"] if s["id"] not in before),
-                None,
-            )
-        return {
-            "task_request": _compact_task_request(updated) if updated else registered,
-            "source_aliases": aliases_to_id,
-            "state": "discovery_complete" if captured_source else "discovery_needs_attention",
-            "discovery_id": result["discovery_id"],
-            "turn_id": result["result"].get("turn_id"),
-            "result_state": result["result"].get("state"),
-            "captured_source_id": captured_source,
-            "attachment_error": result["attachment_error"],
-            "next_step": "review discovery evidence and reassess readiness",
-        }
-
-    # Preflight currently materialized input; future upstream evidence is checked
-    # again by _graph_execute when it actually exists.
-    current = task_requests.assert_ready(request_id, registered["revision"])
-    _preflight_bound_packets(authored_graph, current, requirement_map)
-    started = await start_graph(
-        selected_graph, request_id, registered["revision"], requirement_map,
+    return await _advance_assessed_workflow(
+        registered, selected_graph, authored_graph, requirement_map,
+        discovery, auto_dispatch,
+        {alias: source["id"] for alias, source in zip(aliases, registered["sources"])},
     )
-    answer = {
-        "task_request": registered, "source_aliases": aliases_to_id,
-        "graph_run_id": started["graph_run_id"],
-        "state": "ready",
-    }
-    if auto_dispatch:
-        try:
-            await delegate_next(started["graph_run_id"])
-        except (ValueError, RuntimeError, ToolError) as exc:
-            # The graph and any attempted native work are durable. Return their ID
-            # even on dispatch failure, so Lead never retries by creating a duplicate.
-            answer["dispatch_error"] = str(exc)
-        answer["review_bundle"] = await get_review_bundle(started["graph_run_id"])
-        answer["state"] = (
-            "dispatch_failed" if "dispatch_error" in answer
-            else answer["review_bundle"]["graph_state"]
+
+
+@mcp.tool()
+@_public_tool_errors
+async def continue_workflow(
+    request_id: str,
+    expected_revision: int,
+    assessment: ReadinessAssessment,
+    single_task: Node | None = None,
+    graph: Graph | None = None,
+    requirement_map: dict[str, list[str]] | None = None,
+    discovery: DiscoveryPlan | None = None,
+    auto_dispatch: bool = True,
+) -> dict[str, Any]:
+    """Reassess and resume the SAME request after Discovery/context revision.
+
+    Source refs must be persisted source UUIDs, not submit_workflow aliases.
+    Prior Discovery captures and request provenance stay attached to this request.
+    """
+    selected_graph, authored_graph, requirement_map = _validate_workflow_plan(
+        assessment, single_task, graph, requirement_map, discovery,
+    )
+    current = task_requests.get(request_id)
+    if current["revision"] != expected_revision:
+        raise RuntimeError("stale task context revision")
+    authored_assessment = assessment.model_dump()
+    task_requests._check_assessment(current, authored_assessment)
+    if authored_graph is not None:
+        # Preflight before the assessment changes, so a bad packet does not leave
+        # a fresh, unused readiness revision behind.
+        _preflight_bound_packets(
+            authored_graph, {**current, "assessment": authored_assessment},
+            requirement_map,
         )
-    return answer
+    updated = task_requests.assess(request_id, expected_revision, authored_assessment)
+    registered = _compact_task_request(updated)
+    return await _advance_assessed_workflow(
+        registered, selected_graph, authored_graph, requirement_map,
+        discovery, auto_dispatch, {},
+    )
 
 
 @mcp.tool()
