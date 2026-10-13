@@ -16,6 +16,7 @@ from qiqi_delegate.task_graph_runtime import (
 )
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_graph import GraphNode
+from qiqi_delegate.task_graph_validation import validate_task_graph
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval import FinalEvaluationCoordinator
 
@@ -57,16 +58,59 @@ class Graph(BaseModel):
     model_config = ConfigDict(extra="forbid")
     nodes: list[Node] = Field(min_length=1)
 
-class RequestSource(BaseModel):
+class InlineSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["inline", "repo_file", "workspace_file", "peer_turn", "accepted_graph_node"]
-    text: str | None = None
+    kind: Literal["inline"]
+    text: str
     label: str | None = None
-    repository: str | None = None
-    path: str | None = None
-    turn_id: str | None = None
-    graph_run_id: str | None = None
-    node_id: str | None = None
+
+
+class RepoFileSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["repo_file"]
+    repository: str
+    path: str
+
+
+class WorkspaceFileSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["workspace_file"]
+    path: str
+
+
+class PeerTurnSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["peer_turn"]
+    turn_id: str
+
+
+class AcceptedGraphNodeSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["accepted_graph_node"]
+    graph_run_id: str
+    node_id: str
+
+
+RequestSource = Annotated[
+    InlineSource | RepoFileSource | WorkspaceFileSource |
+    PeerTurnSource | AcceptedGraphNodeSource,
+    Field(discriminator="kind"),
+]
+
+
+class WorkflowSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    alias: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    source: RequestSource
+
+
+class DiscoveryPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repository_names: list[str]
+    route: str
+    questions: list[str]
+    mode: Literal["targeted_discovery", "full_discovery"]
+
 
 class RequirementInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -120,12 +164,17 @@ mcp = MCPServer(
         "Lead owns technical acceptance. Native result hooks are the only answer source. "
         "No terminal scraping, Supervisor, or sibling repository reads. "
         "Call workspace_info first for registered repositories and route names. "
-        "For new work, register the user request and optional sources using "
-        "prepare_task_request; assess readiness before implementation. "
+        "For new work prefer submit_workflow: atomically register request, sources, "
+        "evidence-linked assessment and direct single/multiple tasks, or a Discovery plan. "
+        "Use alias:<name> for source evidence references in submit_workflow only. "
+        "Legacy prepare_task_request and submit_context_assessment remain available. "
         "Set readiness decision direct for actionable requirements; this does not choose task count. "
         "Use targeted/full Discovery only with blocking unknowns and a matching assessment. "
         "A document or handoff is never required. "
-        "For multiple nodes: start_graph, delegate_next, get_node_reviews, submit_decisions. "
+        "For direct work use one submit_workflow call to dispatch the first wave, "
+        "inspect the bounded review bundle, then submit_decisions(auto_continue=True). "
+        "Use get_review_evidence for further exact response chunks before ACCEPT. "
+        "Keep start_graph, delegate_next and get_node_reviews for recovery or legacy flows. "
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
         "After all TaskGraph nodes are satisfied, graph_state complete only means "
         "execution complete: call start_final_evaluation with a deliberately configured "
@@ -160,7 +209,8 @@ mcp = MCPServer(
         "and unrun cases; never imply an unrun test passed. "
         "For documentation require implementation-grounded claims and accurate examples. "
         "Avoid irrelevant criteria and verbose reports for simple tasks. "
-        "Before ACCEPT, read the exact captured Peer response via get_node_reviews, "
+        "Before ACCEPT, read exact captured evidence via the review bundle and, "
+        "when truncated, get_review_evidence (or legacy get_node_reviews), "
         "check evidence against the criteria and RETRY with targeted feedback if shallow. "
         "In the final answer, preserve concrete findings and citations across Peer reports; "
         "do not replace them with a generic high-level paraphrase. "
@@ -218,6 +268,17 @@ def _public_tool_errors(func):
                 f"code={code}; {public_detail}; action={action}"
             ) from exc
     return wrapper
+
+
+def _compact_task_request(value: dict[str, Any]) -> dict[str, Any]:
+    """Never repeat raw source contents in routine Lead MCP responses."""
+    return {
+        **value,
+        "sources": [
+            {key: content for key, content in source.items() if key != "content"}
+            for source in value.get("sources", [])
+        ],
+    }
 
 
 def _to_packet(value: Packet):
@@ -312,16 +373,40 @@ async def prepare_task_request(
     sources: list[RequestSource] | None = None,
 ) -> dict[str, Any]:
     """Preserve raw user intent and optional context sources without Discovery."""
-    return task_requests.create(
+    return _compact_task_request(task_requests.create(
         user_request, [source.model_dump(exclude_none=True) for source in (sources or [])]
-    )
+    ))
 
 
 @mcp.tool()
 @_public_tool_errors
-async def get_task_request(request_id: str) -> dict[str, Any]:
-    """Read intent, source snapshots, assessment and current staleness."""
-    return task_requests.get(request_id)
+async def get_task_request(request_id: str, include_content: bool = False) -> dict[str, Any]:
+    """Read compact source descriptors by default; opt in to full legacy content."""
+    return task_requests.get(request_id, include_content=include_content)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def get_task_source(
+    request_id: str, source_id: str, offset: int = 0, max_chars: int = 12000,
+) -> dict[str, Any]:
+    """Read a bounded, exact slice of a persisted source (never a repository path)."""
+    if offset < 0 or not 1 <= max_chars <= 24000:
+        raise ValueError("offset must be nonnegative and max_chars in 1..24000")
+    current = task_requests.get(request_id)
+    source = next((s for s in current["sources"] if s["id"] == source_id), None)
+    if source is None:
+        raise ValueError("source_id does not belong to task request")
+    content = source["content"]
+    if offset > len(content):
+        raise ValueError("source offset exceeds content length")
+    end = min(len(content), offset + max_chars)
+    return {
+        "request_id": request_id, "source_id": source_id,
+        "sha256": source["sha256"], "offset": offset,
+        "content": content[offset:end], "total_chars": len(content),
+        "next_offset": end if end < len(content) else None,
+    }
 
 
 @mcp.tool()
@@ -330,9 +415,9 @@ async def add_task_source(
     request_id: str, expected_revision: int, source: RequestSource,
 ) -> dict[str, Any]:
     """Append an explicit source; invalidate previous readiness assessment."""
-    return task_requests.append(
+    return _compact_task_request(task_requests.append(
         request_id, expected_revision, source.model_dump(exclude_none=True),
-    )
+    ))
 
 
 @mcp.tool()
@@ -341,9 +426,9 @@ async def submit_context_assessment(
     request_id: str, expected_revision: int, assessment: ReadinessAssessment,
 ) -> dict[str, Any]:
     """Record evidence-linked readiness, not LLM self-confidence."""
-    return task_requests.assess(
+    return _compact_task_request(task_requests.assess(
         request_id, expected_revision, assessment.model_dump(),
-    )
+    ))
 
 
 @mcp.tool()
