@@ -91,6 +91,19 @@ class AcceptedGraphNodeSource(BaseModel):
     node_id: str
 
 
+class LegacyRequestSource(BaseModel):
+    """Old MCP source shape accepts irrelevant null keys, but not non-null extras."""
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["inline", "repo_file", "workspace_file", "peer_turn", "accepted_graph_node"]
+    text: str | None = None
+    label: str | None = None
+    repository: str | None = None
+    path: str | None = None
+    turn_id: str | None = None
+    graph_run_id: str | None = None
+    node_id: str | None = None
+
+
 RequestSource = Annotated[
     InlineSource | RepoFileSource | WorkspaceFileSource |
     PeerTurnSource | AcceptedGraphNodeSource,
@@ -372,19 +385,26 @@ async def workspace_info() -> dict[str, Any]:
 @_public_tool_errors
 async def prepare_task_request(
     user_request: str,
-    sources: list[RequestSource] | None = None,
+    sources: list[LegacyRequestSource] | None = None,
 ) -> dict[str, Any]:
-    """Preserve raw user intent and optional context sources without Discovery."""
-    return _compact_task_request(task_requests.create(
+    """Legacy source shape and full-content response remain unchanged."""
+    return task_requests.create(
         user_request, [source.model_dump(exclude_none=True) for source in (sources or [])]
-    ))
+    )
 
 
 @mcp.tool()
 @_public_tool_errors
-async def get_task_request(request_id: str, include_content: bool = False) -> dict[str, Any]:
-    """Read compact source descriptors by default; opt in to full legacy content."""
+async def get_task_request(request_id: str, include_content: bool = True) -> dict[str, Any]:
+    """Legacy behavior: full sources unless compact is explicitly requested."""
     return task_requests.get(request_id, include_content=include_content)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def get_task_request_summary(request_id: str) -> dict[str, Any]:
+    """Compact task context metadata for new Lead clients."""
+    return task_requests.get(request_id, include_content=False)
 
 
 @mcp.tool()
@@ -414,12 +434,12 @@ async def get_task_source(
 @mcp.tool()
 @_public_tool_errors
 async def add_task_source(
-    request_id: str, expected_revision: int, source: RequestSource,
+    request_id: str, expected_revision: int, source: LegacyRequestSource,
 ) -> dict[str, Any]:
-    """Append an explicit source; invalidate previous readiness assessment."""
-    return _compact_task_request(task_requests.append(
+    """Legacy append: preserve full response and optional null source keys."""
+    return task_requests.append(
         request_id, expected_revision, source.model_dump(exclude_none=True),
-    ))
+    )
 
 
 @mcp.tool()
@@ -428,9 +448,9 @@ async def submit_context_assessment(
     request_id: str, expected_revision: int, assessment: ReadinessAssessment,
 ) -> dict[str, Any]:
     """Record evidence-linked readiness, not LLM self-confidence."""
-    return _compact_task_request(task_requests.assess(
+    return task_requests.assess(
         request_id, expected_revision, assessment.model_dump(),
-    ))
+    )
 
 
 @mcp.tool()
@@ -566,6 +586,11 @@ async def get_review_bundle(
     if (not 1 <= max_reviews <= 8 or not 1 <= max_chars_per_review <= 8000
             or review_offset < 0):
         raise ValueError("max_reviews must be 1..8, max_chars_per_review 1..8000 and review_offset >= 0")
+    if review_offset > 0 and expected_revision is None:
+        raise ValueError(
+            "expected_revision is required for review_offset > 0; "
+            "use the revision from the first review bundle"
+        )
     current = graph_runtime.get_graph(graph_run_id)
     if expected_revision is not None and current["revision"] != expected_revision:
         raise RuntimeError("stale graph snapshot revision")
@@ -1085,7 +1110,8 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
     continuation = None
     continuation_error = None
     if (result["graph_state"] in {"ready", "awaiting_review"}
-            and result["runnable_nodes"]):
+            and result["runnable_nodes"]
+            and not any(node["semantic_state"] == "blocked" for node in result["nodes"])):
         try:
             continuation = await delegate_next(graph_run_id)
         except (ValueError, RuntimeError, ToolError) as exc:
