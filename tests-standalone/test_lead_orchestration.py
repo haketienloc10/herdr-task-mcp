@@ -83,10 +83,10 @@ def settled_delegate(runtime, response="backend/flow.py:20 verified"):
     return calls, delegate
 
 
-def test_source_schema_rejects_fields_invalid_for_kind():
-    from qiqi_delegate.server import WorkspaceFileSource
+def test_source_schema_rejects_fields_invalid_for_kind(tmp_path, monkeypatch):
+    server, _, _, _ = environment(tmp_path, monkeypatch)
     with pytest.raises(ValidationError):
-        WorkspaceFileSource(kind="workspace_file", path="spec.md", label="invalid")
+        server.WorkspaceFileSource(kind="workspace_file", path="spec.md", label="invalid")
 
 
 def test_create_assessed_is_atomic_and_resolves_aliases(tmp_path, monkeypatch):
@@ -243,7 +243,12 @@ def test_oversized_initial_context_refused_before_graph_dispatch(tmp_path, monke
         ))
     assert not calls
     with store._connect() as db:
-        assert db.execute("SELECT COUNT(*) FROM graph_runs").fetchone()[0] == 0
+        table = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='graph_runs'"
+        ).fetchone()
+        assert table is None or db.execute(
+            "SELECT COUNT(*) FROM graph_runs"
+        ).fetchone()[0] == 0
 
 
 def test_independent_wave_runs_while_other_node_awaits_review(tmp_path, monkeypatch):
