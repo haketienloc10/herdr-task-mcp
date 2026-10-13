@@ -126,10 +126,13 @@ def test_submit_workflow_compact_sources_and_exact_pagination(tmp_path, monkeypa
     assert "content" not in result["task_request"]["sources"][0]
     rid = result["task_request"]["request_id"]
     sid = result["source_aliases"]["spec"]
-    compact = asyncio.run(server.get_task_request(rid))
+    compact = asyncio.run(server.get_task_request_summary(rid))
     assert len(str(compact)) < 5000
     assert "content" not in compact["sources"][0]
-    full = asyncio.run(server.get_task_request(rid, include_content=True))
+    assert "content" not in asyncio.run(
+        server.get_task_request(rid, include_content=False)
+    )["sources"][0]
+    full = asyncio.run(server.get_task_request(rid))
     assert full["sources"][0]["content"] == content
     first = asyncio.run(server.get_task_source(rid, sid, 0, 12000))
     assert first["next_offset"] == 12000
@@ -303,7 +306,11 @@ def test_review_bundle_pagination_covers_more_than_first_page(tmp_path, monkeypa
     assert first["review_required_count"] == 6
     assert first["more_reviews"]
     assert first["next_review_offset"] == 4
-    second = asyncio.run(server.get_review_bundle(gid, review_offset=4))
+    with pytest.raises(ValueError, match="expected_revision is required"):
+        asyncio.run(server.get_review_bundle(gid, review_offset=4))
+    second = asyncio.run(server.get_review_bundle(
+        gid, review_offset=4, expected_revision=first["revision"],
+    ))
     assert [item["node_id"] for item in second["reviews"]] == ["4", "5"]
     assert second["next_review_offset"] is None
 
@@ -324,3 +331,135 @@ def test_failed_first_dispatch_returns_durable_graph_identity(tmp_path, monkeypa
     persisted = gr.get_graph(output["graph_run_id"])
     assert persisted["review_required"][0]["node_id"] == "A"
     assert persisted["review_required"][0]["runtime_state"] == "failed"
+
+
+def test_review_pages_fail_closed_after_intervening_lead_accept(tmp_path, monkeypatch):
+    server, _, _, gr = environment(tmp_path, monkeypatch)
+    graph = task_graph_from_payload(server.Graph(
+        nodes=[node(server, str(i)) for i in range(6)],
+    ).model_dump())
+    gid = gr.start_graph(graph, repository_names=["backend"])["graph_run_id"]
+
+    async def executor(item):
+        return {
+            "state": "settled", "turn_id": "turn-" + item.node_id,
+            "session_id": "session-" + item.node_id,
+            "agent_response": "validated report: " + item.node_id,
+        }
+
+    for _ in range(6):
+        asyncio.run(gr.delegate_next(gid, executor=executor))
+    page1 = asyncio.run(server.get_review_bundle(gid))
+    assert [r["node_id"] for r in page1["reviews"]] == ["0", "1", "2", "3"]
+    from qiqi_delegate.task_graph_runtime import decisions_from_payload
+    gr.submit_decisions(
+        gid, decisions_from_payload([{"node_id": "0", "action": "accept"}]),
+        expected_revision=page1["revision"],
+    )
+    # The review set has shifted. Never silently return only item 5 and lose 4.
+    with pytest.raises(ValueError, match="expected_revision is required"):
+        asyncio.run(server.get_review_bundle(gid, review_offset=4))
+    with pytest.raises(RuntimeError, match="stale graph snapshot"):
+        asyncio.run(server.get_review_bundle(
+            gid, review_offset=4, expected_revision=page1["revision"],
+        ))
+
+
+def test_replan_is_graph_wide_fail_closed_even_while_other_reviews_pending(
+    tmp_path, monkeypatch,
+):
+    server, runtime, _, gr = environment(tmp_path, monkeypatch)
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    subprocess.run(["git", "-C", str(frontend), "init", "-q"], check=True)
+    (runtime.root / "repos.yaml").write_text(
+        "repositories:\n  - name: backend\n    path: ../backend\n"
+        "  - name: frontend\n    path: ../frontend\n",
+        encoding="utf-8",
+    )
+    frontend_node = node(server, "B").model_copy(update={"repository": "frontend"})
+    authored = task_graph_from_payload(server.Graph(
+        nodes=[node(server, "A"), frontend_node, node(server, "C")],
+    ).model_dump())
+    gid = gr.start_graph(
+        authored, repository_names=runtime.repos().keys(),
+    )["graph_run_id"]
+    dispatched = []
+
+    async def executor(item):
+        dispatched.append(item.node_id)
+        return {
+            "state": "settled", "turn_id": "turn-" + item.node_id,
+            "session_id": "session-" + item.node_id,
+            "agent_response": "verified " + item.node_id,
+        }
+
+    first = asyncio.run(gr.delegate_next(gid, executor=executor))
+    assert dispatched == ["A", "B"]
+    # A's replan cannot permit C's unrelated pending work to race ahead,
+    # even though B still needs review and aggregate state awaits review.
+    response = asyncio.run(server.submit_decisions(
+        gid,
+        [server.Decision(
+            node_id="A", action="replan", owner="Lead",
+            return_checkpoint="reconcile graph",
+        )],
+        first["revision"], auto_continue=True,
+    ))
+    assert response["review_bundle"]["graph_state"] == "awaiting_review"
+    assert response["review_bundle"]["runnable_nodes"] == ["C"]
+    assert response["continuation_results"] == []
+    assert response["continuation_error"] is None
+    assert dispatched == ["A", "B"]
+    with pytest.raises(RuntimeError, match="blocked/replanned nodes"):
+        asyncio.run(gr.delegate_next(gid, executor=executor))
+    assert dispatched == ["A", "B"]
+
+
+def test_legacy_source_null_fields_and_full_result_contract(tmp_path, monkeypatch):
+    server, _, store, _ = environment(tmp_path, monkeypatch)
+    (tmp_path / "backend" / "spec.md").write_text("Legacy requirements")
+    variants = [
+        ("inline", {"text": "note"}),
+        ("repo_file", {"repository": "backend", "path": "spec.md"}),
+        ("workspace_file", {"path": "notes.md"}),
+        ("peer_turn", {"turn_id": "old-turn"}),
+        ("accepted_graph_node", {"graph_run_id": "graph", "node_id": "A"}),
+    ]
+    all_optional = {
+        "text": None, "label": None, "repository": None, "path": None,
+        "turn_id": None, "graph_run_id": None, "node_id": None,
+    }
+    for kind, fields in variants:
+        transport = server.LegacyRequestSource.model_validate({
+            "kind": kind, **all_optional, **fields,
+        })
+        assert transport.model_dump(exclude_none=True) == {
+            "kind": kind, **fields,
+        }
+    legacy = server.LegacyRequestSource.model_validate({
+        "kind": "repo_file", **all_optional,
+        "repository": "backend", "path": "spec.md",
+    })
+    created = asyncio.run(server.prepare_task_request("Inspect spec", [legacy]))
+    rid = created["request_id"]
+    assert created["sources"][0]["content"] == "Legacy requirements"
+    assert asyncio.run(server.get_task_request(rid))["sources"][0][
+        "content"
+    ] == "Legacy requirements"
+    compact = asyncio.run(server.get_task_request_summary(rid))
+    assert "content" not in compact["sources"][0]
+    appended = asyncio.run(server.add_task_source(
+        rid, created["revision"],
+        server.LegacyRequestSource(
+            kind="inline", text="Another requirement", path=None,
+        ),
+    ))
+    assert len(appended["sources"]) == 2
+    assert appended["sources"][1]["content"] == "Another requirement"
+    assessed = asyncio.run(server.submit_context_assessment(
+        rid, appended["revision"],
+        assessment(server, refs=(appended["sources"][0]["id"],)),
+    ))
+    assert assessed["sources"][0]["content"] == "Legacy requirements"
+    assert store.get(rid)["revision"] == assessed["revision"]
