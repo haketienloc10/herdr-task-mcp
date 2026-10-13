@@ -356,7 +356,7 @@ def test_review_pages_fail_closed_after_intervening_lead_accept(tmp_path, monkey
 
     for _ in range(6):
         asyncio.run(gr.delegate_next(gid, executor=executor))
-    page1 = asyncio.run(server.get_review_bundle(gid))
+    page1 = asyncio.run(server.get_review_bundle(gid, max_reviews=4))
     assert [r["node_id"] for r in page1["reviews"]] == ["0", "1", "2", "3"]
     from qiqi_delegate.task_graph_runtime import decisions_from_payload
     gr.submit_decisions(
