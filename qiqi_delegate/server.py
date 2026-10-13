@@ -726,6 +726,50 @@ async def get_review_bundle(
         set_lengths(lengths)
     return bundle()
 
+
+async def _embedded_review_bundle(
+    graph_run_id: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Never hide a committed graph/Peer attempt due to review presentation limits.
+
+    Public get_review_bundle remains strict about total-response budgets. Workflow
+    responses additionally provide a small recovery index if hydration fails:
+    the graph identity, current revision, and exact attempt locators survive even
+    when a single acceptance criterion is too large for the maximum budget.
+    """
+    try:
+        return await get_review_bundle(graph_run_id), None
+    except (ToolError, ValueError, RuntimeError) as exc:
+        # Read persistence again: dispatch/decisions may have committed a new
+        # revision before the review presentation failed.
+        current = graph_runtime.get_graph(graph_run_id)
+        reviews = current["review_required"]
+        locators = [
+            {
+                "node_id": item["node_id"],
+                "attempt_id": item["attempt_id"],
+                "runtime_state": item["runtime_state"],
+            }
+            for item in reviews[:8]
+        ]
+        return {
+            "graph_run_id": graph_run_id,
+            "revision": current["revision"],
+            "graph_state": current["graph_state"],
+            "review_required_count": len(reviews),
+            "review_locators": locators,
+            "more_review_locators": len(reviews) > len(locators),
+            "reviews": [],
+            "incomplete": True,
+            "next_step": (
+                "Review presentation failed after graph state was persisted. "
+                "Do not resubmit the workflow or semantic decisions. "
+                "Use get_review_bundle(max_total_chars=64000) for larger metadata "
+                "or get_review_evidence with the exact node_id, attempt_id and "
+                "revision supplied in review_locators."
+            ),
+        }, str(exc)
+
 @mcp.tool()
 @_public_tool_errors
 async def get_review_evidence(
@@ -872,7 +916,11 @@ async def _advance_assessed_workflow(
             # Always return the graph identity after persistence; never duplicate
             # a dispatched Peer just because the first tool call reported an error.
             answer["dispatch_error"] = str(exc)
-        answer["review_bundle"] = await get_review_bundle(started["graph_run_id"])
+        answer["review_bundle"], review_error = await _embedded_review_bundle(
+            started["graph_run_id"]
+        )
+        if review_error is not None:
+            answer["review_bundle_error"] = review_error
         answer["state"] = (
             "dispatch_failed" if "dispatch_error" in answer
             else answer["review_bundle"]["graph_state"]
@@ -1213,13 +1261,15 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
             continuation = await delegate_next(graph_run_id)
         except (ValueError, RuntimeError, ToolError) as exc:
             continuation_error = str(exc)
+    review_bundle, review_error = await _embedded_review_bundle(graph_run_id)
     return {
         "graph_run_id": graph_run_id,
         "decision_outcomes": result["decision_outcomes"],
         "replan_required_nodes": result["replan_required_nodes"],
         "continuation_results": continuation["results"] if continuation else [],
         "continuation_error": continuation_error,
-        "review_bundle": await get_review_bundle(graph_run_id),
+        "review_bundle": review_bundle,
+        **({"review_bundle_error": review_error} if review_error is not None else {}),
     }
 
 @mcp.tool()
