@@ -115,6 +115,97 @@ Trong lời gọi MCP, truyền **tên route** như `codex-balanced`. Không tru
 
 Muốn giữ chế độ yêu cầu xác nhận, sửa `args: []` cho từng route. Installer chỉ tạo `agent-routing.yaml` khi file chưa tồn tại; chạy lại installer không ghi đè cấu hình hiện có.
 
+## Workflow mới: Lead → MCP → Peer (server-owned orchestration)
+
+Các high-level MCP tools **gộp việc điều phối**, không thay thế Discovery, analysis,
+TaskGraph, native capture, semantic review, retry/replan, write claim, readiness gate
+hoặc independent final evaluation. Các tool thấp hơn vẫn có thể dùng để khôi phục
+hoặc chẩn đoán.
+
+- `submit_workflow`: nhận nguyên văn `user_request`, nguồn tùy chọn, `assessment` và
+  đúng một `single_task` hoặc `graph` nếu `decision=direct`. Server tạo request +
+  snapshot + assessment **nguyên tử**, validate mapping và preflight TaskPacket trước
+  khi tạo graph, sau đó mặc định chạy wave đầu. `single_task` được ánh xạ tự động
+  tới tất cả requirement IDs; multi-node graph cần `requirement_map`.
+- `submit_workflow` cũng nhận `discovery` khi decision là `targeted_discovery` hoặc
+  `full_discovery`; server vẫn gọi pipeline Discovery hiện hữu. Kết quả được capture
+  và gắn source, assessment cũ bị invalidated. Lead **phải review và reassess**
+  trước khi giao implementation. `blocked` không dispatch Peer.
+- `get_review_bundle`: trả graph state, chính xác attempt hiện hành và một đoạn
+  evidence hữu hạn (mặc định 3.000 ký tự/review, tối đa 4 review). Khi
+  `response_truncated=true`, dùng `get_review_evidence` với
+  `node_id + attempt_id + offset` để xem tiếp. Không ACCEPT chỉ dựa trên preview.
+- `submit_decisions(auto_continue=true)`: persist semantic decisions trước, rồi
+  tự gọi wave tiếp nếu có runnable node. Chỉ node có tất cả dependency ACCEPT mới
+  runnable; node độc lập có thể chạy dù node khác đang `awaiting_review`. Nếu
+  continuation lỗi, quyết định đã được commit và phản hồi có `continuation_error`.
+- `prepare_task_request`, `add_task_source`, `submit_context_assessment`,
+  `get_task_request` mặc định trả metadata không chứa raw `content`. Dùng
+  `get_task_source` để đọc từng phần hoặc `get_task_request(include_content=true)`
+  cho client legacy.
+
+### Direct: một call để đăng ký và chạy wave đầu
+
+~~~json
+{
+  "user_request": "Điều tra và sửa retry 429 trong backend, thêm regression test",
+  "sources": [
+    {"alias": "spec", "source": {"kind": "inline", "text": "Giữ nguyên public API"}}
+  ],
+  "assessment": {
+    "requirements": [
+      {"id": "R1", "text": "Retry HTTP 429 và giữ public API",
+       "evidence_refs": ["request:current", "alias:spec"]}
+    ],
+    "blocking_unknowns": [],
+    "decision": "direct",
+    "rationale": "Yêu cầu đã đủ actionable; chi tiết code do Peer tự điều tra"
+  },
+  "single_task": {
+    "node_id": "retry",
+    "repository": "backend",
+    "route": "codex-balanced",
+    "task_packet": {
+      "objective": "Triển khai retry 429, giữ public API",
+      "scope": ["HTTP client và regression tests"],
+      "acceptance_criteria": ["Có regression test", "Không đổi public API"]
+    }
+  }
+}
+~~~
+
+Server trả `task_request` compact, `graph_run_id` và `review_bundle`.
+Lead review response của Peer, đọc thêm bằng `get_review_evidence` nếu dài,
+rồi gọi `submit_decisions(graph_run_id, decisions, expected_revision,
+auto_continue=true)`. Sau khi graph complete, thực hiện **final evaluation**
+và `finalize_graph` như quy trình hiện tại; việc ACCEPT các node không thay thế
+independent evaluation.
+
+### Discovery và analysis vẫn được giữ nguyên
+
+Khi `decision=targeted_discovery/full_discovery`, thay `single_task` bằng:
+
+~~~json
+"discovery": {
+  "repository_names": ["backend", "frontend"],
+  "route": "codex-balanced",
+  "questions": ["Tìm retry origin với file:line", "Đối chiếu contract"],
+  "mode": "targeted_discovery"
+}
+~~~
+
+Lead đọc `captured_source_id` qua `get_task_source`, đánh giá lại readiness
+và tạo workflow implementation mới khi đủ điều kiện. Không đổi chính sách
+Discovery chỉ đọc bằng prompt (chưa có sandbox enforce). Analysis đã actionable
+vẫn dùng `decision=direct` với `single_task` hoặc `graph`, TaskPacket nêu rõ
+phạm vi chỉ đọc và acceptance criteria về evidence.
+
+**Giới hạn hiện tại:** `auto_dispatch`/`auto_continue` vẫn chờ Peer hoàn tất
+trong cùng MCP call. Chưa bổ sung durable background job hoặc tự động retry
+đối với Herdr startup/trust. Source đầy đủ vẫn được giữ trong SQLite;
+preflight kiểm tra context hiện có trước tạo graph, upstream evidence mới phát
+sinh được kiểm tra khi dispatch. Bản refactor không tự động rút gọn evidence.
+
 ## Task Readiness & Discovery-on-demand (Issue #6)
 
 TaskGraph hợp lệ không chứng minh task đúng ý user. Workflow mới giữ nguyên **user request** và context sources **tùy chọn**, dùng một Context Assessment đã lưu (với revision) để quyết định có thể giao ngay hay cần điều tra.
