@@ -1019,7 +1019,8 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
     # not mistake a committed ACCEPT/RETRY for an uncommitted decision.
     continuation = None
     continuation_error = None
-    if result["runnable_nodes"]:
+    if (result["graph_state"] in {"ready", "awaiting_review"}
+            and result["runnable_nodes"]):
         try:
             continuation = await delegate_next(graph_run_id)
         except (ValueError, RuntimeError, ToolError) as exc:
