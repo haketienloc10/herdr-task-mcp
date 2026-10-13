@@ -226,6 +226,19 @@ def test_discovery_preserved_and_requires_reassessment(tmp_path, monkeypatch):
     assert "backend/flow.py:20" in source["content"]
     with pytest.raises(ValueError, match="blocked"):
         store.assert_ready(output["task_request"]["request_id"])
+    request_id = output["task_request"]["request_id"]
+    continued = asyncio.run(server.continue_workflow(
+        request_id, output["task_request"]["revision"],
+        assessment(server, refs=("request:current", output["captured_source_id"])),
+        single_task=node(server),
+    ))
+    assert continued["task_request"]["request_id"] == request_id
+    assert continued["task_request"]["revision"] == output["task_request"]["revision"] + 1
+    assert continued["review_bundle"]["graph_state"] == "awaiting_review"
+    assert len(calls) == 2
+    assert output["result_state"] == "settled"
+    assert store.graph_binding(continued["graph_run_id"])["request_id"] == request_id
+    assert "backend/flow.py:20" in str(calls[1]["packet"].as_dict())
 
 
 def test_oversized_initial_context_refused_before_graph_dispatch(tmp_path, monkeypatch):
