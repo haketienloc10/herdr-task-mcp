@@ -662,6 +662,11 @@ async def get_review_bundle(
     while hydrated and _serialized_review_size(bundle()) > max_total_chars:
         hydrated.pop()
         responses.pop()
+    if selected and not hydrated:
+        raise ValueError(
+            "one review's metadata exceeds max_total_chars; "
+            "increase max_total_chars (up to 64000) or inspect get_node_reviews"
+        )
     if _serialized_review_size(bundle()) > max_total_chars:
         raise ValueError(
             "review graph metadata exceeds max_total_chars; "
