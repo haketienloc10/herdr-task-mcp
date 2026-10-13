@@ -134,11 +134,14 @@ hoặc chẩn đoán.
 - `get_review_bundle`: trả graph state, chính xác attempt hiện hành và một đoạn
   evidence hữu hạn (mặc định 3.000 ký tự/review, tối đa 4 review). Khi
   `response_truncated=true`, dùng `get_review_evidence` với
-  `node_id + attempt_id + offset` để xem tiếp. Không ACCEPT chỉ dựa trên preview.
+  `node_id + attempt_id + offset` để xem tiếp. Dùng `review_offset`/
+  `next_review_offset` để đọc các trang review tiếp theo. Không ACCEPT chỉ dựa trên preview.
 - `submit_decisions(auto_continue=true)`: persist semantic decisions trước, rồi
   tự gọi wave tiếp nếu có runnable node. Chỉ node có tất cả dependency ACCEPT mới
   runnable; node độc lập có thể chạy dù node khác đang `awaiting_review`. Nếu
   continuation lỗi, quyết định đã được commit và phản hồi có `continuation_error`.
+  Nếu dispatch đầu tiên lỗi, `submit_workflow` vẫn trả `graph_run_id` cùng
+  `dispatch_error` và review state để Lead phục hồi, không tạo graph trùng.
 - `prepare_task_request`, `add_task_source`, `submit_context_assessment`,
   `get_task_request` mặc định trả metadata không chứa raw `content`. Dùng
   `get_task_source` để đọc từng phần hoặc `get_task_request(include_content=true)`
