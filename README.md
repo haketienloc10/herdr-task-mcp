@@ -132,14 +132,32 @@ hoặc chẩn đoán.
   và gắn source, assessment cũ bị invalidated. Lead **phải review và reassess**
   bằng `continue_workflow` trên **chính request_id đã có** để không bỏ provenance
   trước khi giao implementation. `blocked` không dispatch Peer.
-- `get_review_bundle`: trả graph state, chính xác attempt hiện hành và một đoạn
-  evidence hữu hạn (mặc định 3.000 ký tự/review, tối đa 4 review). Khi
-  `response_truncated=true`, dùng `get_review_evidence` với
-  `node_id + attempt_id + offset` để xem tiếp. Dùng `review_offset`/
-  `next_review_offset` để đọc các trang review tiếp theo và **phải truyền**
-  `expected_revision` từ trang đầu khi `review_offset > 0`. Nếu graph thay đổi,
-  yêu cầu đọc lại từ trang đầu; không cho phép bỏ sót attempt do offset dịch chuyển.
+- `get_review_bundle`: trả graph state cùng chính xác attempt hiện hành;
+  **mặc định tổng JSON response tối đa 32.000 ký tự** (`max_total_chars`, điều
+  chỉnh trong 1.024–64.000). Ngân sách bao gồm graph/review metadata và escaped
+  evidence; phân bổ linh hoạt cho tối đa **8 review/trang** (mặc định). Nếu có
+  một response Peer dài 12.000 ký tự và tổng JSON vừa ngân sách, trả trọn trong
+  **một call**. `max_chars_per_review` vẫn nhận 1–64.000 như trần tùy chọn cho
+  từng review; giá trị này không vượt được ngân sách tổng.
+  Khi `response_truncated=true`, dùng `get_review_evidence` với
+  `node_id + attempt_id + next_offset` (`max_chars` tối đa 24.000) để đọc phần
+  còn lại; evidence gốc không bị cắt hoặc sửa trong storage. Nếu số review hoặc
+  metadata không vừa một response, dùng `review_offset`/`next_review_offset`
+  để lấy trang tiếp theo và **phải truyền** `expected_revision` từ trang đầu.
+  Graph thay đổi giữa các trang sẽ trả stale revision, tránh bỏ sót attempt.
   Không ACCEPT chỉ dựa trên preview.
+  Nếu chính graph/review metadata đã lớn hơn `max_total_chars`, standalone
+  `get_review_bundle` từ chối thay vì tự vượt giới hạn.
+  **Riêng sau khi high-level workflow đã persist thành công** (`submit_workflow`,
+  `continue_workflow` hoặc `submit_decisions(auto_continue=true)`), lỗi dựng
+  review bundle **không làm mất kết quả đã commit**: response vẫn có
+  `graph_run_id`, `state`/`decision_outcomes`, `review_bundle_error`, và
+  `review_bundle.incomplete=true` với `revision`, `review_required_count`,
+  tối đa 8 exact `review_locators` (`node_id`, `attempt_id`) để tiếp tục
+  đọc bằng `get_review_evidence`. Có thể thử
+  `get_review_bundle(max_total_chars=64000)` cho metadata vừa ngân sách.
+  **Không gửi lại workflow, cũng không gửi lại semantic decisions** chỉ vì
+  review presentation failed; Peer và quyết định đã được persist.
 - `submit_decisions(auto_continue=true)`: persist semantic decisions trước, rồi
   tự gọi wave tiếp nếu có runnable node. Chỉ node có tất cả dependency ACCEPT mới
   runnable; node độc lập có thể chạy dù node khác đang `awaiting_review`,

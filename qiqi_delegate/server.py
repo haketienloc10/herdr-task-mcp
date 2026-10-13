@@ -573,19 +573,44 @@ def _preflight_bound_packets(
         _contextual_packet(**payload)
 
 
+def _serialized_review_size(bundle: dict[str, Any]) -> int:
+    """Conservative JSON size estimate, including metadata and escaped evidence."""
+    return len(json.dumps(bundle, ensure_ascii=True))
+
+
+def _review_prefix_chars(response: str, encoded_budget: int, maximum: int) -> int:
+    """Find the longest exact prefix whose escaped JSON text fits its share."""
+    low, high = 0, min(len(response), maximum)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(response[:middle], ensure_ascii=True)) - 2 <= encoded_budget:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
 @mcp.tool()
 @_public_tool_errors
 async def get_review_bundle(
     graph_run_id: str,
     expected_revision: int | None = None,
-    max_reviews: int = 4,
-    max_chars_per_review: int = 3000,
+    max_reviews: int = 8,
+    max_chars_per_review: int = 32000,
     review_offset: int = 0,
+    max_total_chars: int = 32000,
 ) -> dict[str, Any]:
-    """One bounded graph state + exact attempt evidence read for Lead semantic review."""
-    if (not 1 <= max_reviews <= 8 or not 1 <= max_chars_per_review <= 8000
-            or review_offset < 0):
-        raise ValueError("max_reviews must be 1..8, max_chars_per_review 1..8000 and review_offset >= 0")
+    """Return as much exact review evidence as fits a bounded TOTAL JSON response.
+
+    The default budget includes graph/review metadata and escaped response text.
+    Full short reviews need no follow-up call; lengthy reviews carry next_offset.
+    """
+    if (not 1 <= max_reviews <= 8 or not 1 <= max_chars_per_review <= 64000
+            or not 1024 <= max_total_chars <= 64000 or review_offset < 0):
+        raise ValueError(
+            "max_reviews must be 1..8, max_chars_per_review 1..64000, "
+            "max_total_chars 1024..64000 and review_offset >= 0"
+        )
     if review_offset > 0 and expected_revision is None:
         raise ValueError(
             "expected_revision is required for review_offset > 0; "
@@ -598,7 +623,8 @@ async def get_review_bundle(
     if review_offset > len(required):
         raise ValueError("review_offset exceeds review count")
     selected = required[review_offset:review_offset + max_reviews]
-    hydrated = []
+    hydrated: list[dict[str, Any]] = []
+    responses: list[str | None] = []
     if selected:
         raw = graph_runtime.get_node_reviews(
             graph_run_id,
@@ -609,25 +635,140 @@ async def get_review_bundle(
             result = dict(review["result"])
             response = result.get("agent_response")
             if isinstance(response, str):
-                result["agent_response"] = response[:max_chars_per_review]
+                result["agent_response"] = ""
                 result["total_response_chars"] = len(response)
-                result["response_truncated"] = len(response) > max_chars_per_review
-                result["next_offset"] = (
-                    max_chars_per_review if result["response_truncated"] else None
-                )
+                result["response_truncated"] = bool(response)
+                result["next_offset"] = 0 if response else None
+            responses.append(response if isinstance(response, str) else None)
             hydrated.append({**review, "result": result})
-    return {
-        "graph_run_id": graph_run_id, "revision": current["revision"],
-        "graph_state": current["graph_state"],
-        "runnable_nodes": current["runnable_nodes"],
-        "nodes": current["nodes"],
-        "review_required_count": len(required),
-        "more_reviews": review_offset + len(selected) < len(required),
-        "next_review_offset": (review_offset + len(selected)
-                               if review_offset + len(selected) < len(required) else None),
-        "reviews": hydrated,
-    }
 
+    def bundle() -> dict[str, Any]:
+        count = len(hydrated)
+        next_page = review_offset + count
+        return {
+            "graph_run_id": graph_run_id, "revision": current["revision"],
+            "graph_state": current["graph_state"],
+            "runnable_nodes": current["runnable_nodes"],
+            "nodes": current["nodes"],
+            "review_required_count": len(required),
+            "more_reviews": next_page < len(required),
+            "next_review_offset": next_page if next_page < len(required) else None,
+            "reviews": hydrated,
+        }
+
+    # Large acceptance-criteria/graph metadata may consume the budget before
+    # evidence. Page fewer reviews rather than emitting an oversized payload.
+    # No review can disappear: the next page retains the original revision.
+    while hydrated and _serialized_review_size(bundle()) > max_total_chars:
+        hydrated.pop()
+        responses.pop()
+    if selected and not hydrated:
+        raise ValueError(
+            "one review's metadata exceeds max_total_chars; "
+            "increase max_total_chars (up to 64000) or inspect get_node_reviews"
+        )
+    if _serialized_review_size(bundle()) > max_total_chars:
+        raise ValueError(
+            "review graph metadata exceeds max_total_chars; "
+            "read get_graph or use a larger max_total_chars (up to 64000)"
+        )
+
+    def set_lengths(lengths: list[int]) -> None:
+        for item, response, count in zip(hydrated, responses, lengths):
+            if response is None:
+                continue
+            result = item["result"]
+            result["agent_response"] = response[:count]
+            result["response_truncated"] = count < len(response)
+            result["next_offset"] = count if count < len(response) else None
+
+    full_lengths = [
+        min(len(response), max_chars_per_review) if response is not None else 0
+        for response in responses
+    ]
+    set_lengths(full_lengths)
+    if _serialized_review_size(bundle()) <= max_total_chars:
+        return bundle()
+
+    # Redistribute the available serialized-JSON character budget fairly across
+    # responses, reusing unused portions from short reviews. The per-review
+    # option remains a ceiling, never a reason to exceed the aggregate budget.
+    set_lengths([0] * len(responses))
+    overhead = _serialized_review_size(bundle())
+    budget = max(0, max_total_chars - overhead - 12 * len(responses))
+    caps = [
+        len(json.dumps(response[:limit], ensure_ascii=True)) - 2
+        if response is not None else 0
+        for response, limit in zip(responses, full_lengths)
+    ]
+    allocated = [0] * len(responses)
+    outstanding = [i for i, cap in enumerate(caps) if cap]
+    while outstanding and budget:
+        share = max(1, budget // len(outstanding))
+        for i in outstanding:
+            gain = min(share, caps[i] - allocated[i], budget)
+            allocated[i] += gain
+            budget -= gain
+        outstanding = [i for i in outstanding if allocated[i] < caps[i]]
+
+    lengths = [
+        _review_prefix_chars(response, amount, limit) if response is not None else 0
+        for response, amount, limit in zip(responses, allocated, full_lengths)
+    ]
+    set_lengths(lengths)
+    # Safety net for metadata width changes and unusual escaping. This is
+    # bounded to the evidence previews; exact complete captures stay persisted.
+    while _serialized_review_size(bundle()) > max_total_chars:
+        index = max(range(len(lengths)), key=lambda i: lengths[i])
+        if not lengths[index]:
+            raise ValueError("review bundle cannot fit max_total_chars")
+        lengths[index] -= 1
+        set_lengths(lengths)
+    return bundle()
+
+
+async def _embedded_review_bundle(
+    graph_run_id: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Never hide a committed graph/Peer attempt due to review presentation limits.
+
+    Public get_review_bundle remains strict about total-response budgets. Workflow
+    responses additionally provide a small recovery index if hydration fails:
+    the graph identity, current revision, and exact attempt locators survive even
+    when a single acceptance criterion is too large for the maximum budget.
+    """
+    try:
+        return await get_review_bundle(graph_run_id), None
+    except (ToolError, ValueError, RuntimeError) as exc:
+        # Read persistence again: dispatch/decisions may have committed a new
+        # revision before the review presentation failed.
+        current = graph_runtime.get_graph(graph_run_id)
+        reviews = current["review_required"]
+        locators = [
+            {
+                "node_id": item["node_id"],
+                "attempt_id": item["attempt_id"],
+                "runtime_state": item["runtime_state"],
+            }
+            for item in reviews[:8]
+        ]
+        return {
+            "graph_run_id": graph_run_id,
+            "revision": current["revision"],
+            "graph_state": current["graph_state"],
+            "review_required_count": len(reviews),
+            "review_locators": locators,
+            "more_review_locators": len(reviews) > len(locators),
+            "reviews": [],
+            "incomplete": True,
+            "next_step": (
+                "Review presentation failed after graph state was persisted. "
+                "Do not resubmit the workflow or semantic decisions. "
+                "Use get_review_bundle(max_total_chars=64000) for larger metadata "
+                "or get_review_evidence with the exact node_id, attempt_id and "
+                "revision supplied in review_locators."
+            ),
+        }, str(exc)
 
 @mcp.tool()
 @_public_tool_errors
@@ -775,7 +916,11 @@ async def _advance_assessed_workflow(
             # Always return the graph identity after persistence; never duplicate
             # a dispatched Peer just because the first tool call reported an error.
             answer["dispatch_error"] = str(exc)
-        answer["review_bundle"] = await get_review_bundle(started["graph_run_id"])
+        answer["review_bundle"], review_error = await _embedded_review_bundle(
+            started["graph_run_id"]
+        )
+        if review_error is not None:
+            answer["review_bundle_error"] = review_error
         answer["state"] = (
             "dispatch_failed" if "dispatch_error" in answer
             else answer["review_bundle"]["graph_state"]
@@ -1116,13 +1261,15 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
             continuation = await delegate_next(graph_run_id)
         except (ValueError, RuntimeError, ToolError) as exc:
             continuation_error = str(exc)
+    review_bundle, review_error = await _embedded_review_bundle(graph_run_id)
     return {
         "graph_run_id": graph_run_id,
         "decision_outcomes": result["decision_outcomes"],
         "replan_required_nodes": result["replan_required_nodes"],
         "continuation_results": continuation["results"] if continuation else [],
         "continuation_error": continuation_error,
-        "review_bundle": await get_review_bundle(graph_run_id),
+        "review_bundle": review_bundle,
+        **({"review_bundle_error": review_error} if review_error is not None else {}),
     }
 
 @mcp.tool()
