@@ -947,7 +947,8 @@ async def delegate_next(graph_run_id: str) -> dict[str, Any]:
 @mcp.tool()
 @_public_tool_errors
 async def submit_decisions(graph_run_id: str, decisions: list[Decision],
-                           expected_revision: int) -> dict[str, Any]:
+                           expected_revision: int,
+                           auto_continue: bool = False) -> dict[str, Any]:
     """Record Lead decisions after semantic review of exact captured Peer reports.
 
     For action='block' or 'replan', set owner and return_checkpoint.
@@ -985,10 +986,30 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
                 if decision.action in {"replan", "block"} else None
             ),
         })
-    return graph_runtime.submit_decisions(
+    result = graph_runtime.submit_decisions(
         graph_run_id, parsed, expected_revision=expected_revision,
         lead_dispositions=tuple(dispositions),
     )
+    if not auto_continue:
+        return result
+    # The semantic decisions are already durable. If a subsequent dispatch
+    # fails, report the error as a separate continuation outcome so Lead does
+    # not mistake a committed ACCEPT/RETRY for an uncommitted decision.
+    continuation = None
+    continuation_error = None
+    if result["runnable_nodes"]:
+        try:
+            continuation = await delegate_next(graph_run_id)
+        except (ValueError, RuntimeError, ToolError) as exc:
+            continuation_error = str(exc)
+    return {
+        "graph_run_id": graph_run_id,
+        "decision_outcomes": result["decision_outcomes"],
+        "replan_required_nodes": result["replan_required_nodes"],
+        "continuation_results": continuation["results"] if continuation else [],
+        "continuation_error": continuation_error,
+        "review_bundle": await get_review_bundle(graph_run_id),
+    }
 
 @mcp.tool()
 @_public_tool_errors
