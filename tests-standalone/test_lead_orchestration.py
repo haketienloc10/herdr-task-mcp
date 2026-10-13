@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 from pydantic import ValidationError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
@@ -306,7 +307,7 @@ def test_review_bundle_pagination_covers_more_than_first_page(tmp_path, monkeypa
     assert first["review_required_count"] == 6
     assert first["more_reviews"]
     assert first["next_review_offset"] == 4
-    with pytest.raises(ValueError, match="expected_revision is required"):
+    with pytest.raises(ToolError, match="expected_revision is required"):
         asyncio.run(server.get_review_bundle(gid, review_offset=4))
     second = asyncio.run(server.get_review_bundle(
         gid, review_offset=4, expected_revision=first["revision"],
@@ -357,9 +358,9 @@ def test_review_pages_fail_closed_after_intervening_lead_accept(tmp_path, monkey
         expected_revision=page1["revision"],
     )
     # The review set has shifted. Never silently return only item 5 and lose 4.
-    with pytest.raises(ValueError, match="expected_revision is required"):
+    with pytest.raises(ToolError, match="expected_revision is required"):
         asyncio.run(server.get_review_bundle(gid, review_offset=4))
-    with pytest.raises(RuntimeError, match="stale graph snapshot"):
+    with pytest.raises(ToolError, match="stale graph snapshot"):
         asyncio.run(server.get_review_bundle(
             gid, review_offset=4, expected_revision=page1["revision"],
         ))
