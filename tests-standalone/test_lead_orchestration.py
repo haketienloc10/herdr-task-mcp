@@ -629,3 +629,107 @@ def test_installer_teaches_aggregate_review_budget_and_exact_pagination():
     assert "get_review_evidence" in RULES
     assert "next_offset" in RULES
     assert "expected_revision" in RULES
+
+
+def test_oversized_review_metadata_keeps_persisted_workflow_identity(
+    tmp_path, monkeypatch,
+):
+    server, runtime, _, gr = environment(tmp_path, monkeypatch)
+    calls, delegate = settled_delegate(runtime, "Captured complete Peer report")
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    # Valid TaskPacket (<100k) but even the maximum 64k review bundle cannot
+    # include this acceptance criterion. The first Peer already completed.
+    big_node = node(server).model_copy(update={
+        "task_packet": server.Packet(
+            objective="Investigate and report A", scope=["backend"],
+            acceptance_criteria=["Evidence requirement " + "X" * 72000],
+        ),
+    })
+    result = asyncio.run(server.submit_workflow(
+        "Analyze large acceptance requirements",
+        assessment(server), single_task=big_node,
+    ))
+    gid = result["graph_run_id"]
+    assert len(calls) == 1
+    assert result["state"] == "awaiting_review"
+    assert "review_bundle_error" in result
+    fallback = result["review_bundle"]
+    assert fallback["graph_run_id"] == gid
+    assert fallback["incomplete"] is True
+    assert fallback["reviews"] == []
+    assert fallback["review_required_count"] == 1
+    assert fallback["more_review_locators"] is False
+    assert "Do not resubmit" in fallback["next_step"]
+    persisted = gr.get_graph(gid)
+    assert persisted["graph_state"] == "awaiting_review"
+    assert persisted["revision"] == fallback["revision"]
+    locator = fallback["review_locators"][0]
+    assert locator["node_id"] == "A"
+    assert locator["attempt_id"] == persisted["review_required"][0]["attempt_id"]
+    evidence = asyncio.run(server.get_review_evidence(
+        gid, locator["node_id"], locator["attempt_id"],
+        expected_revision=fallback["revision"],
+    ))
+    assert evidence["agent_response"] == "Captured complete Peer report"
+    # Standalone review remains strict and never silently skips long criteria.
+    with pytest.raises(ToolError, match="one review's metadata exceeds"):
+        asyncio.run(server.get_review_bundle(gid, max_total_chars=64000))
+
+
+def test_auto_continue_returns_committed_decision_when_review_budget_exceeded(
+    tmp_path, monkeypatch,
+):
+    server, runtime, _, gr = environment(tmp_path, monkeypatch)
+    calls, delegate = settled_delegate(runtime, "Peer report")
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    large_node = node(server, "B").model_copy(update={
+        "task_packet": server.Packet(
+            objective="Inspect B", scope=["backend"],
+            acceptance_criteria=["Criterion " + "Y" * 72000],
+        ),
+    })
+    authored = task_graph_from_payload(server.Graph(
+        nodes=[node(server, "A"), large_node],
+    ).model_dump())
+    gid = gr.start_graph(authored, repository_names=["backend"])["graph_run_id"]
+    asyncio.run(server.delegate_next(gid))
+    before = gr.get_graph(gid)
+    assert [r["node_id"] for r in before["review_required"]] == ["A"]
+    result = asyncio.run(server.submit_decisions(
+        gid, [server.Decision(node_id="A", action="accept")],
+        before["revision"], auto_continue=True,
+    ))
+    assert result["graph_run_id"] == gid
+    assert result["decision_outcomes"][0]["action"] == "accept"
+    assert result["continuation_error"] is None
+    assert "review_bundle_error" in result
+    assert result["review_bundle"]["incomplete"] is True
+    assert result["review_bundle"]["graph_state"] == "awaiting_review"
+    assert len(calls) == 2
+    assert gr.store.get_node(gid, "A")["semantic_state"] == "satisfied"
+    assert gr.get_graph(gid)["review_required"][0]["node_id"] == "B"
+    assert result["review_bundle"]["review_locators"][0]["node_id"] == "B"
+
+
+def test_continue_workflow_preserves_request_and_graph_on_large_review(
+    tmp_path, monkeypatch,
+):
+    server, runtime, store, gr = environment(tmp_path, monkeypatch)
+    _, delegate = settled_delegate(runtime, "Captured report")
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    existing = store.create("Investigate behavior")
+    large_node = node(server).model_copy(update={
+        "task_packet": server.Packet(
+            objective="Inspect A", scope=["backend"],
+            acceptance_criteria=["Criterion " + "Q" * 72000],
+        ),
+    })
+    result = asyncio.run(server.continue_workflow(
+        existing["request_id"], existing["revision"], assessment(server),
+        single_task=large_node,
+    ))
+    assert result["task_request"]["request_id"] == existing["request_id"]
+    assert result["state"] == "awaiting_review"
+    assert "review_bundle_error" in result
+    assert gr.get_graph(result["graph_run_id"])["review_required"]
+    assert store.graph_binding(result["graph_run_id"])["request_id"] == existing["request_id"]
