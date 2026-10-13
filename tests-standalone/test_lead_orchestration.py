@@ -268,3 +268,46 @@ def test_independent_wave_runs_while_other_node_awaits_review(tmp_path, monkeypa
     assert first["runnable_nodes"] == ["B"]
     second = asyncio.run(gr.delegate_next(started["graph_run_id"], executor=executor))
     assert {r["node_id"] for r in second["review_required"]} == {"A", "B"}
+
+
+def test_review_bundle_pagination_covers_more_than_first_page(tmp_path, monkeypatch):
+    server, _, _, gr = environment(tmp_path, monkeypatch)
+    graph = task_graph_from_payload(server.Graph(
+        nodes=[node(server, str(i)) for i in range(6)],
+    ).model_dump())
+    gid = gr.start_graph(graph, repository_names=["backend"])["graph_run_id"]
+
+    async def executor(item):
+        return {
+            "state": "settled", "turn_id": "turn-" + item.node_id,
+            "session_id": "session-" + item.node_id,
+            "agent_response": "report for " + item.node_id,
+        }
+
+    for _ in range(6):
+        asyncio.run(gr.delegate_next(gid, executor=executor))
+    first = asyncio.run(server.get_review_bundle(gid, max_reviews=4))
+    assert first["review_required_count"] == 6
+    assert first["more_reviews"]
+    assert first["next_review_offset"] == 4
+    second = asyncio.run(server.get_review_bundle(gid, review_offset=4))
+    assert [item["node_id"] for item in second["reviews"]] == ["4", "5"]
+    assert second["next_review_offset"] is None
+
+
+def test_failed_first_dispatch_returns_durable_graph_identity(tmp_path, monkeypatch):
+    server, runtime, _, gr = environment(tmp_path, monkeypatch)
+
+    async def failed_delegate(**kwargs):
+        raise RuntimeError("simulated transport failure")
+
+    monkeypatch.setattr(runtime, "delegate", failed_delegate)
+    output = asyncio.run(server.submit_workflow(
+        "Analyze the backend", assessment(server), single_task=node(server),
+    ))
+    assert output["state"] == "dispatch_failed"
+    assert "simulated transport failure" in output["dispatch_error"]
+    assert output["graph_run_id"]
+    persisted = gr.get_graph(output["graph_run_id"])
+    assert persisted["review_required"][0]["node_id"] == "A"
+    assert persisted["review_required"][0]["runtime_state"] == "failed"
