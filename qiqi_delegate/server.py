@@ -558,15 +558,19 @@ async def get_review_bundle(
     expected_revision: int | None = None,
     max_reviews: int = 4,
     max_chars_per_review: int = 3000,
+    review_offset: int = 0,
 ) -> dict[str, Any]:
     """One bounded graph state + exact attempt evidence read for Lead semantic review."""
-    if not 1 <= max_reviews <= 8 or not 1 <= max_chars_per_review <= 8000:
-        raise ValueError("max_reviews must be 1..8 and max_chars_per_review 1..8000")
+    if (not 1 <= max_reviews <= 8 or not 1 <= max_chars_per_review <= 8000
+            or review_offset < 0):
+        raise ValueError("max_reviews must be 1..8, max_chars_per_review 1..8000 and review_offset >= 0")
     current = graph_runtime.get_graph(graph_run_id)
     if expected_revision is not None and current["revision"] != expected_revision:
         raise RuntimeError("stale graph snapshot revision")
     required = current["review_required"]
-    selected = required[:max_reviews]
+    if review_offset > len(required):
+        raise ValueError("review_offset exceeds review count")
+    selected = required[review_offset:review_offset + max_reviews]
     hydrated = []
     if selected:
         raw = graph_runtime.get_node_reviews(
@@ -591,7 +595,9 @@ async def get_review_bundle(
         "runnable_nodes": current["runnable_nodes"],
         "nodes": current["nodes"],
         "review_required_count": len(required),
-        "more_reviews": len(required) > len(selected),
+        "more_reviews": review_offset + len(selected) < len(required),
+        "next_review_offset": (review_offset + len(selected)
+                               if review_offset + len(selected) < len(required) else None),
         "reviews": hydrated,
     }
 
@@ -704,10 +710,18 @@ async def submit_workflow(
         if discovery is None:
             return {"task_request": registered, "source_aliases": aliases_to_id,
                     "state": "blocked", "next_step": "user_decision"}
-        result = await delegate_discovery(
-            request_id, discovery.repository_names, discovery.route,
-            discovery.questions, discovery.mode,
-        )
+        try:
+            result = await delegate_discovery(
+                request_id, discovery.repository_names, discovery.route,
+                discovery.questions, discovery.mode,
+            )
+        except (ValueError, RuntimeError, ToolError) as exc:
+            return {
+                "task_request": task_requests.get(request_id, include_content=False),
+                "source_aliases": aliases_to_id,
+                "state": "discovery_failed", "discovery_error": str(exc),
+                "next_step": "inspect persisted discovery and recover or reassess",
+            }
         updated = result.get("task_request")
         captured_source = None
         if updated is not None:
@@ -741,9 +755,17 @@ async def submit_workflow(
         "state": "ready",
     }
     if auto_dispatch:
-        await delegate_next(started["graph_run_id"])
+        try:
+            await delegate_next(started["graph_run_id"])
+        except (ValueError, RuntimeError, ToolError) as exc:
+            # The graph and any attempted native work are durable. Return their ID
+            # even on dispatch failure, so Lead never retries by creating a duplicate.
+            answer["dispatch_error"] = str(exc)
         answer["review_bundle"] = await get_review_bundle(started["graph_run_id"])
-        answer["state"] = answer["review_bundle"]["graph_state"]
+        answer["state"] = (
+            "dispatch_failed" if "dispatch_error" in answer
+            else answer["review_bundle"]["graph_state"]
+        )
     return answer
 
 
