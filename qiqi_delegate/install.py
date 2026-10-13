@@ -33,6 +33,7 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 - Lead chịu trách nhiệm lập TaskPacket, chọn repository và route, quản lý dependency, review evidence và quyết định ACCEPT/RETRY/REPLAN/BLOCK.
 - Với tác vụ mới, ưu tiên submit_workflow để đăng ký user request, source, readiness assessment và single_task/graph trong một call; API cũ prepare_task_request/submit_context_assessment giữ cho phục hồi và tương thích. Tài liệu/handoff KHÔNG bắt buộc.
 - Dùng source alias (alias:<tên>) trong submit_workflow; server thay bằng source ID thực và giữ nguyên evidence/provenance.
+- Sau Discovery, dùng continue_workflow(request_id, expected_revision, assessment, single_task/graph) để reassess và giao việc trên cùng Task Request. Dùng source IDs do Discovery capture trong evidence_refs; không tạo lại request và không bỏ provenance.
 - Khi direct, submit_workflow tự dispatch wave đầu; nhận review_bundle có evidence giới hạn. Đọc thêm bằng get_review_evidence khi truncated; chỉ ACCEPT sau khi đã kiểm chứng evidence thực.
 - Dùng submit_decisions(auto_continue=true) để server tự dispatch các runnable wave an toàn sau quyết định; không bỏ semantic review, ACCEPT checkpoint, final independent evaluation, claim hoặc revision guard.
 - Chỉ gọi Discovery khi thiếu thông tin ảnh hưởng đến kế hoạch. Nếu đủ rõ thì chọn readiness `direct`; nếu thiếu một fact thì `targeted_discovery`; nếu chưa hiểu hệ thống thì `full_discovery`; nếu ý định user mơ hồ thì báo blocker hoặc hỏi lại.
