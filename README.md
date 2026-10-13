@@ -136,17 +136,25 @@ hoặc chẩn đoán.
   evidence hữu hạn (mặc định 3.000 ký tự/review, tối đa 4 review). Khi
   `response_truncated=true`, dùng `get_review_evidence` với
   `node_id + attempt_id + offset` để xem tiếp. Dùng `review_offset`/
-  `next_review_offset` để đọc các trang review tiếp theo. Không ACCEPT chỉ dựa trên preview.
+  `next_review_offset` để đọc các trang review tiếp theo và **phải truyền**
+  `expected_revision` từ trang đầu khi `review_offset > 0`. Nếu graph thay đổi,
+  yêu cầu đọc lại từ trang đầu; không cho phép bỏ sót attempt do offset dịch chuyển.
+  Không ACCEPT chỉ dựa trên preview.
 - `submit_decisions(auto_continue=true)`: persist semantic decisions trước, rồi
   tự gọi wave tiếp nếu có runnable node. Chỉ node có tất cả dependency ACCEPT mới
-  runnable; node độc lập có thể chạy dù node khác đang `awaiting_review`. Nếu
+  runnable; node độc lập có thể chạy dù node khác đang `awaiting_review`,
+  **trừ khi bất kỳ node nào đã blocked/replanned**: trường hợp này phải
+  giải quyết/reconcile graph trước dispatch. Nếu
   continuation lỗi, quyết định đã được commit và phản hồi có `continuation_error`.
   Nếu dispatch đầu tiên lỗi, `submit_workflow` vẫn trả `graph_run_id` cùng
   `dispatch_error` và review state để Lead phục hồi, không tạo graph trùng.
-- `prepare_task_request`, `add_task_source`, `submit_context_assessment`,
-  `get_task_request` mặc định trả metadata không chứa raw `content`. Dùng
-  `get_task_source` để đọc từng phần hoặc `get_task_request(include_content=true)`
-  cho client legacy.
+- API cũ `prepare_task_request`, `add_task_source`,
+  `submit_context_assessment` và `get_task_request` **giữ nguyên full-content
+  response mặc định** để tương thích Lead đã cài đặt, kể cả transport source
+  có optional fields bằng `null`. Dùng `get_task_request_summary` (hoặc
+  `get_task_request(include_content=false)`) cho metadata compact, và
+  `get_task_source` để đọc content theo từng phần. Tool workflow mới tiếp tục
+  dùng discriminated source schema và compact response.
 
 ### Direct: một call để đăng ký và chạy wave đầu
 
