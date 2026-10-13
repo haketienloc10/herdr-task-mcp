@@ -1,6 +1,7 @@
 """Lead-facing MCP orchestration without replacing Discovery or semantic review."""
 import asyncio
 import importlib
+import json
 import subprocess
 
 import pytest
@@ -185,21 +186,26 @@ def test_auto_dispatch_and_auto_continue_keep_explicit_lead_accept(tmp_path, mon
 
 def test_review_bundle_truncation_and_exact_chunk_validation(tmp_path, monkeypatch):
     server, runtime, _, _ = environment(tmp_path, monkeypatch)
-    text = "Report: " + "A" * 20000
+    text = "Report: " + "A" * 100000
     _, delegate = settled_delegate(runtime, text)
     monkeypatch.setattr(runtime, "delegate", delegate)
     submitted = asyncio.run(server.submit_workflow(
         "Analyze flow", assessment(server), single_task=node(server),
     ))
     gid = submitted["graph_run_id"]
-    review = submitted["review_bundle"]["reviews"][0]
+    bundle = submitted["review_bundle"]
+    review = bundle["reviews"][0]
     assert review["result"]["response_truncated"]
-    assert len(review["result"]["agent_response"]) == 3000
+    preview = review["result"]["agent_response"]
+    assert 10000 < len(preview) < 32000
+    assert review["result"]["next_offset"] == len(preview)
+    assert review["result"]["total_response_chars"] == len(text)
+    assert len(json.dumps(bundle, ensure_ascii=True)) <= 32000
     chunk = asyncio.run(server.get_review_evidence(
-        gid, "A", review["attempt_id"], 3000, 8000,
-        submitted["review_bundle"]["revision"],
+        gid, "A", review["attempt_id"], len(preview), 8000,
+        bundle["revision"],
     ))
-    assert chunk["agent_response"] == text[3000:11000]
+    assert chunk["agent_response"] == text[len(preview):len(preview) + 8000]
     with pytest.raises(Exception, match="stale review attempt"):
         asyncio.run(server.get_review_evidence(gid, "A", "wrong-attempt"))
 
@@ -464,3 +470,159 @@ def test_legacy_source_null_fields_and_full_result_contract(tmp_path, monkeypatc
     ))
     assert assessed["sources"][0]["content"] == "Legacy requirements"
     assert store.get(rid)["revision"] == assessed["revision"]
+
+
+def test_medium_peer_response_fits_single_review_bundle_call(tmp_path, monkeypatch):
+    server, runtime, _, _ = environment(tmp_path, monkeypatch)
+    text = "Verified report: " + "A" * 12000
+    _, delegate = settled_delegate(runtime, text)
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    submitted = asyncio.run(server.submit_workflow(
+        "Inspect behavior", assessment(server), single_task=node(server),
+    ))
+    gid = submitted["graph_run_id"]
+    first = submitted["review_bundle"]
+    assert first["reviews"][0]["result"]["agent_response"] == text
+    assert not first["reviews"][0]["result"]["response_truncated"]
+    assert first["reviews"][0]["result"]["next_offset"] is None
+    assert len(json.dumps(first, ensure_ascii=True)) <= 32000
+    # Existing callers specifying 12000 must no longer hit the old 8000 cap.
+    explicit = asyncio.run(server.get_review_bundle(
+        gid, max_chars_per_review=12000,
+    ))
+    assert len(explicit["reviews"][0]["result"]["agent_response"]) == 12000
+    assert explicit["reviews"][0]["result"]["next_offset"] == 12000
+    assert len(json.dumps(explicit, ensure_ascii=True)) <= 32000
+    legacy_cap = asyncio.run(server.get_review_bundle(
+        gid, max_chars_per_review=3000,
+    ))
+    assert len(legacy_cap["reviews"][0]["result"]["agent_response"]) == 3000
+
+
+def test_adaptive_review_budget_returns_all_short_reviews_in_one_page(
+    tmp_path, monkeypatch,
+):
+    server, _, _, gr = environment(tmp_path, monkeypatch)
+    authored = task_graph_from_payload(server.Graph(
+        nodes=[node(server, str(i)) for i in range(6)],
+    ).model_dump())
+    gid = gr.start_graph(authored, repository_names=["backend"])["graph_run_id"]
+    sizes = [80, 12000, 150, 3000, 1500, 200]
+
+    async def executor(item):
+        return {
+            "state": "settled", "turn_id": "turn-" + item.node_id,
+            "session_id": "session-" + item.node_id,
+            "agent_response": item.node_id * sizes[int(item.node_id)],
+        }
+
+    for _ in sizes:
+        asyncio.run(gr.delegate_next(gid, executor=executor))
+    bundle = asyncio.run(server.get_review_bundle(gid))
+    assert bundle["review_required_count"] == 6
+    assert len(bundle["reviews"]) == 6
+    assert bundle["next_review_offset"] is None
+    assert len(json.dumps(bundle, ensure_ascii=True)) <= 32000
+    for review in bundle["reviews"]:
+        result = review["result"]
+        expected = review["node_id"] * sizes[int(review["node_id"])]
+        assert result["agent_response"] == expected
+        assert result["response_truncated"] is False
+        assert result["next_offset"] is None
+
+
+def test_adaptive_budget_fairness_exact_chunks_and_escaped_json(tmp_path, monkeypatch):
+    server, _, _, gr = environment(tmp_path, monkeypatch)
+    authored = task_graph_from_payload(server.Graph(
+        nodes=[node(server, "A"), node(server, "B")],
+    ).model_dump())
+    gid = gr.start_graph(authored, repository_names=["backend"])["graph_run_id"]
+    responses = {"A": '"\\\\\n🎯' * 13000, "B": "B" * 60000}
+
+    async def executor(item):
+        return {
+            "state": "settled", "turn_id": "turn-" + item.node_id,
+            "session_id": "session-" + item.node_id,
+            "agent_response": responses[item.node_id],
+        }
+
+    asyncio.run(gr.delegate_next(gid, executor=executor))
+    asyncio.run(gr.delegate_next(gid, executor=executor))
+    bundle = asyncio.run(server.get_review_bundle(
+        gid, max_total_chars=20000, max_chars_per_review=12000,
+    ))
+    assert len(json.dumps(bundle, ensure_ascii=True)) <= 20000
+    assert len(bundle["reviews"]) == 2
+    lengths = [len(x["result"]["agent_response"]) for x in bundle["reviews"]]
+    assert all(0 < length <= 12000 for length in lengths)
+    for review in bundle["reviews"]:
+        preview = review["result"]["agent_response"]
+        source = responses[review["node_id"]]
+        assert source.startswith(preview)
+        assert review["result"]["total_response_chars"] == len(source)
+        assert review["result"]["next_offset"] == len(preview)
+        chunk = asyncio.run(server.get_review_evidence(
+            gid, review["node_id"], review["attempt_id"],
+            offset=len(preview), max_chars=24000,
+            expected_revision=bundle["revision"],
+        ))
+        assert chunk["agent_response"] == source[len(preview):len(preview) + 24000]
+    with pytest.raises(ToolError, match="max_total_chars"):
+        asyncio.run(server.get_review_bundle(gid, max_total_chars=1000))
+    with pytest.raises(ToolError, match="max_chars_per_review"):
+        asyncio.run(server.get_review_bundle(gid, max_chars_per_review=64001))
+
+
+def test_adaptive_budget_pages_metadata_without_dropping_attempts(
+    tmp_path, monkeypatch,
+):
+    server, _, _, gr = environment(tmp_path, monkeypatch)
+    authored_nodes = [
+        node(server, str(i)).model_copy(update={
+            "task_packet": server.Packet(
+                objective="Inspect " + str(i), scope=["backend"],
+                acceptance_criteria=["criterion-" + "Z" * 5000],
+            ),
+        })
+        for i in range(5)
+    ]
+    gid = gr.start_graph(
+        task_graph_from_payload(server.Graph(nodes=authored_nodes).model_dump()),
+        repository_names=["backend"],
+    )["graph_run_id"]
+
+    async def executor(item):
+        return {
+            "state": "settled", "turn_id": "turn-" + item.node_id,
+            "session_id": "session-" + item.node_id,
+            "agent_response": "proof " + item.node_id,
+        }
+
+    for _ in range(5):
+        asyncio.run(gr.delegate_next(gid, executor=executor))
+    first = asyncio.run(server.get_review_bundle(gid, max_total_chars=14000))
+    assert 0 < len(first["reviews"]) < 5
+    assert first["more_reviews"]
+    assert len(json.dumps(first, ensure_ascii=True)) <= 14000
+    next_offset = first["next_review_offset"]
+    seen = [r["node_id"] for r in first["reviews"]]
+    while next_offset is not None:
+        page = asyncio.run(server.get_review_bundle(
+            gid, max_total_chars=14000,
+            review_offset=next_offset, expected_revision=first["revision"],
+        ))
+        assert len(json.dumps(page, ensure_ascii=True)) <= 14000
+        assert page["reviews"]
+        seen.extend(r["node_id"] for r in page["reviews"])
+        next_offset = page["next_review_offset"]
+    assert seen == [str(i) for i in range(5)]
+
+
+def test_installer_teaches_aggregate_review_budget_and_exact_pagination():
+    from qiqi_delegate.install import RULES
+    assert "max_total_chars" in RULES
+    assert "32000" in RULES
+    assert "max_chars_per_review" in RULES
+    assert "get_review_evidence" in RULES
+    assert "next_offset" in RULES
+    assert "expected_revision" in RULES
