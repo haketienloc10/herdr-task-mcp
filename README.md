@@ -146,8 +146,18 @@ hoặc chẩn đoán.
   để lấy trang tiếp theo và **phải truyền** `expected_revision` từ trang đầu.
   Graph thay đổi giữa các trang sẽ trả stale revision, tránh bỏ sót attempt.
   Không ACCEPT chỉ dựa trên preview.
-  Nếu chính graph metadata đã lớn hơn `max_total_chars`, tool trả lỗi hướng dẫn
-  đọc `get_graph` hoặc tăng ngân sách tối đa 64.000 thay vì tự vượt giới hạn.
+  Nếu chính graph/review metadata đã lớn hơn `max_total_chars`, standalone
+  `get_review_bundle` từ chối thay vì tự vượt giới hạn.
+  **Riêng sau khi high-level workflow đã persist thành công** (`submit_workflow`,
+  `continue_workflow` hoặc `submit_decisions(auto_continue=true)`), lỗi dựng
+  review bundle **không làm mất kết quả đã commit**: response vẫn có
+  `graph_run_id`, `state`/`decision_outcomes`, `review_bundle_error`, và
+  `review_bundle.incomplete=true` với `revision`, `review_required_count`,
+  tối đa 8 exact `review_locators` (`node_id`, `attempt_id`) để tiếp tục
+  đọc bằng `get_review_evidence`. Có thể thử
+  `get_review_bundle(max_total_chars=64000)` cho metadata vừa ngân sách.
+  **Không gửi lại workflow, cũng không gửi lại semantic decisions** chỉ vì
+  review presentation failed; Peer và quyết định đã được persist.
 - `submit_decisions(auto_continue=true)`: persist semantic decisions trước, rồi
   tự gọi wave tiếp nếu có runnable node. Chỉ node có tất cả dependency ACCEPT mới
   runnable; node độc lập có thể chạy dù node khác đang `awaiting_review`,
