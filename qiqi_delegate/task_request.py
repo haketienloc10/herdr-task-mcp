@@ -622,7 +622,8 @@ class TaskRequestStore:
         return self._write(request_id, expected_revision, assessment=assessment)
 
     def create_assessed(self, user_request: str, sources: list[dict[str, Any]],
-                        assessment: dict[str, Any]) -> dict[str, Any]:
+                        assessment: dict[str, Any], *,
+                        source_aliases: list[str] | None = None) -> dict[str, Any]:
         """Atomically register intent, snapshots and validated direct/Discovery readiness.
 
         A high-level Lead tool may create sources and reference them by aliases without
@@ -634,6 +635,25 @@ class TaskRequestStore:
         if not isinstance(sources, list) or len(sources) > MAX_CONTEXT_SOURCES:
             raise ValueError(f"sources must be a list of at most {MAX_CONTEXT_SOURCES} entries")
         resolved = [self._resolve_source(source) for source in sources]
+        if source_aliases is not None:
+            if (len(source_aliases) != len(resolved) or
+                    any(not isinstance(a, str) or not a.strip() or
+                        len(a) > 64 or ":" in a for a in source_aliases) or
+                    len(set(source_aliases)) != len(source_aliases)):
+                raise ValueError("source_aliases must be unique nonempty names matching sources")
+            aliases = {
+                "alias:" + alias: source["id"]
+                for alias, source in zip(source_aliases, resolved)
+            }
+            assessment = {
+                **assessment,
+                "requirements": [
+                    {**item, "evidence_refs": [
+                        aliases.get(ref, ref) for ref in item["evidence_refs"]
+                    ]}
+                    for item in assessment["requirements"]
+                ],
+            }
         current = {"revision": 1, "sources": resolved, "stale_sources": []}
         self._check_assessment(current, assessment)
         request_id = str(uuid.uuid4())
