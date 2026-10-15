@@ -466,29 +466,51 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
             assert argv[argv.index("--sandbox") + 1] == "read-only"
             assert "--skip-git-repo-check" in argv
         else:
-            assert "--restricted" in argv
-            assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep"
-            assert argv[argv.index("--allowedTools") + 1] == "Read,Glob,Grep"
-            assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
-            assert "--strict-mcp-config" in argv
-            assert "--mcp-config" not in argv
+            assert "--restricted" not in argv  # User did not request it.
+            assert "--tools" not in argv
             assert "--settings" in argv
             capture_settings = json.loads(argv[argv.index("--settings") + 1])
             assert {"Stop", "StopFailure"} <= set(capture_settings["hooks"])
-            assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
-            assert "--disable-slash-commands" in argv
+            assert argv[argv.index("--permission-mode") + 1] == "auto"
             assert "--skip-git-repo-check" not in argv
 
 
 @pytest.mark.parametrize("adapter,args", [
     ("codex", ["--yolo"]),
     ("claude", ["--permission-mode", "plan"]),
-    ("claude", list(CLAUDE_EVALUATOR_ARGS) + ["--dangerously-skip-permissions"]),
-    ("claude", [flag for flag in CLAUDE_EVALUATOR_ARGS if flag != "--strict-mcp-config"]),
-    ("claude", list(CLAUDE_EVALUATOR_ARGS) + ["--mcp-config", '{"mcpServers":{}}']),
-    ("claude", [arg for arg in CLAUDE_EVALUATOR_ARGS if arg != "--restricted"]),
-    ("claude", list(CLAUDE_EVALUATOR_ARGS[:-1])),
+    ("claude", ["--model", "claude-sonnet-5-5", "--effort", "xhigh",
+                "--permission-mode", "auto"]),
+    ("claude", ["--dangerously-skip-permissions"]),
+    ("claude", ["--strict-mcp-config", "--tools", "Read,Glob,Grep"]),
+    ("codex", ["--yolo"]),
 ])
-def test_evaluator_route_profiles_reject_unsafe_or_modified_args(adapter, args):
-    with pytest.raises(ValueError, match="unsafe route or CLI overrides"):
-        validate_evaluator_route(adapter, args)
+def test_evaluator_route_profiles_accept_user_cli_args(adapter, args):
+    # Compatibility function no longer mandates exact evaluator permissions.
+    validate_evaluator_route(adapter, args)
+
+def test_custom_evaluator_route_reaches_native_dispatch(tmp_path, monkeypatch):
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    routing = runtime.root / "agent-routing.yaml"
+    routing.write_text(routing.read_text(encoding="utf-8") +
+        '  claude-custom-evaluator:\n'
+        '    agent: claude\n'
+        '    args: ["--model", "claude-sonnet-5-5", "--effort", "xhigh", '
+        '"--permission-mode", "auto"]\n'
+        '    description: "Final verification requiring deeper analysis."\n',
+        encoding="utf-8")
+    expected = runtime.route("claude-custom-evaluator")
+    assert expected[1][3] == "xhigh"
+    observed = {}
+
+    async def fake_delegate(**kwargs):
+        observed.update(kwargs)
+        raise RuntimeError("sent to native runner")
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    with pytest.raises(RuntimeError, match="sent to native runner"):
+        asyncio.run(coordinator.start(gid, "claude-custom-evaluator", revision))
+    assert observed["route"] == "claude-custom-evaluator"
+    assert set(observed["evaluation_roots"]) == {"frontend", "backend"}
+    assert all(observed["evaluation_roots"][name] != runtime.repos()[name]
+               for name in ("frontend", "backend"))

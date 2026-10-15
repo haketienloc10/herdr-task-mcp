@@ -271,11 +271,27 @@ def test_installer_enables_default_agent_flags_without_overwriting_existing_rout
     rt = DelegateRuntime(tmp_path)
     assert rt.route("codex-balanced") == ("codex", ["--yolo"])
     assert rt.route("claude-balanced") == (
-        "claude", ["--permission-mode", "auto"]
+        "claude", ["--model", "claude-sonnet-5-5", "--effort", "medium",
+                   "--permission-mode", "auto"]
     )
-    from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
     assert rt.route("codex-evaluator") == ("codex", ["--sandbox", "read-only"])
-    assert rt.route("claude-evaluator") == ("claude", list(CLAUDE_EVALUATOR_ARGS))
+    assert rt.route("claude-evaluator") == (
+        "claude", ["--model", "claude-sonnet-5-5", "--effort", "high",
+                   "--permission-mode", "auto"]
+    )
+    import yaml
+    config = yaml.safe_load((tmp_path / "agent-routing.yaml").read_text())
+    claude_routes = {
+        name: route for name, route in config["routes"].items()
+        if route["agent"] == "claude"
+    }
+    assert len(claude_routes) == 16
+    assert all(route["description"] for route in claude_routes.values())
+    assert all("--permission-mode" in route["args"] and
+               route["args"][route["args"].index("--permission-mode") + 1] == "auto"
+               for route in claude_routes.values())
+    assert (claude_routes["claude-small-change"]["args"] ==
+            claude_routes["claude-balanced"]["args"])
 
     routing = tmp_path / "agent-routing.yaml"
     custom = (
