@@ -131,6 +131,11 @@ CLI `--settings` cho evaluator còn bắt buộc
 memory từ `--add-dir` ngay cả khi shell hoặc user settings cấu hình `1`.
 Không đặt `--mcp-config` hay `--setting-sources` trong evaluator route;
 các flags này thuộc ranh giới khởi động do runtime quản lý.
+**Codex Evaluator** cũng bảo vệ thư mục khởi chạy trung lập: route cho
+Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
+`-C/path`, `--cd=/path`, vì các cờ này có thể buộc Codex nạp
+`AGENTS.md` của code ứng viên. Route Codex cho task thông thường
+vẫn có thể tự chọn working directory.
 
 Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**. MCP hash
 toàn bộ snapshot (kể cả metadata và task sources) trước khi dispatch và
