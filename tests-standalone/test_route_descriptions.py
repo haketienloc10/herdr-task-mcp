@@ -77,6 +77,14 @@ def test_legacy_routes_accept_missing_descriptions(environment):
     ("codex", ["-c", '"features" . "hooks" = false']),
     ("codex", ["-c", '"hooks" = {}']),
     ("codex", ["--config='hooks'.state={}"]),
+    # Ancestor override replaces the runtime's earlier features.hooks=true
+    # even when the new table does not explicitly include "hooks".
+    ("codex", ["-c", "features={hooks=false}"]),
+    ("codex", ["--config=features={hooks=false}"]),
+    ("codex", ["--config", ' features = { "hooks" = false }']),
+    ("codex", ["-c", "features={}"]),
+    ("codex", ['--config="features"={other=true}']),
+    ("codex", ["-c", '"features" = "override"']),
     ("codex", ["--disable", "hooks"]),
     ("codex", ["--disable=hooks"]),
     ("codex", ["--enable", "hooks"]),
@@ -106,7 +114,8 @@ def test_codex_toml_override_allows_unrelated_config(environment):
         "args": ["-c", ' model_reasoning_effort = "high" ',
                  "-c", "model_reasoning_effort=high",
                  "--config=shell_environment_policy.inherit=all",
-                 "--config=custom.feature=true"],
+                 "--config=custom.feature=true",
+                 "--config=features.other_feature=true"],
         "description": "Valid TOML overrides without native capture changes",
     }}}
     (runtime.root / "agent-routing.yaml").write_text(
