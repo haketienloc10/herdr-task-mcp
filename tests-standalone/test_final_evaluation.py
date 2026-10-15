@@ -190,14 +190,21 @@ def test_snapshots_include_untracked_work_and_stale_pass_cannot_finalize(tmp_pat
         coordinator.finalize(gid, outcome["evaluation_id"], revision)
 
 
-def test_unsafe_route_and_unbound_graph_cannot_start(tmp_path):
-    _runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+def test_user_configured_evaluator_route_and_unbound_graph_gate(tmp_path, monkeypatch):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
     revision = graph_rt.get_graph(gid)["revision"]
-    with pytest.raises(ValueError, match="requires a safe Codex or Claude"):
+
+    async def fake_delegate(**kwargs):
+        assert kwargs["route"] == "codex-balanced"
+        raise RuntimeError("custom CLI route dispatched")
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    # User-selected permissions are no longer a profile validation error.
+    with pytest.raises(RuntimeError, match="custom CLI route dispatched"):
         asyncio.run(coordinator.start(gid, "codex-balanced", revision))
-    with pytest.raises(ValueError, match="requires a safe Codex or Claude"):
-        asyncio.run(coordinator.start(gid, "claude-unsafe", revision))
-    assert coordinator.store.latest(gid) is None
+    assert coordinator.store.latest(gid) is not None
+
+    # TaskGraph binding/readiness gate is still mandatory with any CLI profile.
     other = tmp_path / "other"
     other.mkdir()
     _, _, graph_rt2, coordinator2, gid2 = setup_graph(
