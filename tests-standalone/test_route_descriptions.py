@@ -71,6 +71,12 @@ def test_legacy_routes_accept_missing_descriptions(environment):
     ["-c", "hooks.Stop=[]"],
     ["-chooks.Stop=[]"],
     ["-c=features.hooks=false"],
+    ["-c", " hooks.Stop=[]"],
+    ["--config", ' "hooks"."Stop" = [] '],
+    ["-c", ' "hooks.Stop" = [] '],
+    ["-c", '"features" . "hooks" = false'],
+    ["-c", '"hooks" = {}'],
+    ["--config='hooks'.state={}"],
     ["hooks.Stop=something"],
     ["features.hooks=true"],
 ])
@@ -86,3 +92,17 @@ def test_user_route_cannot_override_native_capture(environment, override):
     )
     with pytest.raises(ValueError, match="runtime-owned"):
         runtime.route("bad")
+
+def test_codex_toml_override_allows_unrelated_config(environment):
+    _server, runtime, *_ = environment
+    import yaml
+    config = {"routes": {"custom": {
+        "agent": "codex",
+        "args": ["-c", ' model_reasoning_effort = "high" ',
+                 "--config=custom.feature=true"],
+        "description": "Valid TOML overrides without native capture changes",
+    }}}
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8",
+    )
+    assert runtime.route("custom")[0] == "codex"
