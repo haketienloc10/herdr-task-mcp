@@ -126,6 +126,9 @@ và snapshot, không phải tên route. MCP không ép chính xác một profile
 CLI nào: model, effort và permission do YAML quyết định. Nhưng evaluator
 Claude **luôn bỏ project/local settings, .mcp.json** bằng
 `--setting-sources user`, `--strict-mcp-config`, và chặn MCP/skills.
+CLI `--settings` cho evaluator còn bắt buộc
+`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=0`, để vô hiệu hóa
+memory từ `--add-dir` ngay cả khi shell hoặc user settings cấu hình `1`.
 Không đặt `--mcp-config` hay `--setting-sources` trong evaluator route;
 các flags này thuộc ranh giới khởi động do runtime quản lý.
 
@@ -532,8 +535,12 @@ including cross-module contracts, before delivery is finalized.
    (including staged, unstaged and non-ignored untracked files), then launches
    **one fresh native Evaluator session** in a neutral CWD, with every
    snapshot root passed as a read-only *input by convention* via `--add-dir`
-   and identified by absolute paths in the native prompt. This prevents
-   candidate `CLAUDE.md` / `AGENTS.md` from acting as startup instructions.
+   and identified by absolute paths in the native prompt. To prevent candidate
+   `CLAUDE.md` from being loaded as memory from add-dirs, runtime CLI
+   settings force `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=0` for each
+   Claude evaluation. Organization-managed settings can take precedence
+   over CLI settings; deployments that enforce the opposite policy must
+   not use permissive evaluators without an external sandbox.
    The bounded TaskPacket contains only
    small routing metadata and relative archive locations, not the entire
    original request and TaskGraph inline. In the primary isolated snapshot,
