@@ -134,8 +134,12 @@ các flags này thuộc ranh giới khởi động do runtime quản lý.
 **Codex Evaluator** cũng bảo vệ thư mục khởi chạy trung lập: route cho
 Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
 `-C/path`, `--cd=/path`, vì các cờ này có thể buộc Codex nạp
-`AGENTS.md` của code ứng viên. Route Codex cho task thông thường
-vẫn có thể tự chọn working directory.
+`AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải
+dùng phiên native mới**, không thể `resume`/`fork` đối với Codex, hoặc
+`--resume`/`-r`, `--continue`/`-c`, `--fork-session`,
+`--from-pr`, `--teleport`, `--session-id` đối với Claude. Các tham số
+có thể khôi phục ngữ cảnh không đáng tin cậy từ phiên cũ dù CWD trung lập.
+Route Peer thông thường vẫn cho phép các flags native này nếu cần.
 
 Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**. MCP hash
 toàn bộ snapshot (kể cả metadata và task sources) trước khi dispatch và
