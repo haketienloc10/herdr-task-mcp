@@ -268,7 +268,7 @@ class DelegateRuntime:
                         raise ValueError("result capture configuration is runtime-owned")
                 if normalized == "features.hooks" or normalized.startswith("features.hooks."):
                     raise ValueError("result capture configuration is runtime-owned")
-        return {"agent": agent, "args": list(args), "description": description.strip()
+        return {"agent": agent, "args": list(args), "description": description.strip()}
 
     def route(self, name: str) -> tuple[str, list[str]]:
         details = self.route_details(name)
