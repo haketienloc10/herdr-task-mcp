@@ -211,20 +211,53 @@ class DelegateRuntime:
                 len(description) > 500 or
                 ("description" in route and not description.strip())):
             raise ValueError("route description must be nonempty text of at most 500 characters")
-        # Native hook capture is runtime-owned. Codex -c/--config is TOML,
-        # not a literal key string: whitespace, quoted keys and dotted keys
-        # can all resolve to the same protected setting.
+        # Native capture is runtime-owned. Codex parses override KEYS as TOML
+        # but falls back to literal strings for VALUES (e.g. effort=high).
         if agent == "codex":
             try:
                 import tomllib
             except ModuleNotFoundError:  # Python 3.10
                 import tomli as tomllib
+
+            def owns_native_hook(key_text: str) -> bool:
+                try:
+                    # Parse only the TOML key. Parsing the value would reject
+                    # legitimate unquoted Codex strings (high, all, etc.).
+                    tree = tomllib.loads(key_text.strip() + " = true")
+                except (ValueError, TypeError) as exc:
+                    raise ValueError("invalid Codex TOML route override key") from exc
+
+                def visit(node: dict, prefix: tuple[str, ...] = ()) -> bool:
+                    for part, child in node.items():
+                        parts = prefix + (part.strip().lower(),)
+                        key = ".".join(parts)
+                        # Quoted literal dotted keys can resolve to the same
+                        # protected paths as ordinary dotted TOML keys.
+                        if (key == "hooks" or key.startswith("hooks.") or
+                                key == "features.hooks" or
+                                key.startswith("features.hooks.")):
+                            return True
+                        if isinstance(child, dict) and visit(child, parts):
+                            return True
+                    return False
+
+                return visit(tree)
+
         for index, arg in enumerate(args):
             token = arg.strip()
             if token == "--settings" or token.startswith("--settings="):
                 raise ValueError("result capture configuration is runtime-owned")
             if agent != "codex":
                 continue
+            # --enable/--disable <feature> map to features.<feature>=bool,
+            # and must not override the managed native capture feature.
+            feature = None
+            if token in {"--enable", "--disable"} and index + 1 < len(args):
+                feature = args[index + 1].strip()
+            elif token.startswith(("--enable=", "--disable=")):
+                feature = token.split("=", 1)[1].strip()
+            if feature is not None and feature.lower() in {"hooks", "codex_hooks"}:
+                raise ValueError("result capture configuration is runtime-owned")
             override = None
             if token in {"-c", "--config"}:
                 if index + 1 >= len(args):
@@ -237,36 +270,13 @@ class DelegateRuntime:
             elif token.startswith("-c") and token != "-c":
                 override = token[2:]
             elif "=" in token and not token.startswith("-"):
-                # Avoid accepting a bare captured-hook assignment if the CLI
-                # interprets it as a native override.
+                # Maintain legacy prohibition of bare protected assignments.
                 override = token
-            if override is None:
-                continue
-            # Preserve compatibility with old direct hook-key rejects
-            # even for a malformed TOML value (which Codex would reject).
-            basic_key = override.split("=", 1)[0].strip().lower()
-            if (basic_key == "hooks" or basic_key.startswith("hooks.") or
-                    basic_key == "features.hooks" or
-                    basic_key.startswith("features.hooks.")):
-                raise ValueError("result capture configuration is runtime-owned")
-            try:
-                settings = tomllib.loads(override)
-            except (ValueError, TypeError) as exc:
-                raise ValueError("invalid Codex TOML route override") from exc
-            # Protect both nested TOML tables and literal dotted quoted keys.
-            def owned_key(key: str) -> bool:
-                normalized = key.strip().lower()
-                return normalized == "hooks" or normalized.startswith("hooks.")
-            if any(owned_key(key) for key in settings):
-                raise ValueError("result capture configuration is runtime-owned")
-            for key, value in settings.items():
-                normalized = key.strip().lower()
-                if normalized == "features" and isinstance(value, dict):
-                    if any(k.strip().lower() == "hooks" or
-                           k.strip().lower().startswith("hooks.")
-                           for k in value):
-                        raise ValueError("result capture configuration is runtime-owned")
-                if normalized == "features.hooks" or normalized.startswith("features.hooks."):
+            if override is not None:
+                if "=" not in override:
+                    raise ValueError("invalid Codex TOML route override")
+                key, _value = override.split("=", 1)
+                if owns_native_hook(key):
                     raise ValueError("result capture configuration is runtime-owned")
         return {"agent": agent, "args": list(args), "description": description.strip()}
 
@@ -479,7 +489,8 @@ class DelegateRuntime:
             raise RuntimeError(f"invalid Herdr JSON response for {args[:2]}") from exc
 
     @staticmethod
-    def _hook_args(adapter: str, sink: Path, nonce: str) -> list[str]:
+    def _hook_args(adapter: str, sink: Path, nonce: str,
+                   *, evaluator: bool = False) -> list[str]:
         import shlex
         command = shlex.join([
             sys.executable, "-m", "qiqi_delegate.result_hook",
@@ -490,6 +501,14 @@ class DelegateRuntime:
                 "Stop": [{"hooks": [{"type": "command", "command": command}]}],
                 "StopFailure": [{"hooks": [{"type": "command", "command": command}]}],
             }}
+            if evaluator:
+                # CLI --settings takes precedence over inherited shell values
+                # and user-settings env entries. Otherwise the caller can
+                # turn on candidate CLAUDE.md loading from --add-dir even
+                # though our evaluator native cwd is neutral.
+                settings["env"] = {
+                    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "0",
+                }
             return ["--settings", json.dumps(settings, separators=(",", ":"))]
         stop = '[{hooks=[{type="command",command=' + json.dumps(command) + ',timeout=10}]}]'
         key = codex_session_hook_key()
@@ -755,7 +774,9 @@ class DelegateRuntime:
                                        "--label", f"qiqi:{repository}:{turn_id[:8]}", "--no-focus")
                 workspace_id = top["workspace"]["workspace_id"]
                 pane_id = top["root_pane"]["pane_id"]
-                agent_args = self._hook_args(adapter, sink, nonce) + args
+                agent_args = self._hook_args(
+                    adapter, sink, nonce, evaluator=evaluation_id is not None,
+                ) + args
                 if mounted_sources:
                     agent_args += ["--add-dir", str(snapshot_dir)]
                 if session_id:
