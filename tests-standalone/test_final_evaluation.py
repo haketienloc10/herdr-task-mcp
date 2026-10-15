@@ -697,3 +697,47 @@ def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loa
                 evaluation_roots=snap.paths,
                 evaluation_id=reserved["evaluation_id"],
             ))
+
+
+@pytest.mark.parametrize("cwd_args", [
+    ["-C", "/tmp/candidate"],
+    ["-C/tmp/candidate"],
+    ["-C=/tmp/candidate"],
+    ["--cd", "/tmp/candidate"],
+    ["--cd=/tmp/candidate"],
+    [" --cd=/tmp/candidate "],
+])
+def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible(
+    tmp_path, cwd_args,
+):
+    from qiqi_delegate.core import build_task_packet
+    import yaml
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    config = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
+    config["routes"]["codex-custom-cwd"] = {
+        "agent": "codex", "args": cwd_args,
+        "description": "Normal Codex Peer with a user-selected cwd",
+    }
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8",
+    )
+    # CLI args remain user-controlled for ordinary Peer routes.
+    assert runtime.route("codex-custom-cwd") == ("codex", cwd_args)
+
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        with pytest.raises(ValueError, match="working directory is runtime-owned"):
+            asyncio.run(runtime.delegate(
+                repository="backend", route="codex-custom-cwd",
+                packet=build_task_packet(
+                    objective="Independent verification",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Verify the final result"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="test-before-reservation",
+            ))
+    # The native agent was never started, nor a turn claimed.
+    with runtime._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
