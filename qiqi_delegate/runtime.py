@@ -233,16 +233,18 @@ class DelegateRuntime:
                         key = ".".join(parts)
                         # Quoted literal dotted keys can resolve to the same
                         # protected paths as ordinary dotted TOML keys.
-                        # Codex applies -c overrides in order. Assigning
-                        # the whole features table replaces features.hooks=true
-                        # installed earlier by the native Stop capture hook,
-                        # even if the new table does not mention hooks.
-                        if (key == "hooks" or key.startswith("hooks.") or
-                                key == "features" or
-                                key == "features.hooks" or
-                                key.startswith("features.hooks.")):
-                            return True
-                        if isinstance(child, dict) and visit(child, parts):
+                        # Inspect assigned LEAF keys only. A dotted
+                        # features.other_feature override creates an implicit
+                        # TOML parent table, but does not replace features.
+                        # An assignment to features itself DOES replace the
+                        # entire table, dropping runtime features.hooks=true.
+                        if isinstance(child, dict):
+                            if visit(child, parts):
+                                return True
+                        elif (key == "hooks" or key.startswith("hooks.") or
+                              key == "features" or
+                              key == "features.hooks" or
+                              key.startswith("features.hooks.")):
                             return True
                     return False
 
