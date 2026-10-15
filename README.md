@@ -122,14 +122,23 @@ có thể làm tăng thời gian và chi phí mà không giúp việc đơn gi�
 **Không cần route `claude-evaluator` riêng**: sau khi TaskGraph hoàn tất,
 gọi `start_final_evaluation` với `claude-high`, hoặc `claude-xhigh`
 nếu cần đánh giá phức tạp. Vai trò Final Evaluator được quyết định bằng API
-và snapshot, không phải tên route. MCP không ép profile CLI cố định nữa;
-model, effort, permissions và optional tool flags được cấu hình trong YAML.
-Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**; chỉ dùng
-với workspace, hooks và tools tin cậy. Snapshot đánh giá vẫn tách biệt
-khỏi Git roots thực.
+và snapshot, không phải tên route. MCP không ép chính xác một profile
+CLI nào: model, effort và permission do YAML quyết định. Nhưng evaluator
+Claude **luôn bỏ project/local settings, .mcp.json** bằng
+`--setting-sources user`, `--strict-mcp-config`, và chặn MCP/skills.
+Không đặt `--mcp-config` hay `--setting-sources` trong evaluator route;
+các flags này thuộc ranh giới khởi động do runtime quản lý.
+
+Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**. MCP hash
+toàn bộ snapshot (kể cả metadata và task sources) trước khi dispatch và
+kiểm tra lại sau native capture; nếu byte/file/mode thay đổi thì kết quả
+`inconclusive`, không thể PASS. Kiểm tra này không phải OS-level sandbox
+và không loại trừ mọi hành vi side effect bên ngoài snapshot; chỉ chạy
+với user/managed settings, tools và workspace đáng tin cậy.
 
 Runtime sở hữu native result hooks; không thêm `--settings` hoặc
-`hooks.*` vào `args`. Installer **không ghi đè** `agent-routing.yaml`
+`hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
+vào `args`. Installer **không ghi đè** `agent-routing.yaml`
 đã tồn tại; workspace cũ cần tự cập nhật cấu hình.
 
 ## Workflow mới: Lead → MCP → Peer (server-owned orchestration)
@@ -504,13 +513,15 @@ including cross-module contracts, before delivery is finalized.
 3. Chọn route có model và effort thích hợp trong `agent-routing.yaml`,
    ví dụ `claude-high` (đa số Final Evaluation), `claude-xhigh` (phức tạp)
    hoặc `codex-evaluator`. Model, effort, permission mode
-   và mọi native CLI flags đều do người dùng tự cấu hình; runtime không ép
-   `--restricted`, `--sandbox read-only` hay danh sách tools cố định.
+   do người dùng tự cấu hình; runtime không ép `--restricted` hay
+   `--sandbox read-only`. Nhưng Claude evaluator luôn bỏ project/local
+   settings và MCP config để tránh chạy hooks/MCP nằm trong code ứng viên;
+   runtime chặn override của các flags bảo vệ và result hooks.
    Mặc định cài mới: Claude dùng `--permission-mode auto`.
    **Các flags permissive có thể cho evaluator ghi vào bản sao snapshot.**
-   Đây không phải sandbox bảo mật cứng; tránh sử dụng với hooks, MCP tools
-   hay cấu hình cục bộ không đáng tin cậy. Giữ `TaskPacket` chỉ rõ không ghi,
-   và chỉ kết luận PASS khi report đầy đủ evidence có thể kiểm chứng.
+   Runtime sẽ hash lại toàn bộ snapshot sau native execution; bất kỳ thay
+   đổi nào cũng làm evaluation inconclusive, không được PASS. Đây không
+   phải OS-level sandbox, và không ngăn mọi side effect ở ngoài snapshot.
 4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
    hoặc sử dụng `"claude-xhigh"` / `"codex-evaluator"` theo độ khó.
    Không cần tạo riêng một route Claude có cùng model và effort.
