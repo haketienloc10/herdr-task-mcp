@@ -211,9 +211,24 @@ class DelegateRuntime:
                 len(description) > 500 or
                 ("description" in route and not description.strip())):
             raise ValueError("route description must be nonempty text of at most 500 characters")
-        forbidden = ("--settings", "hooks.Stop", "hooks.state", "features.hooks")
-        if any(a in forbidden or a.startswith(("hooks.", "features.hooks")) for a in args):
-            raise ValueError("result capture configuration is runtime-owned")
+        # Detect native flag aliases: --settings=... and Codex -c/--config
+        # are not safe alternatives to the runtime-owned result capture.
+        for index, arg in enumerate(args):
+            if arg == "--settings" or arg.startswith("--settings="):
+                raise ValueError("result capture configuration is runtime-owned")
+            candidate = arg
+            if arg in {"-c", "--config"}:
+                candidate = args[index + 1] if index + 1 < len(args) else ""
+            elif arg.startswith("--config="):
+                candidate = arg[len("--config="):]
+            elif arg.startswith("-c="):
+                candidate = arg[len("-c="):]
+            elif arg.startswith("-c") and arg != "-c":
+                candidate = arg[2:]
+            if candidate.startswith(("hooks.", "features.hooks")) or candidate in {
+                "hooks.Stop", "hooks.state", "features.hooks",
+            }:
+                raise ValueError("result capture configuration is runtime-owned")
         return {"agent": agent, "args": list(args), "description": description.strip()}
 
     def route(self, name: str) -> tuple[str, list[str]]:
@@ -570,10 +585,28 @@ class DelegateRuntime:
                    root.resolve() in repos.values()
                    for root in evaluation_roots.values()):
                 raise ValueError("unsafe evaluation snapshot root")
-            # CLI permissions/model/effort belong to agent-routing.yaml.
-            # Snapshot isolation is not an OS-level no-write sandbox.
+            # Preserve user-chosen model, effort and permissions, but never
+            # load executable MCP/hooks/settings from the candidate's snapshot.
+            # --setting-sources excludes project/local .claude/settings.json
+            # and .mcp.json; --strict-mcp-config denies ambient MCP config.
+            # User/managed settings remain trusted operator-controlled inputs.
             args = list(args)
-            if adapter == "codex":
+            if adapter == "claude":
+                if any(
+                    arg in {"--mcp-config", "--setting-sources"} or
+                    arg.startswith(("--mcp-config=", "--setting-sources="))
+                    for arg in args
+                ):
+                    raise ValueError(
+                        "evaluator MCP and project settings isolation is runtime-owned"
+                    )
+                args += [
+                    "--setting-sources", "user",
+                    "--strict-mcp-config",
+                    "--disallowedTools", "mcp__*",
+                    "--disable-slash-commands",
+                ]
+            else:
                 args.append("--skip-git-repo-check")
             for name in evaluation_repositories:
                 if name != repository:
