@@ -560,7 +560,7 @@ def test_modified_evaluator_snapshot_never_authorizes_pass(tmp_path, monkeypatch
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
     revision = graph_rt.get_graph(gid)["revision"]
-    outcome = asyncio.run(coordinator.start(gid, "claude-high", revision))
+    outcome = asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
     assert outcome["status"] == "inconclusive"
     assert "snapshot integrity" in outcome["detail"]
     assert outcome["report"] is None
@@ -635,7 +635,7 @@ def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loa
         binding = requests.graph_binding(gid)
         reserved, _ = coordinator.store.reserve(
             gid, graph_rt.get_graph(gid)["revision"], binding["request_id"],
-            binding["request_revision"], "claude-high",
+            binding["request_revision"], "claude-evaluator",
             snap.manifest, snap.digest,
         )
         monkeypatch.setattr(runtime_module.shutil, "which", lambda _: "/usr/bin/herdr")
@@ -657,7 +657,7 @@ def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loa
         monkeypatch.setattr(runtime, "_run", fake_run)
         with pytest.raises(RuntimeError, match="safe boundary arguments"):
             asyncio.run(runtime.delegate(
-                repository="backend", route="claude-high",
+                repository="backend", route="claude-evaluator",
                 packet=build_task_packet(
                     objective="Final verification", scope=["backend", "frontend"],
                     acceptance_criteria=["Verify output"],
