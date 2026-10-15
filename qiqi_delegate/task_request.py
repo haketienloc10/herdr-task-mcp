@@ -5,6 +5,7 @@ Legacy graph runs without a request binding intentionally remain unassessed.
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from qiqi_delegate.core import CAPTURE_MAX_RESPONSE_CHARS
 from typing import Any, Callable
 
 MAX_SOURCE_BYTES = 100_000
+MAX_WORKSPACE_FILE_BYTES = 64 * 1024 * 1024
 MAX_CONTEXT_SOURCES = 16
 MAX_REQUEST_CHARS = 100_000
 DECISIONS = {"direct", "targeted_discovery", "full_discovery", "blocked"}
@@ -86,6 +88,55 @@ def _read_file(root: Path, path: str) -> tuple[str, str]:
     except UnicodeDecodeError as exc:
         raise ValueError("source must be UTF-8 text") from exc
     return decoded, hashlib.sha256(data).hexdigest()
+
+
+def _workspace_file_hash(root: Path, path: str) -> tuple[str, int]:
+    """Hash a validated UTF-8 workspace file without loading it into context."""
+    target = _checked_relative_file(root, path)
+    digest = hashlib.sha256()
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    size = 0
+    with target.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_WORKSPACE_FILE_BYTES:
+                raise ValueError("workspace source exceeds maximum reference size")
+            try:
+                decoder.decode(chunk)
+            except UnicodeDecodeError as exc:
+                raise ValueError("source must be UTF-8 text") from exc
+            digest.update(chunk)
+    try:
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError as exc:
+        raise ValueError("source must be UTF-8 text") from exc
+    return digest.hexdigest(), size
+
+
+def copy_workspace_snapshot(workspace: Path, source: dict[str, Any], target: Path) -> int:
+    """Copy one referenced workspace file into an isolated, hash-checked snapshot."""
+    if (source.get("kind") != "workspace_file" or
+            source.get("transfer_mode") != "reference"):
+        raise ValueError("not a workspace file reference")
+    origin = _checked_relative_file(workspace, source["path"])
+    digest = hashlib.sha256()
+    length = 0
+    try:
+        with origin.open("rb") as reader, target.open("xb") as writer:
+            while chunk := reader.read(1024 * 1024):
+                length += len(chunk)
+                if length > MAX_WORKSPACE_FILE_BYTES:
+                    raise ValueError("workspace source exceeds maximum reference size")
+                writer.write(chunk)
+                digest.update(chunk)
+        if digest.hexdigest() != source["sha256"]:
+            raise ValueError("workspace source changed since assessment")
+        if source.get("size_bytes") is not None and length != source["size_bytes"]:
+            raise ValueError("workspace source size changed since assessment")
+        return length
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
 
 
 class TaskRequestStore:
@@ -376,6 +427,11 @@ class TaskRequestStore:
                 target = _checked_relative_file(root, path)
                 if any(target.is_relative_to(p) for p in self.repos().values()):
                     raise ValueError("workspace_file cannot bypass registered repository boundary")
+            if kind == "workspace_file":
+                digest, size = _workspace_file_hash(root, path)
+                entry.update(path=path, sha256=digest, size_bytes=size,
+                             transfer_mode="reference", verification="reported")
+                return entry
             data, digest = _read_file(root, path)
             entry["path"] = path
             entry["sha256"] = digest
@@ -454,7 +510,11 @@ class TaskRequestStore:
             try:
                 root = (self.repos()[source["repository"]]
                         if source["kind"] == "repo_file" else self.workspace)
-                _, current_digest = _read_file(root, source["path"])
+                if (source["kind"] == "workspace_file" and
+                        source.get("transfer_mode") == "reference"):
+                    current_digest, _ = _workspace_file_hash(root, source["path"])
+                else:
+                    _, current_digest = _read_file(root, source["path"])
                 if current_digest != source["sha256"]:
                     stale.append(source["id"])
             except (ValueError, KeyError, OSError):
