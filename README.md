@@ -89,51 +89,48 @@ Runtime từ chối repository khi:
 
 ## Khai báo route
 
-Sửa `../qiqi-control/agent-routing.yaml` (có thể sao chép toàn bộ 16 route Claude từ
-[`examples/agent-routing.claude.yaml`](examples/agent-routing.claude.yaml)). Mỗi route hỗ trợ `agent`,
-`args` và `description` (tùy chọn để không làm hỏng file cũ).
-File mới do installer tạo có **16 route Claude Sonnet 5.5**, chia thành
-năm nhóm effort `low`, `medium`, `high`, `xhigh`, `max`, cùng hai
-route Codex cũ để giữ tương thích. Các route có cùng model/effort dùng
-YAML anchors/aliases để không lặp `args`:
+Sửa `../qiqi-control/agent-routing.yaml`, hoặc sao chép
+[`examples/agent-routing.claude.yaml`](examples/agent-routing.claude.yaml).
+Route hỗ trợ `agent`, `args` và `description` (không bắt buộc để giữ tương thích).
+
+**Installer mặc định tạo 5 route Claude Sonnet 5.5**: `claude-low`,
+`claude-balanced` (medium), `claude-high`, `claude-xhigh` và
+`claude-max`. Mỗi bộ model + effort + permission chỉ có **một** route,
+dùng chung cho mọi loại task có độ khó tương ứng. Mặc định
+`--permission-mode auto`. Hai route Codex hiện có giữ riêng do
+tham số permission khác nhau.
 
 ~~~yaml
 routes:
   claude-balanced:
     agent: claude
-    args: &sonnet_medium_auto ["--model", "claude-sonnet-5-5", "--effort", "medium", "--permission-mode", "auto"]
-    description: "Tác vụ rõ ràng, ít nhánh; ưu tiên tốc độ và chi phí."
-  claude-small-change:
-    agent: claude
-    args: *sonnet_medium_auto
-    description: "Sửa nhỏ, yêu cầu và test đầu ra rõ."
-  claude-evaluator:
+    args: ["--model", "claude-sonnet-5-5", "--effort", "medium", "--permission-mode", "auto"]
+    description: "Coding, bugfix, tài liệu hoặc test đơn giản khi yêu cầu rõ."
+  claude-high:
     agent: claude
     args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
-    description: "Final Evaluation độc lập trên snapshot khi toàn bộ graph hoàn tất."
+    description: "Phân tích, planning, testing nhiều nhánh hoặc Final Evaluation."
 ~~~
 
-`workspace_info()` trả `routes` (mapping name -> agent như trước) và
-`route_details` (mỗi name có `agent`, `args`, `description`, `model`,
-`effort`). Lead chọn route theo mô tả, độ khó và mức bằng chứng cần có;
-**effort cao hơn không luôn tốt hơn** và tăng thời gian/chi phí. Model/effort
-được đọc từ CLI args; không được khai báo ở các key YAML riêng. Route name
-không phải là hạn chế hành vi của agent; `TaskPacket` vẫn phải chỉ rõ scope,
-quyền sửa, giới hạn công việc và acceptance criteria.
+`workspace_info()` trả `routes` (mapping name → agent như trước),
+`route_names` và `route_details` gồm `description`, `model`,
+`effort`, `args`. Lead chọn **mức effort thấp nhất đủ đáp ứng** độ khó,
+rủi ro và bằng chứng cần có, không mặc định chọn mức cao nhất: effort tăng
+có thể làm tăng thời gian và chi phí mà không giúp việc đơn giản.
+`TaskPacket` vẫn quy định scope, quyền sửa và acceptance criteria.
 
-Evaluator không còn yêu cầu profile CLI cố định. Bạn có thể thêm/bỏ
-`--model`, `--effort`, `--permission-mode`, `--restricted` hoặc flags
-khác khi Claude Code hỗ trợ. **Mặc định Claude là `--permission-mode auto`**.
-Route `claude-evaluator` phân biệt nhờ API `start_final_evaluation`,
-không phải một loại Claude agent riêng. Evaluator chạy trên bản sao dữ liệu
-cách ly, nhưng `auto` / `--yolo` **không bảo đảm chỉ đọc và không phải
-OS-level sandbox**. Chỉ dùng auto với workspace, managed hooks và tools bạn
-tin cậy; chọn profile restricted/read-only nếu môi trường yêu cầu kiểm soát chặt.
+**Không cần route `claude-evaluator` riêng**: sau khi TaskGraph hoàn tất,
+gọi `start_final_evaluation` với `claude-high`, hoặc `claude-xhigh`
+nếu cần đánh giá phức tạp. Vai trò Final Evaluator được quyết định bằng API
+và snapshot, không phải tên route. MCP không ép profile CLI cố định nữa;
+model, effort, permissions và optional tool flags được cấu hình trong YAML.
+Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**; chỉ dùng
+với workspace, hooks và tools tin cậy. Snapshot đánh giá vẫn tách biệt
+khỏi Git roots thực.
 
-Runtime vẫn tự cấu hình native result hooks và **không cho route ghi đè
-`--settings` hoặc `hooks.*`**. Không đưa native hook flags vào `args`.
-Installer không ghi đè `agent-routing.yaml` có sẵn; muốn dùng template mới
-hãy tự thay/cập nhật file ở workspace Lead.
+Runtime sở hữu native result hooks; không thêm `--settings` hoặc
+`hooks.*` vào `args`. Installer **không ghi đè** `agent-routing.yaml`
+đã tồn tại; workspace cũ cần tự cập nhật cấu hình.
 
 ## Workflow mới: Lead → MCP → Peer (server-owned orchestration)
 
