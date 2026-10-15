@@ -233,7 +233,12 @@ class DelegateRuntime:
                         key = ".".join(parts)
                         # Quoted literal dotted keys can resolve to the same
                         # protected paths as ordinary dotted TOML keys.
+                        # Codex applies -c overrides in order. Assigning
+                        # the whole features table replaces features.hooks=true
+                        # installed earlier by the native Stop capture hook,
+                        # even if the new table does not mention hooks.
                         if (key == "hooks" or key.startswith("hooks.") or
+                                key == "features" or
                                 key == "features.hooks" or
                                 key.startswith("features.hooks.")):
                             return True
