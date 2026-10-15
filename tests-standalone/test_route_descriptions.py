@@ -65,6 +65,12 @@ def test_legacy_routes_accept_missing_descriptions(environment):
 
 @pytest.mark.parametrize("override", [
     ["--settings", "{}"],
+    ["--settings={\"hooks\":{}}"],
+    ["--config=hooks.Stop=[]"],
+    ["--config", "hooks.state=unsafe"],
+    ["-c", "hooks.Stop=[]"],
+    ["-chooks.Stop=[]"],
+    ["-c=features.hooks=false"],
     ["hooks.Stop=something"],
     ["features.hooks=true"],
 ])
