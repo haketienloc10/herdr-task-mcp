@@ -242,6 +242,13 @@ class DelegateRuntime:
                 override = token
             if override is None:
                 continue
+            # Preserve compatibility with old direct hook-key rejects
+            # even for a malformed TOML value (which Codex would reject).
+            basic_key = override.split("=", 1)[0].strip().lower()
+            if (basic_key == "hooks" or basic_key.startswith("hooks.") or
+                    basic_key == "features.hooks" or
+                    basic_key.startswith("features.hooks.")):
+                raise ValueError("result capture configuration is runtime-owned")
             try:
                 settings = tomllib.loads(override)
             except (ValueError, TypeError) as exc:
