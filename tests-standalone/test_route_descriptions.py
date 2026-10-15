@@ -63,29 +63,29 @@ def test_legacy_routes_accept_missing_descriptions(environment):
     assert runtime.route_details("codex-balanced")["description"] == ""
 
 
-@pytest.mark.parametrize("override", [
-    ["--settings", "{}"],
-    ["--settings={\"hooks\":{}}"],
-    ["--config=hooks.Stop=[]"],
-    ["--config", "hooks.state=unsafe"],
-    ["-c", "hooks.Stop=[]"],
-    ["-chooks.Stop=[]"],
-    ["-c=features.hooks=false"],
-    ["-c", " hooks.Stop=[]"],
-    ["--config", ' "hooks"."Stop" = [] '],
-    ["-c", ' "hooks.Stop" = [] '],
-    ["-c", '"features" . "hooks" = false'],
-    ["-c", '"hooks" = {}'],
-    ["--config='hooks'.state={}"],
-    ["hooks.Stop=something"],
-    ["features.hooks=true"],
+@pytest.mark.parametrize("agent,override", [
+    ("claude", ["--settings", "{}"]),
+    ("claude", ["--settings={\"hooks\":{}}"]),
+    ("codex", ["--config=hooks.Stop=[]"]),
+    ("codex", ["--config", "hooks.state=unsafe"]),
+    ("codex", ["-c", "hooks.Stop=[]"]),
+    ("codex", ["-chooks.Stop=[]"]),
+    ("codex", ["-c=features.hooks=false"]),
+    ("codex", ["-c", " hooks.Stop=[]"]),
+    ("codex", ["--config", ' "hooks"."Stop" = [] ']),
+    ("codex", ["-c", ' "hooks.Stop" = [] ']),
+    ("codex", ["-c", '"features" . "hooks" = false']),
+    ("codex", ["-c", '"hooks" = {}']),
+    ("codex", ["--config='hooks'.state={}"]),
+    ("codex", ["hooks.Stop=something"]),
+    ("codex", ["features.hooks=true"]),
 ])
-def test_user_route_cannot_override_native_capture(environment, override):
+def test_user_route_cannot_override_native_capture(environment, agent, override):
     _server, runtime, *_ = environment
     import yaml
     (runtime.root / "agent-routing.yaml").write_text(
         yaml.safe_dump({"routes": {"bad": {
-            "agent": "claude", "args": override,
+            "agent": agent, "args": override,
             "description": "Attempt to override capture.",
         }}}),
         encoding="utf-8",
