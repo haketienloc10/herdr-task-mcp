@@ -501,8 +501,9 @@ including cross-module contracts, before delivery is finalized.
    ineligible for independent final PASS; their old APIs remain usable.
 2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
    `graph_state="complete"` remains an execution-only state, not a final PASS.
-3. Chọn route evaluator riêng trong `agent-routing.yaml`, ví dụ
-   `claude-evaluator` hoặc `codex-evaluator`. Model, effort, permission mode
+3. Chọn route có model và effort thích hợp trong `agent-routing.yaml`,
+   ví dụ `claude-high` (đa số Final Evaluation), `claude-xhigh` (phức tạp)
+   hoặc `codex-evaluator`. Model, effort, permission mode
    và mọi native CLI flags đều do người dùng tự cấu hình; runtime không ép
    `--restricted`, `--sandbox read-only` hay danh sách tools cố định.
    Mặc định cài mới: Claude dùng `--permission-mode auto`.
@@ -510,8 +511,9 @@ including cross-module contracts, before delivery is finalized.
    Đây không phải sandbox bảo mật cứng; tránh sử dụng với hooks, MCP tools
    hay cấu hình cục bộ không đáng tin cậy. Giữ `TaskPacket` chỉ rõ không ghi,
    và chỉ kết luận PASS khi report đầy đủ evidence có thể kiểm chứng.
-4. Gọi `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`
-   hoặc đổi route thành `"claude-evaluator"`.
+4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
+   hoặc sử dụng `"claude-xhigh"` / `"codex-evaluator"` theo độ khó.
+   Không cần tạo riêng một route Claude có cùng model và effort.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
    **one fresh native Evaluator session** with snapshot CWD + `--add-dir`
