@@ -77,6 +77,11 @@ def test_legacy_routes_accept_missing_descriptions(environment):
     ("codex", ["-c", '"features" . "hooks" = false']),
     ("codex", ["-c", '"hooks" = {}']),
     ("codex", ["--config='hooks'.state={}"]),
+    ("codex", ["--disable", "hooks"]),
+    ("codex", ["--disable=hooks"]),
+    ("codex", ["--enable", "hooks"]),
+    ("codex", ["--enable=hooks"]),
+    ("codex", ["--disable", "CoDeX_HoOkS"]),
     ("codex", ["hooks.Stop=something"]),
     ("codex", ["features.hooks=true"]),
 ])
@@ -99,6 +104,8 @@ def test_codex_toml_override_allows_unrelated_config(environment):
     config = {"routes": {"custom": {
         "agent": "codex",
         "args": ["-c", ' model_reasoning_effort = "high" ',
+                 "-c", "model_reasoning_effort=high",
+                 "--config=shell_environment_policy.inherit=all",
                  "--config=custom.feature=true"],
         "description": "Valid TOML overrides without native capture changes",
     }}}
@@ -106,3 +113,28 @@ def test_codex_toml_override_allows_unrelated_config(environment):
         yaml.safe_dump(config), encoding="utf-8",
     )
     assert runtime.route("custom")[0] == "codex"
+
+
+def test_claude_native_hook_settings_force_evaluator_add_dir_memory_off(
+    environment, monkeypatch,
+):
+    _server, runtime, *_ = environment
+    import json
+    from pathlib import Path
+
+    # A user shell can enable the feature, but evaluator-owned CLI settings
+    # override it for this one native session without changing normal peers.
+    monkeypatch.setenv("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
+    normal = runtime._hook_args("claude", Path("/tmp"), "normal")
+    evaluator = runtime._hook_args(
+        "claude", Path("/tmp"), "evaluator", evaluator=True,
+    )
+    normal_settings = json.loads(normal[normal.index("--settings") + 1])
+    evaluator_settings = json.loads(
+        evaluator[evaluator.index("--settings") + 1]
+    )
+    assert "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD" not in normal_settings.get("env", {})
+    assert evaluator_settings["env"] == {
+        "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "0",
+    }
+    assert {"Stop", "StopFailure"} <= set(evaluator_settings["hooks"])
