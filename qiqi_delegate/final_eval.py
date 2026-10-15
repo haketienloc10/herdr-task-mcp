@@ -14,6 +14,7 @@ from typing import Any
 from qiqi_delegate.core import build_task_packet
 from qiqi_delegate.evaluator_routes import validate_evaluator_route
 from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot, inspect_roots, manifest_digest
+from qiqi_delegate.task_request import copy_workspace_snapshot
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from qiqi_delegate.runtime import AgentStartupBlocked
 
@@ -70,9 +71,8 @@ class FinalEvaluationCoordinator:
             name: registered[name] for name in names
         }
 
-    @staticmethod
     def _materialize_task_sources(
-        task: dict[str, Any], primary_snapshot: Path,
+        self, task: dict[str, Any], primary_snapshot: Path,
         *, graph_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Expose full original source content in isolated evaluator CWD.
@@ -100,22 +100,30 @@ class FinalEvaluationCoordinator:
         folder.mkdir(mode=0o700, exist_ok=False)
         index = []
         for number, source in enumerate(sources):
-            content = source.get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("final evaluator cannot read a task source")
             name = f"source-{number:02d}.txt"
-            data = content.encode("utf-8")
-            actual_sha = hashlib.sha256(data).hexdigest()
-            if source.get("sha256") != actual_sha:
-                raise ValueError("task source content digest mismatch")
             target = folder / name
-            with target.open("xb") as handle:
-                handle.write(data)
+            if (source["kind"] == "workspace_file" and
+                    source.get("transfer_mode") == "reference"):
+                actual_size = copy_workspace_snapshot(
+                    self.task_requests.workspace, source, target,
+                )
+                actual_sha = source["sha256"]
+            else:
+                content = source.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("final evaluator cannot read a task source")
+                data = content.encode("utf-8")
+                actual_sha = hashlib.sha256(data).hexdigest()
+                if source.get("sha256") != actual_sha:
+                    raise ValueError("task source content digest mismatch")
+                actual_size = len(data)
+                with target.open("xb") as handle:
+                    handle.write(data)
             target.chmod(0o444)
             index.append({
                 "id": source["id"], "kind": source["kind"],
                 "path": name, "sha256": actual_sha,
-                "byte_size": len(data),
+                "byte_size": actual_size,
                 "referenced_by": [
                     req["id"] for req in assessment["requirements"]
                     if source["id"] in req["evidence_refs"]

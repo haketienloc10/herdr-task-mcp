@@ -68,7 +68,18 @@ def test_final_evaluator_can_read_every_original_source_from_snapshot(tmp_path, 
             {"kind": "peer_turn", "turn_id": "discovery-attachment"},
         ],
     )
-    expected = {s["id"]: s["content"] for s in assessed["sources"]}
+    assert all(
+        "content" not in s for s in assessed["sources"]
+        if s["kind"] == "workspace_file" and s.get("transfer_mode") == "reference"
+    )
+    expected = {
+        s["id"]: (
+            workspace_file.read_text(encoding="utf-8")
+            if s["kind"] == "workspace_file" and s.get("transfer_mode") == "reference"
+            else s["content"]
+        )
+        for s in assessed["sources"]
+    }
     observed = {}
 
     async def fake_delegate(**kwargs):
