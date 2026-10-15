@@ -89,7 +89,8 @@ Runtime từ chối repository khi:
 
 ## Khai báo route
 
-Sửa `../qiqi-control/agent-routing.yaml`. Mỗi route hỗ trợ `agent`,
+Sửa `../qiqi-control/agent-routing.yaml` (có thể sao chép toàn bộ 16 route Claude từ
+[`examples/agent-routing.claude.yaml`](examples/agent-routing.claude.yaml)). Mỗi route hỗ trợ `agent`,
 `args` và `description` (tùy chọn để không làm hỏng file cũ).
 File mới do installer tạo có **16 route Claude Sonnet 5.5**, chia thành
 năm nhóm effort `low`, `medium`, `high`, `xhigh`, `max`, cùng hai
