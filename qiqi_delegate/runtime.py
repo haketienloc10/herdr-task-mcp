@@ -656,6 +656,44 @@ class DelegateRuntime:
             # and .mcp.json; --strict-mcp-config denies ambient MCP config.
             # User/managed settings remain trusted operator-controlled inputs.
             args = list(args)
+            # A fresh Herdr pane alone is insufficient: native CLI resume/fork
+            # options can restore previous instructions and even a recorded cwd.
+            # Apply this boundary only to Final Evaluation; normal Peer routes
+            # retain the user's full native session CLI flexibility. For Codex
+            # -c remains a configuration override, NOT Claude's -c (continue).
+            tokens = [arg.strip() for arg in args]
+            if adapter == "codex":
+                forbidden_sessions = {
+                    "resume", "fork", "--resume", "--fork", "--continue",
+                    "--session-id",
+                }
+                forbidden_prefixes = (
+                    "--resume=", "--fork=", "--continue=", "--session-id=",
+                )
+            else:
+                forbidden_sessions = {
+                    "--resume", "--continue", "--fork-session", "--from-pr",
+                    "--session-id", "--teleport", "-r", "-c",
+                }
+                forbidden_prefixes = (
+                    "--resume=", "--continue=", "--fork-session=",
+                    "--from-pr=", "--session-id=", "--teleport=",
+                )
+            if any(
+                token in forbidden_sessions or
+                token.startswith(forbidden_prefixes) or
+                (adapter == "claude" and (
+                    (token.startswith("-r") and len(token) > 2 and
+                     not token.startswith("--")) or
+                    (token.startswith("-c") and len(token) > 2 and
+                     not token.startswith("--"))
+                ))
+                for token in tokens
+            ):
+                raise ValueError(
+                    "Final Evaluation requires a fresh native session; "
+                    "resume/continue/fork flags are not allowed"
+                )
             if adapter == "claude":
                 if any(
                     arg in {"--mcp-config", "--setting-sources"} or
