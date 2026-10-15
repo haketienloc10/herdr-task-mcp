@@ -483,6 +483,9 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
             assert "--settings" in argv
             capture_settings = json.loads(argv[argv.index("--settings") + 1])
             assert {"Stop", "StopFailure"} <= set(capture_settings["hooks"])
+            assert capture_settings["env"][
+                "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+            ] == "0"
             assert argv[argv.index("--permission-mode") + 1] == "auto"
             assert argv[argv.index("--setting-sources") + 1] == "user"
             assert "--strict-mcp-config" in argv
@@ -668,6 +671,11 @@ def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loa
         async def fake_start(_pane, _agent, argv):
             assert {argv[i + 1] for i, arg in enumerate(argv[:-1])
                     if arg == "--add-dir"} == {str(root) for root in snap.paths.values()}
+            settings = json.loads(argv[argv.index("--settings") + 1])
+            assert settings["env"][
+                "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+            ] == "0"
+            assert {"Stop", "StopFailure"} <= set(settings["hooks"])
             assert argv[argv.index("--setting-sources") + 1] == "user"
             assert "--strict-mcp-config" in argv
             assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
