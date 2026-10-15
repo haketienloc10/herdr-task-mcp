@@ -543,6 +543,9 @@ def test_modified_evaluator_snapshot_never_authorizes_pass(tmp_path, monkeypatch
         primary = kwargs["evaluation_roots"]["backend"]
         source = primary / "orders.py"
         if mode == "overwrite":
+            # Read-only mode bits do not protect a file in a writable parent:
+            # an agent running as the same user can unlink and replace it.
+            source.unlink()
             source.write_text("def total(n): return 0\n", encoding="utf-8")
         elif mode == "delete":
             source.unlink()
