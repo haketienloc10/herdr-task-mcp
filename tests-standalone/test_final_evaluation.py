@@ -479,6 +479,11 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
             capture_settings = json.loads(argv[argv.index("--settings") + 1])
             assert {"Stop", "StopFailure"} <= set(capture_settings["hooks"])
             assert argv[argv.index("--permission-mode") + 1] == "auto"
+            assert argv[argv.index("--setting-sources") + 1] == "user"
+            assert "--strict-mcp-config" in argv
+            assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
+            assert "--disable-slash-commands" in argv
+            assert "--mcp-config" not in argv
             assert "--skip-git-repo-check" not in argv
 
 
@@ -521,3 +526,140 @@ def test_custom_evaluator_route_reaches_native_dispatch(tmp_path, monkeypatch):
     assert set(observed["evaluation_roots"]) == {"frontend", "backend"}
     assert all(observed["evaluation_roots"][name] != runtime.repos()[name]
                for name in ("frontend", "backend"))
+
+@pytest.mark.parametrize("mode", [
+    "overwrite", "delete", "new-file", "chmod", "metadata",
+])
+def test_modified_evaluator_snapshot_never_authorizes_pass(tmp_path, monkeypatch, mode):
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    repos = runtime.repos()
+    original = (repos["backend"] / "orders.py").read_bytes()
+
+    async def fake_delegate(**kwargs):
+        eid = kwargs["evaluation_id"]
+        coordinator.store.bind_turn(eid, "snapshot-mutated-native")
+        captured = coordinator.store.get(eid)
+        body = json.dumps(report(captured["manifest"]))
+        primary = kwargs["evaluation_roots"]["backend"]
+        source = primary / "orders.py"
+        if mode == "overwrite":
+            source.write_text("def total(n): return 0\n", encoding="utf-8")
+        elif mode == "delete":
+            source.unlink()
+        elif mode == "new-file":
+            (primary / "unexpected.py").write_text("INJECTED = True\n")
+        elif mode == "chmod":
+            source.chmod(0o600)
+        elif mode == "metadata":
+            (primary / ".qiqi-evaluation-manifest.json").write_text("{}")
+        return {"state": "settled", "turn_id": "snapshot-mutated-native",
+                "agent_response": body}
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    outcome = asyncio.run(coordinator.start(gid, "claude-high", revision))
+    assert outcome["status"] == "inconclusive"
+    assert "snapshot integrity" in outcome["detail"]
+    assert outcome["report"] is None
+    assert (repos["backend"] / "orders.py").read_bytes() == original
+    with pytest.raises(ValueError, match="PASS"):
+        coordinator.finalize(gid, outcome["evaluation_id"], revision)
+
+
+def test_evaluator_snapshot_unchanged_with_full_source_metadata(tmp_path):
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot
+    with EvaluationSnapshot(runtime.repos()) as snapshot:
+        snapshot.seal_inputs()
+        snapshot.verify_unchanged()
+        with pytest.raises(RuntimeError, match="already sealed"):
+            snapshot.seal_inputs()
+
+
+@pytest.mark.parametrize("args", [
+    ["--mcp-config", "{}"],
+    ["--mcp-config={}"],
+    ["--setting-sources", "project"],
+    ["--setting-sources=project,user"],
+])
+def test_evaluator_rejects_user_overrides_of_isolated_project_config(
+    tmp_path, args,
+):
+    from qiqi_delegate.core import build_task_packet
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    import yaml
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump({"routes": {"claude-isolation-override": {
+            "agent": "claude",
+            "args": ["--permission-mode", "auto", *args],
+        }}}), encoding="utf-8",
+    )
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        with pytest.raises(ValueError, match="isolation is runtime-owned"):
+            asyncio.run(runtime.delegate(
+                repository="backend",
+                route="claude-isolation-override",
+                packet=build_task_packet(
+                    objective="Evaluate", scope=["backend"],
+                    acceptance_criteria=["Verify output"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="unbound-evaluator",
+            ))
+
+
+def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loading(
+    tmp_path, monkeypatch,
+):
+    import qiqi_delegate.runtime as runtime_module
+    from qiqi_delegate.core import build_task_packet
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    repos = runtime.repos()
+    (repos["backend"] / ".mcp.json").write_text(
+        '{"mcpServers":{"danger":{"command":"untrusted-executable"}}}'
+    )
+    conf = repos["backend"] / ".claude"
+    conf.mkdir()
+    (conf / "settings.json").write_text(
+        '{"hooks":{"SessionStart":[{"hooks":[{"type":"command",'
+        '"command":"untrusted-command"}]}]}}'
+    )
+    with EvaluationSnapshot(repos) as snap:
+        root = snap.paths["backend"]
+        assert (root / ".mcp.json").is_file()
+        assert (root / ".claude/settings.json").is_file()
+        binding = requests.graph_binding(gid)
+        reserved, _ = coordinator.store.reserve(
+            gid, graph_rt.get_graph(gid)["revision"], binding["request_id"],
+            binding["request_revision"], "claude-high",
+            snap.manifest, snap.digest,
+        )
+        monkeypatch.setattr(runtime_module.shutil, "which", lambda _: "/usr/bin/herdr")
+        async def fake_json(*args, **kw):
+            return {"workspace": {"workspace_id": "test-workspace"},
+                    "root_pane": {"pane_id": "test-pane"}}
+        async def fake_ensure():
+            pass
+        async def fake_start(_pane, _agent, argv):
+            assert argv[argv.index("--setting-sources") + 1] == "user"
+            assert "--strict-mcp-config" in argv
+            assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
+            raise RuntimeError("safe boundary arguments were injected")
+        async def fake_run(*args, **kw):
+            return (0, "", "")
+        monkeypatch.setattr(runtime, "_ensure_herdr_server", fake_ensure)
+        monkeypatch.setattr(runtime, "_json", fake_json)
+        monkeypatch.setattr(runtime, "_start_agent", fake_start)
+        monkeypatch.setattr(runtime, "_run", fake_run)
+        with pytest.raises(RuntimeError, match="safe boundary arguments"):
+            asyncio.run(runtime.delegate(
+                repository="backend", route="claude-high",
+                packet=build_task_packet(
+                    objective="Final verification", scope=["backend", "frontend"],
+                    acceptance_criteria=["Verify output"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id=reserved["evaluation_id"],
+            ))
