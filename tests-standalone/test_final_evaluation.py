@@ -462,11 +462,15 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
                 evaluation_roots=snap.paths,
                 evaluation_id=eid,
             ))
-        assert captured["cwd"] == str(snap.paths["backend"])
-        assert captured["cwd"] != str(repos["backend"])
+        # Candidate CLAUDE.md/AGENTS.md must not be startup instructions.
+        assert captured["cwd"].endswith("/evaluator-neutral-cwd")
+        assert captured["cwd"] not in {str(path) for path in snap.paths.values()}
+        assert captured["cwd"] not in {str(path) for path in repos.values()}
         argv = captured["argv"]
-        assert argv[argv.index("--add-dir") + 1] == str(snap.paths["frontend"])
-        assert str(repos["frontend"]) not in argv
+        add_dirs = [argv[i + 1] for i, arg in enumerate(argv[:-1])
+                    if arg == "--add-dir"]
+        assert set(add_dirs) == {str(root) for root in snap.paths.values()}
+        assert not any(str(path) in add_dirs for path in repos.values())
         assert captured["adapter"] == ("codex" if route == "codex-evaluator" else "claude")
         assert "--yolo" not in argv
         if route == "codex-evaluator":
