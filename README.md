@@ -89,31 +89,50 @@ Runtime từ chối repository khi:
 
 ## Khai báo route
 
-Sửa `../qiqi-control/agent-routing.yaml`:
+Sửa `../qiqi-control/agent-routing.yaml`. Mỗi route hỗ trợ `agent`,
+`args` và `description` (tùy chọn để không làm hỏng file cũ).
+File mới do installer tạo có **16 route Claude Sonnet 5.5**, chia thành
+năm nhóm effort `low`, `medium`, `high`, `xhigh`, `max`, cùng hai
+route Codex cũ để giữ tương thích. Các route có cùng model/effort dùng
+YAML anchors/aliases để không lặp `args`:
 
 ~~~yaml
 routes:
-  codex-balanced:
-    agent: codex
-    args: ["--yolo"]
   claude-balanced:
     agent: claude
-    args: ["--permission-mode", "auto"]
-  codex-evaluator:
-    agent: codex
-    args: ["--sandbox", "read-only"]
+    args: &sonnet_medium_auto ["--model", "claude-sonnet-5-5", "--effort", "medium", "--permission-mode", "auto"]
+    description: "Tác vụ rõ ràng, ít nhánh; ưu tiên tốc độ và chi phí."
+  claude-small-change:
+    agent: claude
+    args: *sonnet_medium_auto
+    description: "Sửa nhỏ, yêu cầu và test đầu ra rõ."
   claude-evaluator:
     agent: claude
-    args: ["--restricted", "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep", "--disallowedTools", "mcp__*", "--strict-mcp-config", "--disable-slash-commands"]
+    args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
+    description: "Final Evaluation độc lập trên snapshot khi toàn bộ graph hoàn tất."
 ~~~
 
-Trong lời gọi MCP, truyền **tên route** như `codex-balanced`. Không truyền `codex` thay cho tên route.
+`workspace_info()` trả `routes` (mapping name -> agent như trước) và
+`route_details` (mỗi name có `agent`, `args`, `description`, `model`,
+`effort`). Lead chọn route theo mô tả, độ khó và mức bằng chứng cần có;
+**effort cao hơn không luôn tốt hơn** và tăng thời gian/chi phí. Model/effort
+được đọc từ CLI args; không được khai báo ở các key YAML riêng. Route name
+không phải là hạn chế hành vi của agent; `TaskPacket` vẫn phải chỉ rõ scope,
+quyền sửa, giới hạn công việc và acceptance criteria.
 
-`args` chứa tham số CLI của agent. Runtime tự cấu hình native result hook. Không ghi đè thiết lập hook qua `args`.
+Evaluator không còn yêu cầu profile CLI cố định. Bạn có thể thêm/bỏ
+`--model`, `--effort`, `--permission-mode`, `--restricted` hoặc flags
+khác khi Claude Code hỗ trợ. **Mặc định Claude là `--permission-mode auto`**.
+Route `claude-evaluator` phân biệt nhờ API `start_final_evaluation`,
+không phải một loại Claude agent riêng. Evaluator chạy trên bản sao dữ liệu
+cách ly, nhưng `auto` / `--yolo` **không bảo đảm chỉ đọc và không phải
+OS-level sandbox**. Chỉ dùng auto với workspace, managed hooks và tools bạn
+tin cậy; chọn profile restricted/read-only nếu môi trường yêu cầu kiểm soát chặt.
 
-**CAUTION:** `--yolo` cho phép Codex bỏ qua approval và sandbox thông thường. `--permission-mode auto` chọn chế độ quyền tự động của Claude. Chỉ sử dụng các mặc định này trong workspace và Git repository mà bạn tin cậy.
-
-Muốn giữ chế độ yêu cầu xác nhận, sửa `args: []` cho từng route. Installer chỉ tạo `agent-routing.yaml` khi file chưa tồn tại; chạy lại installer không ghi đè cấu hình hiện có.
+Runtime vẫn tự cấu hình native result hooks và **không cho route ghi đè
+`--settings` hoặc `hooks.*`**. Không đưa native hook flags vào `args`.
+Installer không ghi đè `agent-routing.yaml` có sẵn; muốn dùng template mới
+hãy tự thay/cập nhật file ở workspace Lead.
 
 ## Workflow mới: Lead → MCP → Peer (server-owned orchestration)
 
@@ -484,26 +503,15 @@ including cross-module contracts, before delivery is finalized.
    ineligible for independent final PASS; their old APIs remain usable.
 2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
    `graph_state="complete"` remains an execution-only state, not a final PASS.
-3. Chọn route evaluator riêng trong `agent-routing.yaml`. Workspace mới tạo sẵn
-   `codex-evaluator` và `claude-evaluator` (xem phần khai báo route). Workspace
-   đã cài phải thêm route thủ công vì installer không ghi đè `agent-routing.yaml`.
-
-   - Codex: chỉ chấp nhận `--sandbox read-only`.
-   - Claude: chỉ chấp nhận đúng profile `--restricted`,
-     `--permission-mode dontAsk`, `--tools Read,Glob,Grep`,
-     `--allowedTools Read,Glob,Grep`, `--disallowedTools mcp__*`,
-     `--strict-mcp-config` (không có `--mcp-config`) và
-     `--disable-slash-commands`. Yêu cầu Claude Code từ phiên bản `2.1.248`
-     (có `--restricted`); bản cũ sẽ không khởi động evaluator.
-
-   Claude evaluator chỉ được gọi tool đọc file, chặn MCP tool calls và không
-   nạp MCP server từ cấu hình user/project thông thường. `--disallowedTools`
-   **không ngăn server khởi động**; `--strict-mcp-config` mới giới hạn nguồn
-   cấu hình MCP. Một số chính sách managed MCP/hook cấp hệ thống có thể có
-   quyền ưu tiên riêng. Đây là ràng buộc ở tầng Claude CLI, **không phải
-   OS-level read-only sandbox**. Không chạy evaluator với untrusted managed
-   hooks/chính sách cục bộ có thể thực hiện side effect. Runtime từ chối
-   cờ thiếu, thừa hoặc thay đổi thứ tự.
+3. Chọn route evaluator riêng trong `agent-routing.yaml`, ví dụ
+   `claude-evaluator` hoặc `codex-evaluator`. Model, effort, permission mode
+   và mọi native CLI flags đều do người dùng tự cấu hình; runtime không ép
+   `--restricted`, `--sandbox read-only` hay danh sách tools cố định.
+   Mặc định cài mới: Claude dùng `--permission-mode auto`.
+   **Các flags permissive có thể cho evaluator ghi vào bản sao snapshot.**
+   Đây không phải sandbox bảo mật cứng; tránh sử dụng với hooks, MCP tools
+   hay cấu hình cục bộ không đáng tin cậy. Giữ `TaskPacket` chỉ rõ không ghi,
+   và chỉ kết luận PASS khi report đầy đủ evidence có thể kiểm chứng.
 4. Gọi `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`
    hoặc đổi route thành `"claude-evaluator"`.
    The Coordinator snapshots **all** repositories in the active TaskGraph

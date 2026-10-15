@@ -1,36 +1,19 @@
-"""Strict native CLI profiles for independent Final Evaluation.
+"""Legacy evaluator route helper.
 
-Claude uses a restricted evaluation harness, only built-in read-only file
-tools, no user/project MCP server loading or tool calls/skills, and no interactive approval. This policy is not
-a kernel-enforced filesystem sandbox.
+The evaluator CLI profile is user-configured via agent-routing.yaml. This module
+is retained for callers importing its old symbols, but the native runtime no
+longer requires a fixed permissions, model or effort profile.
 """
 from __future__ import annotations
 
-CODEX_EVALUATOR_ARGS = (
-    ("--sandbox", "read-only"),
-    ("--sandbox=read-only",),
-)
-CLAUDE_EVALUATOR_ARGS = (
-    "--restricted",
-    "--permission-mode", "dontAsk",
-    "--tools", "Read,Glob,Grep",
-    "--allowedTools", "Read,Glob,Grep",
-    "--disallowedTools", "mcp__*",
-    "--strict-mcp-config",
-    "--disable-slash-commands",
-)
+# Recommended starter defaults, not a security boundary or a required profile.
+CLAUDE_EVALUATOR_ARGS = ("--permission-mode", "auto")
+CODEX_EVALUATOR_ARGS = (("--sandbox", "read-only"), ("--sandbox=read-only",))
 
 
 def validate_evaluator_route(adapter: str, args: list[str]) -> None:
-    """Reject CLI overrides, bypass flags, and weaker evaluator profiles."""
-    if adapter == "codex" and tuple(args) in CODEX_EVALUATOR_ARGS:
-        return
-    if adapter == "claude" and tuple(args) == CLAUDE_EVALUATOR_ARGS:
-        return
-    raise ValueError(
-        "Final Evaluation requires a safe Codex or Claude evaluator route: "
-        "Codex --sandbox read-only or exact restricted Claude profile "
-        "(--restricted, --strict-mcp-config without --mcp-config, "
-        "read-only tools, no MCP/skills, dontAsk); "
-        "unsafe route or CLI overrides are forbidden"
-    )
+    """Compatibility shape check; does not enforce evaluator CLI flags."""
+    if adapter not in {"claude", "codex"}:
+        raise ValueError("evaluator agent must be claude or codex")
+    if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
+        raise ValueError("evaluator args must be a list of CLI strings")

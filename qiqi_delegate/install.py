@@ -16,7 +16,6 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 
-from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
 
 START = "<!-- BEGIN HERDR-TASK-MCP RULES -->"
 END = "<!-- END HERDR-TASK-MCP RULES -->"
@@ -410,22 +409,107 @@ def claude_config(existing: str, python: Path, root: Path,
     config["mcpServers"] = servers
     return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
 
-ROUTES = """# Routes and arguments belong to this workspace, not any child repository.
-# These defaults reduce interactive approval; change args here or in the
-# generated agent-routing.yaml if the workspace requires stricter permissions.
+ROUTES = """# Routes are grouped by Sonnet 5.5 effort; all default to Claude auto permissions.
+# Each effort-level args list is defined once (&anchor) and reused (*alias).
+# Choose by description + evidence needs, not highest effort. Higher effort costs more.
+# 'auto' is NOT an OS-level read-only sandbox. For read-only tasks use constraints.
+# Final Evaluation still runs on an isolated snapshot and has a separate PASS gate.
 routes:
+  # --- LOW effort ---
+  claude-quick-read:
+    agent: claude
+    args: &sonnet_low_auto ["--model", "claude-sonnet-5-5", "--effort", "low", "--permission-mode", "auto"]
+    description: "Tra cứu nhanh file/symbol/cấu hình, câu hỏi nhỏ; chỉ yêu cầu bằng chứng tối thiểu."
+
+  # --- MEDIUM effort ---
+  claude-balanced:
+    agent: claude
+    args: &sonnet_medium_auto ["--model", "claude-sonnet-5-5", "--effort", "medium", "--permission-mode", "auto"]
+    description: "Route mặc định cho task rõ ràng, ít nhánh và phạm vi vừa; ưu tiên chi phí và tốc độ."
+
+  claude-small-change:
+    agent: claude
+    args: *sonnet_medium_auto
+    description: "Sửa lỗi hoặc thay đổi nhỏ, yêu cầu và test đầu ra rõ ràng."
+
+  claude-implementation:
+    agent: claude
+    args: *sonnet_medium_auto
+    description: "Triển khai tính năng hoặc bugfix thông thường có acceptance criteria rõ ràng."
+
+  claude-documentation:
+    agent: claude
+    args: *sonnet_medium_auto
+    description: "Viết/cập nhật tài liệu và ví dụ dựa trên hành vi đã xác minh."
+
+  # --- HIGH effort ---
+  claude-analysis:
+    agent: claude
+    args: &sonnet_high_auto ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
+    description: "Phân tích kiến trúc, luồng code hoặc contract nhiều bước với chứng cứ file:line."
+
+  claude-planning:
+    agent: claude
+    args: *sonnet_high_auto
+    description: "Thiết kế kế hoạch có trade-off, rủi ro và phụ thuộc cần đối chiếu."
+
+  claude-discovery:
+    agent: claude
+    args: *sonnet_high_auto
+    description: "Targeted discovery khi một số fact đang chặn kế hoạch; chỉ điều tra, không sửa."
+
+  claude-testing:
+    agent: claude
+    args: *sonnet_high_auto
+    description: "Thiết kế và chạy test nhiều nhánh, bao gồm kiểm tra regression quan trọng."
+
+  claude-evaluator:
+    agent: claude
+    args: *sonnet_high_auto
+    description: "Final Evaluation độc lập khi TaskGraph hoàn tất; đọc snapshot, đối chiếu toàn bộ requirements."
+
+  # --- XHIGH effort ---
+  claude-deep-discovery:
+    agent: claude
+    args: &sonnet_xhigh_auto ["--model", "claude-sonnet-5-5", "--effort", "xhigh", "--permission-mode", "auto"]
+    description: "Full discovery hoặc truy vết luồng phức tạp/xuyên repo chưa rõ nguyên nhân."
+
+  claude-refactor:
+    agent: claude
+    args: *sonnet_xhigh_auto
+    description: "Refactor phạm vi lớn, nhiều tác động, cần bảo toàn contract và hành vi."
+
+  claude-debug:
+    agent: claude
+    args: *sonnet_xhigh_auto
+    description: "Debug race condition, lifecycle hoặc lỗi khó tái hiện cần suy luận sâu."
+
+  claude-review:
+    agent: claude
+    args: *sonnet_xhigh_auto
+    description: "Review thay đổi lớn, nhiều dependency và edge case với chứng cứ chi tiết."
+
+  claude-security-review:
+    agent: claude
+    args: *sonnet_xhigh_auto
+    description: "Review bảo mật threat model, trust boundary và khả năng khai thác phức tạp."
+
+  # --- MAX effort ---
+  claude-critical:
+    agent: claude
+    args: &sonnet_max_auto ["--model", "claude-sonnet-5-5", "--effort", "max", "--permission-mode", "auto"]
+    description: "Trường hợp ngoại lệ rất khó, rủi ro cao; chỉ chọn khi high/xhigh chưa đủ."
+
+  # --- Legacy Codex routes (compatibility with existing workspaces) ---
   codex-balanced:
     agent: codex
     args: ["--yolo"]
-  claude-balanced:
-    agent: claude
-    args: ["--permission-mode", "auto"]
+    description: "Tác vụ Codex legacy; --yolo bỏ qua lớp phê duyệt/sandbox thông thường."
+
   codex-evaluator:
     agent: codex
     args: ["--sandbox", "read-only"]
-  claude-evaluator:
-    agent: claude
-    args: """ + json.dumps(list(CLAUDE_EVALUATOR_ARGS)) + "\n"
+    description: "Final Evaluation bằng Codex với profile read-only do user có thể sửa."\n"""
 
 REPOS = """# Register existing Git roots relative to THIS workspace.
 # Child repositories: path: frontend. Sibling repositories: path: ../frontend.

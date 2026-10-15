@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 import yaml
 
-from qiqi_delegate.evaluator_routes import validate_evaluator_route
 from qiqi_delegate.task_request import copy_workspace_snapshot
 from qiqi_delegate.core import (
     TaskPacket, render_task_prompt, codex_stop_hook_hash,
@@ -187,25 +186,39 @@ class DelegateRuntime:
             result[name] = target
         return result
 
-    def route(self, name: str) -> tuple[str, list[str]]:
+    def route_details(self, name: str) -> dict[str, Any]:
+        """Return validated, user-authored CLI route metadata.
+
+        Description is optional for backward compatibility. Only the native
+        result-hook configuration remains runtime-owned.
+        """
         data = self._load_yaml("agent-routing.yaml")
         routes = data.get("routes")
         if not isinstance(routes, dict) or name not in routes:
             raise ValueError(f"unknown route: {name}")
         route = routes[name]
-        if not isinstance(route, dict) or set(route) - {"agent", "args"}:
-            raise ValueError("route must contain agent and optional args only")
+        if not isinstance(route, dict) or set(route) - {"agent", "args", "description"}:
+            raise ValueError("route supports agent, args and optional description")
         agent = route.get("agent")
         args = route.get("args", [])
+        description = route.get("description", "")
         if agent not in {"codex", "claude"}:
             raise ValueError("route agent must be codex or claude")
         if (not isinstance(args, list) or len(args) > 32 or
             any(not isinstance(a, str) or not a.strip() or "\x00" in a for a in args)):
             raise ValueError("route args must be an array of CLI argument strings")
+        if (not isinstance(description, str) or
+                len(description) > 500 or
+                ("description" in route and not description.strip())):
+            raise ValueError("route description must be nonempty text of at most 500 characters")
         forbidden = ("--settings", "hooks.Stop", "hooks.state", "features.hooks")
         if any(a in forbidden or a.startswith(("hooks.", "features.hooks")) for a in args):
             raise ValueError("result capture configuration is runtime-owned")
-        return agent, args
+        return {"agent": agent, "args": list(args), "description": description.strip()}
+
+    def route(self, name: str) -> tuple[str, list[str]]:
+        details = self.route_details(name)
+        return details["agent"], details["args"]
 
     def _claim(
         self,
@@ -557,9 +570,8 @@ class DelegateRuntime:
                    root.resolve() in repos.values()
                    for root in evaluation_roots.values()):
                 raise ValueError("unsafe evaluation snapshot root")
-            # Revalidate before the native launch. Untrusted CLI overrides
-            # cannot bypass the Codex sandbox or Claude restricted profile.
-            validate_evaluator_route(adapter, args)
+            # CLI permissions/model/effort belong to agent-routing.yaml.
+            # Snapshot isolation is not an OS-level no-write sandbox.
             args = list(args)
             if adapter == "codex":
                 args.append("--skip-git-repo-check")
