@@ -672,6 +672,19 @@ class DelegateRuntime:
                     "--disable-slash-commands",
                 ]
             else:
+                # Codex -C/--cd overrides the native agent's working root,
+                # independently of Herdr's neutral workspace CWD. Candidate
+                # AGENTS.md can then become startup instructions. Keep these
+                # flags user-configurable for regular peers, but not Evaluators.
+                if any(
+                    token == "-C" or token.startswith("-C") or
+                    token == "--cd" or token.startswith("--cd=")
+                    for arg in args for token in (arg.strip(),)
+                ):
+                    raise ValueError(
+                        "evaluator native working directory is runtime-owned; "
+                        "Codex -C/--cd flags are not allowed"
+                    )
                 args.append("--skip-git-repo-check")
             # Every snapshot is passed as explicitly authorized source data.
             # The native agent starts from a neutral directory (see below);
