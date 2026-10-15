@@ -520,15 +520,21 @@ including cross-module contracts, before delivery is finalized.
    Mặc định cài mới: Claude dùng `--permission-mode auto`.
    **Các flags permissive có thể cho evaluator ghi vào bản sao snapshot.**
    Runtime sẽ hash lại toàn bộ snapshot sau native execution; bất kỳ thay
-   đổi nào cũng làm evaluation inconclusive, không được PASS. Đây không
-   phải OS-level sandbox, và không ngăn mọi side effect ở ngoài snapshot.
+   đổi nào cũng làm evaluation inconclusive, không được PASS. Snapshot được
+   mount bằng `--add-dir` thay vì trở thành process CWD, tránh candidate
+   memory file ở vị trí khởi chạy. Không dùng `--safe-mode` vì cờ này
+   cũng vô hiệu hóa native Stop hooks cần cho capture. Đây không phải
+   OS-level sandbox, và không ngăn mọi side effect ở ngoài snapshot.
 4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
    hoặc sử dụng `"claude-xhigh"` / `"codex-evaluator"` theo độ khó.
    Không cần tạo riêng một route Claude có cùng model và effort.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
-   **one fresh native Evaluator session** with snapshot CWD + `--add-dir`
-   for additional module roots. The bounded TaskPacket contains only
+   **one fresh native Evaluator session** in a neutral CWD, with every
+   snapshot root passed as a read-only *input by convention* via `--add-dir`
+   and identified by absolute paths in the native prompt. This prevents
+   candidate `CLAUDE.md` / `AGENTS.md` from acting as startup instructions.
+   The bounded TaskPacket contains only
    small routing metadata and relative archive locations, not the entire
    original request and TaskGraph inline. In the primary isolated snapshot,
    `.qiqi-final-task-sources/index.json` stores the **full verbatim original
