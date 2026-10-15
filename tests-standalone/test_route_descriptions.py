@@ -3,7 +3,12 @@ import asyncio
 
 import pytest
 
-from test_lead_orchestration import environment
+from test_lead_orchestration import environment as make_environment
+
+
+@pytest.fixture
+def environment(tmp_path, monkeypatch):
+    return make_environment(tmp_path, monkeypatch)
 
 
 def test_workspace_info_descriptions_and_cli_model_effort(environment):
