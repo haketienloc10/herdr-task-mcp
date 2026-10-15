@@ -431,6 +431,9 @@ def render_task_prompt(packet: TaskPacket, *,
             "of crossing the repository boundary or inventing the contract.\n"
             "- The mounted Work Item is a read-only exception only when an explicit "
             "work_item_path locator is provided. Do not mutate it.\n"
+            "- Explicit Lead workspace source snapshots, when enumerated in the "
+            "runtime prompt, are also read-only exceptions; only read listed "
+            "snapshot files, never the original Lead workspace.\n"
             "- Do not read or modify .qiqi/state."
         )
 
