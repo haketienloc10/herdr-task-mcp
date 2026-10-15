@@ -741,3 +741,107 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     # The native agent was never started, nor a turn claimed.
     with runtime._connect() as db:
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("agent,native_args", [
+    ("codex", ["resume", "old-session"]),
+    ("codex", ["resume", "--last"]),
+    ("codex", ["fork", "old-session"]),
+    ("codex", ["exec", "resume", "old-session"]),
+    ("codex", ["exec", "fork", "old-session"]),
+    ("codex", ["--resume", "old-session"]),
+    ("codex", ["--resume=old-session"]),
+    ("codex", ["--fork", "old-session"]),
+    ("codex", ["--fork=old-session"]),
+    ("codex", ["--continue"]),
+    ("codex", ["--session-id=old-session"]),
+    ("claude", ["--resume", "old-session"]),
+    ("claude", ["--resume=old-session"]),
+    ("claude", ["--continue"]),
+    ("claude", ["--continue=true"]),
+    ("claude", ["--fork-session"]),
+    ("claude", ["--fork-session=true"]),
+    ("claude", ["--from-pr", "19"]),
+    ("claude", ["--from-pr=19"]),
+    ("claude", ["--session-id", "550e8400-e29b-41d4-a716-446655440000"]),
+    ("claude", ["--session-id=550e8400-e29b-41d4-a716-446655440000"]),
+    ("claude", ["--teleport"]),
+    ("claude", ["-r", "old-session"]),
+    ("claude", ["-rold-session"]),
+    ("claude", ["-c"]),
+    ("claude", ["-c=true"]),
+])
+def test_evaluator_requires_fresh_native_session_but_peer_routes_keep_args(
+    tmp_path, agent, native_args,
+):
+    from qiqi_delegate.core import build_task_packet
+    import yaml
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    config = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
+    config["routes"]["user-session-route"] = {
+        "agent": agent,
+        "args": native_args,
+        "description": "User-controlled native session options for ordinary peers",
+    }
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8",
+    )
+    # These flags are not globally forbidden: regular user routes remain
+    # configurable, including Codex -c TOML overrides.
+    assert runtime.route("user-session-route") == (agent, native_args)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        with pytest.raises(ValueError, match="fresh native session"):
+            asyncio.run(runtime.delegate(
+                repository="backend",
+                route="user-session-route",
+                packet=build_task_packet(
+                    objective="Verify independent evidence",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Return verified final report"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="unreserved-test-evaluation",
+            ))
+    with runtime._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
+def test_codex_evaluator_allows_regular_config_flags_without_session_resume(
+    tmp_path, monkeypatch,
+):
+    from qiqi_delegate.core import build_task_packet
+    import yaml
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    config = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
+    config["routes"]["codex-native-config"] = {
+        "agent": "codex",
+        "args": ["-c", "model_reasoning_effort=high",
+                 "--sandbox", "read-only"],
+    }
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8",
+    )
+    assert runtime.route("codex-native-config")[1][:2] == [
+        "-c", "model_reasoning_effort=high",
+    ]
+    # A missing Herdr CLI is past evaluator argument validation; this
+    # establishes that Codex -c has not been mistaken for Claude -c.
+    import qiqi_delegate.runtime as runtime_module
+    monkeypatch.setattr(runtime_module.shutil, "which", lambda _: None)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        with pytest.raises(RuntimeError, match="Herdr CLI not found"):
+            asyncio.run(runtime.delegate(
+                repository="backend",
+                route="codex-native-config",
+                packet=build_task_packet(
+                    objective="Evaluate output",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Verify evidence"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="unreserved-test-evaluation",
+            ))
