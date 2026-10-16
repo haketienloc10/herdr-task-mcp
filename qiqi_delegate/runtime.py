@@ -496,8 +496,7 @@ class DelegateRuntime:
             raise RuntimeError(f"invalid Herdr JSON response for {args[:2]}") from exc
 
     @staticmethod
-    def _hook_args(adapter: str, sink: Path, nonce: str,
-                   ) -> list[str]:
+    def _hook_args(adapter: str, sink: Path, nonce: str) -> list[str]:
         import shlex
         command = shlex.join([
             sys.executable, "-m", "qiqi_delegate.result_hook",
@@ -620,7 +619,7 @@ class DelegateRuntime:
                        evaluation_id: str | None = None,
                        workspace_sources: tuple[dict[str, Any], ...] = ()) -> dict:
         if evaluation_id is not None and workspace_sources:
-            raise ValueError("evaluator sources are staged in its isolated snapshot")
+            raise ValueError("evaluator sources are staged in its temporary working copy")
         if len({source["id"] for source in workspace_sources}) != len(workspace_sources):
             raise ValueError("duplicate workspace source ID")
         repos = self.repos()
