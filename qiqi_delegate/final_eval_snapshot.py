@@ -1,6 +1,6 @@
-"""Reproducible, bounded, isolated snapshots for graph-level final evaluation.
+"""Reproducible, bounded Git working-tree copies for final evaluation.
 
-Do not mount original registered working trees in an Evaluator. Snapshot all
+Do not use live registered working trees as evaluator CWD. Copy all
 tracked and non-ignored untracked files, not just HEAD: Peer output may be dirty.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
 
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_000_000
@@ -274,7 +275,7 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
 
 
 class EvaluationSnapshot:
-    """Temporary immutable-input snapshot; all evaluator writes go to a copy."""
+    """Temporary copies of all TaskGraph repositories for one native evaluation."""
 
     def __init__(self, roots: dict[str, Path]):
         self.roots = roots
@@ -282,7 +283,6 @@ class EvaluationSnapshot:
         self.paths: dict[str, Path] = {}
         self.manifest: dict[str, Any] = {}
         self.digest = ""
-
     def __enter__(self) -> "EvaluationSnapshot":
         first = inspect_roots(self.roots)
         self._temp = tempfile.TemporaryDirectory(prefix="qiqi-final-eval-")
@@ -303,9 +303,9 @@ class EvaluationSnapshot:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with target.open("xb") as handle:
                         handle.write(payload)
-                    # Read-only input snapshot; sandboxed tests may write to
-                    # separate ephemeral artifact directories.
-                    target.chmod(0o444 if mode & 0o111 == 0 else 0o555)
+                    # Preserve executable bits in this disposable working copy.
+                    # --add-dir is directory access, not a read-only mount.
+                    target.chmod(mode)
                 # Evaluator can look up hashes by repository-relative path
                 # without embedding thousands of file hashes in the prompt.
                 (destination / ".qiqi-evaluation-manifest.json").write_text(

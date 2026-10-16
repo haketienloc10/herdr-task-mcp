@@ -176,7 +176,8 @@ mcp = MCPServer(
         "Pass the exact repository name from workspace repos.yaml. "
         "Lead owns technical acceptance. Native result hooks are the only answer source. "
         "No terminal scraping, Supervisor, or sibling repository reads. "
-        "Call workspace_info first for registered repositories and route names. "
+        "Call workspace_info first; select a route using route_details description, "
+        "model and effort instead of always choosing the highest effort. "
         "For new work prefer submit_workflow: atomically register request, sources, "
         "evidence-linked assessment and direct single/multiple tasks, or a Discovery plan. "
         "Use alias:<name> for source evidence references in submit_workflow only. "
@@ -196,7 +197,7 @@ mcp = MCPServer(
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
         "After all TaskGraph nodes are satisfied, graph_state complete only means "
         "execution complete: call start_final_evaluation with a deliberately configured "
-        "safe Codex or restricted Claude evaluator route, get_final_evaluation, "
+        "user-configured evaluator route, get_final_evaluation, "
         "and only then finalize_graph with a current independently evaluated PASS. "
         "Peer reports and Lead ACCEPT are "
         "not substitutes for final source verification. "
@@ -386,16 +387,45 @@ async def workspace_info() -> dict[str, Any]:
     if not isinstance(routes, dict):
         raise ValueError("agent-routing.yaml routes must be an object")
     summary = {}
+    route_details = {}
+
+    def cli_option(
+        args: list[str], flag: str, short: str | None = None,
+    ) -> str | None:
+        # Resolve the last configured value, including a native short alias.
+        # Codex/Claude -m accepts both "-m model" and attached "-mmodel".
+        for index in range(len(args) - 1, -1, -1):
+            arg = args[index]
+            if arg.startswith(flag + "="):
+                return arg[len(flag) + 1:]
+            if arg == flag and index + 1 < len(args):
+                return args[index + 1]
+            if short:
+                if arg == short and index + 1 < len(args):
+                    return args[index + 1]
+                if arg.startswith(short) and len(arg) > len(short):
+                    return arg[len(short):].removeprefix("=")
+        return None
+
     for name in routes:
-        agent, _ = runtime.route(name)
-        summary[name] = agent
+        details = runtime.route_details(name)
+        summary[name] = details["agent"]
+        route_details[name] = {
+            **details,
+            "model": cli_option(details["args"], "--model", "-m"),
+            "effort": cli_option(details["args"], "--effort"),
+        }
     return {
         "repositories": sorted(repositories),
         "routes": summary,
+        "route_details": route_details,
         "route_names": sorted(summary),
         "route_usage": (
-            "Use a key from route_names as the route argument, "
-            "not an agent kind value from routes (for example, codex)."
+            "Choose the route from route_details using its description, model "
+            "and effort; prefer the least effort sufficient for the task. "
+            "Higher effort is not always better. Pass its exact route name "
+            "rather than its agent kind; descriptions are guidance, not permission "
+            "or task authorization."
         ),
         "herdr_session": runtime.herdr_session or "inherited/default",
         "herdr_socket_env_present": bool(os.environ.get("HERDR_SOCKET_PATH")),
@@ -1134,10 +1164,10 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
 async def start_final_evaluation(
     graph_run_id: str, route: str, expected_revision: int,
 ) -> dict[str, Any]:
-    """One fresh, read-only Codex or restricted Claude Evaluator across ALL TaskGraph repositories.
+    """One fresh, configurable Codex/Claude Evaluator over TaskGraph snapshots.
 
-    Runs only on completed context-bound graphs. Refuses --yolo routes;
-    source snapshots include dirty/untracked files and are never live Git roots.
+    Evaluator CLI policy comes from agent-routing.yaml. A permissive CLI
+    is not a read-only sandbox; original Git roots are never evaluator cwd.
     """
     return await final_evaluation.start(graph_run_id, route, expected_revision)
 

@@ -69,10 +69,13 @@ class FinalEvaluationStore:
         self.recover_abandoned()
 
     def recover_abandoned(self) -> int:
-        """Recover native settled captures from dead owners; never restart a Peer.
+        """Fail closed for orphaned evaluator attempts, retaining native evidence.
 
-        If the outcome cannot be proven, mark interrupted and require explicit
-        operator confirmation before permitting another evaluation dispatch.
+        A native Stop hook may persist a settled response before the
+        Coordinator validates the report and completes the evaluation. A
+        crash between capture and completion cannot establish a successful
+        independent evaluation. Do not promote abandoned attempts based
+        only on a native capture; wait for a new complete evaluation.
         """
         changed = 0
         with self._connect() as db:
@@ -89,13 +92,16 @@ class FinalEvaluationStore:
                     (row["turn_id"],),
                 ).fetchone() if row["turn_id"] else None
                 response = turn["response"] if turn and turn["state"] == "settled" else None
-                report = None
-                status = "interrupted"
-                detail = "Owner exited before verifiable native completion; operator recovery required"
-                # A settled native capture may have been committed *before*
-                # a failed/unconfirmed Herdr close. If a repository claim for
-                # this exact native turn is still held, worker termination is
-                # unproven: never auto-restore a PASS on process restart.
+                detail = (
+                    "Evaluator owner exited before coordinator verification "
+                    "of the native response; capture alone cannot authorize PASS. "
+                    "Operator must confirm worker termination before retry"
+                    if response else
+                    "Owner exited before verifiable native completion; "
+                    "operator recovery required"
+                )
+                # A retained claim also means the external Herdr worker may
+                # still run. Never convert this case into a final verdict.
                 retained_claim = db.execute(
                     "SELECT repository, claim_id FROM write_claims "
                     "WHERE claim_id=? LIMIT 1",
@@ -105,35 +111,14 @@ class FinalEvaluationStore:
                     detail = (
                         "Recovered native capture with an unresolved Herdr "
                         "write claim; verify workspace/worker termination and "
-                        "release claim before operator recovery"
+                        "release claim before operator recovery. "
+                        "Coordinator completion was not confirmed"
                     )
-                elif response:
-                    try:
-                        assessment = db.execute(
-                            "SELECT assessment_json FROM task_requests WHERE request_id=?",
-                            (row["request_id"],),
-                        ).fetchone()
-                        requirements = (
-                            json.loads(assessment["assessment_json"])["requirements"]
-                            if assessment and assessment["assessment_json"] else []
-                        )
-                        report = self.validate_report(
-                            json.loads(response),
-                            json.loads(row["manifest_json"]),
-                            {r["id"] for r in requirements},
-                        )
-                        status = {"pass": "passed", "fail": "failed",
-                                  "inconclusive": "inconclusive"}[report["verdict"]]
-                        detail = "Recovered durable native capture from abandoned evaluator"
-                    except (KeyError, ValueError, TypeError) as exc:
-                        status = "inconclusive"
-                        detail = "Native capture persisted but report invalid: " + str(exc)
                 updated = db.execute(
-                    "UPDATE final_evaluations SET status=?, raw_response=?, "
-                    "report_json=?, detail=?, updated_at_ns=? WHERE evaluation_id=? "
-                    "AND status IN ('requested','evaluating')",
-                    (status, response, json.dumps(report) if report else None,
-                     detail, time.time_ns(), row["evaluation_id"]),
+                    "UPDATE final_evaluations SET status='interrupted', "
+                    "raw_response=?, report_json=NULL, detail=?, updated_at_ns=? "
+                    "WHERE evaluation_id=? AND status IN ('requested','evaluating')",
+                    (response, detail, time.time_ns(), row["evaluation_id"]),
                 )
                 changed += updated.rowcount
         return changed

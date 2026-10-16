@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.core import build_task_packet
-from qiqi_delegate.evaluator_routes import validate_evaluator_route
 from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot, inspect_roots, manifest_digest
 from qiqi_delegate.task_request import copy_workspace_snapshot
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
@@ -250,9 +249,9 @@ class FinalEvaluationCoordinator:
         graph, authored, binding, task, names, roots = self._eligible(
             graph_run_id, expected_revision,
         )
-        # Require an exact safe profile before reserving evaluation.
-        adapter, args = self.runtime.route(route)
-        validate_evaluator_route(adapter, args)
+        # The user controls evaluator CLI policy in agent-routing.yaml.
+        # Every evaluation still uses a fresh isolated source snapshot.
+        self.runtime.route(route)
         with EvaluationSnapshot(roots) as snap:
             source_material = self._materialize_task_sources(
                 task, snap.paths[names[0]],

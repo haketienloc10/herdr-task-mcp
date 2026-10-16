@@ -16,7 +16,6 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 
-from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
 
 START = "<!-- BEGIN HERDR-TASK-MCP RULES -->"
 END = "<!-- END HERDR-TASK-MCP RULES -->"
@@ -410,22 +409,47 @@ def claude_config(existing: str, python: Path, root: Path,
     config["mcpServers"] = servers
     return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
 
-ROUTES = """# Routes and arguments belong to this workspace, not any child repository.
-# These defaults reduce interactive approval; change args here or in the
-# generated agent-routing.yaml if the workspace requires stricter permissions.
+ROUTES = """# One Claude route per model and effort. Pick the lowest sufficient effort.
+# All Claude routes default to --permission-mode auto; this is not a read-only sandbox.
+# Final Evaluation is selected via start_final_evaluation API, not by route name.
 routes:
+  claude-low:
+    agent: claude
+    args: ["--model", "claude-sonnet-5-5", "--effort", "low", "--permission-mode", "auto"]
+    description: "Tra cứu nhanh, tìm file/symbol, xác minh dữ kiện nhỏ; không cần suy luận nhiều bước."
+
+  claude-balanced:
+    agent: claude
+    args: ["--model", "claude-sonnet-5-5", "--effort", "medium", "--permission-mode", "auto"]
+    description: "Mặc định cho coding, bugfix, tài liệu, test đơn giản khi phạm vi và tiêu chí rõ ràng."
+
+  claude-high:
+    agent: claude
+    args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
+    description: "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh và Final Evaluation thông thường."
+
+  claude-xhigh:
+    agent: claude
+    args: ["--model", "claude-sonnet-5-5", "--effort", "xhigh", "--permission-mode", "auto"]
+    description: "Full discovery, debug khó, refactor lớn, security review và Final Evaluation nhiều contract."
+
+  claude-max:
+    agent: claude
+    args: ["--model", "claude-sonnet-5-5", "--effort", "max", "--permission-mode", "auto"]
+    description: "Chỉ chọn khi vấn đề đặc biệt khó hoặc rủi ro cao mà high/xhigh chưa đủ; tốn nhiều tài nguyên."
+
+  # Legacy Codex routes retain distinct CLI permission profiles.
   codex-balanced:
     agent: codex
     args: ["--yolo"]
-  claude-balanced:
-    agent: claude
-    args: ["--permission-mode", "auto"]
+    description: "Tác vụ Codex với --yolo, chỉ dùng với repository đáng tin cậy."
+
   codex-evaluator:
     agent: codex
     args: ["--sandbox", "read-only"]
-  claude-evaluator:
-    agent: claude
-    args: """ + json.dumps(list(CLAUDE_EVALUATOR_ARGS)) + "\n"
+    description: "Final Evaluation bằng Codex có sandbox read-only; người dùng có thể đổi args."
+
+"""
 
 REPOS = """# Register existing Git roots relative to THIS workspace.
 # Child repositories: path: frontend. Sibling repositories: path: ../frontend.

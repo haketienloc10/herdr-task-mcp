@@ -271,11 +271,43 @@ def test_installer_enables_default_agent_flags_without_overwriting_existing_rout
     rt = DelegateRuntime(tmp_path)
     assert rt.route("codex-balanced") == ("codex", ["--yolo"])
     assert rt.route("claude-balanced") == (
-        "claude", ["--permission-mode", "auto"]
+        "claude", ["--model", "claude-sonnet-5-5", "--effort", "medium",
+                   "--permission-mode", "auto"]
     )
-    from qiqi_delegate.evaluator_routes import CLAUDE_EVALUATOR_ARGS
     assert rt.route("codex-evaluator") == ("codex", ["--sandbox", "read-only"])
-    assert rt.route("claude-evaluator") == ("claude", list(CLAUDE_EVALUATOR_ARGS))
+    assert rt.route("claude-high") == (
+        "claude", ["--model", "claude-sonnet-5-5", "--effort", "high",
+                   "--permission-mode", "auto"]
+    )
+    import yaml
+    config = yaml.safe_load((tmp_path / "agent-routing.yaml").read_text())
+    claude_routes = {
+        name: route for name, route in config["routes"].items()
+        if route["agent"] == "claude"
+    }
+    assert set(claude_routes) == {
+        "claude-low", "claude-balanced", "claude-high",
+        "claude-xhigh", "claude-max",
+    }
+    assert len(config["routes"]) == 7  # Five Claude, two Codex
+    assert all(route["description"] for route in claude_routes.values())
+    assert all("--permission-mode" in route["args"] and
+               route["args"][route["args"].index("--permission-mode") + 1] == "auto"
+               for route in claude_routes.values())
+    assert {
+        route["args"][route["args"].index("--effort") + 1]
+        for route in claude_routes.values()
+    } == {"low", "medium", "high", "xhigh", "max"}
+    # Exactly one route per (agent, model, effort) configuration.
+    assert len({
+        (route["agent"], route["args"][1], route["args"][3])
+        for route in claude_routes.values()
+    }) == len(claude_routes)
+    example = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "examples" /
+         "agent-routing.claude.yaml").read_text(encoding="utf-8")
+    )
+    assert example["routes"] == claude_routes
 
     routing = tmp_path / "agent-routing.yaml"
     custom = (

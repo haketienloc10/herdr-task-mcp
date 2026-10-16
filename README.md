@@ -89,31 +89,113 @@ Runtime từ chối repository khi:
 
 ## Khai báo route
 
-Sửa `../qiqi-control/agent-routing.yaml`:
+Sửa `../qiqi-control/agent-routing.yaml`, hoặc sao chép
+[`examples/agent-routing.claude.yaml`](examples/agent-routing.claude.yaml).
+Route hỗ trợ `agent`, `args` và `description` (không bắt buộc để giữ tương thích).
+
+**Installer mặc định tạo 5 route Claude Sonnet 5.5**: `claude-low`,
+`claude-balanced` (medium), `claude-high`, `claude-xhigh` và
+`claude-max`. Mỗi bộ model + effort + permission chỉ có **một** route,
+dùng chung cho mọi loại task có độ khó tương ứng. Mặc định
+`--permission-mode auto`. Hai route Codex hiện có giữ riêng do
+tham số permission khác nhau.
 
 ~~~yaml
 routes:
-  codex-balanced:
-    agent: codex
-    args: ["--yolo"]
   claude-balanced:
     agent: claude
-    args: ["--permission-mode", "auto"]
-  codex-evaluator:
-    agent: codex
-    args: ["--sandbox", "read-only"]
-  claude-evaluator:
+    args: ["--model", "claude-sonnet-5-5", "--effort", "medium", "--permission-mode", "auto"]
+    description: "Coding, bugfix, tài liệu hoặc test đơn giản khi yêu cầu rõ."
+  claude-high:
     agent: claude
-    args: ["--restricted", "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep", "--disallowedTools", "mcp__*", "--strict-mcp-config", "--disable-slash-commands"]
+    args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
+    description: "Phân tích, planning, testing nhiều nhánh hoặc Final Evaluation."
 ~~~
 
-Trong lời gọi MCP, truyền **tên route** như `codex-balanced`. Không truyền `codex` thay cho tên route.
+`workspace_info()` trả `routes` (mapping name → agent như trước),
+`route_names` và `route_details` gồm `description`, `model`,
+`effort`, `args`. Lead chọn **mức effort thấp nhất đủ đáp ứng** độ khó,
+rủi ro và bằng chứng cần có, không mặc định chọn mức cao nhất: effort tăng
+có thể làm tăng thời gian và chi phí mà không giúp việc đơn giản.
+`TaskPacket` vẫn quy định scope, quyền sửa và acceptance criteria.
 
-`args` chứa tham số CLI của agent. Runtime tự cấu hình native result hook. Không ghi đè thiết lập hook qua `args`.
+**Không cần route `claude-evaluator` riêng**: sau khi TaskGraph hoàn tất,
+gọi `start_final_evaluation` với `claude-high`, hoặc `claude-xhigh`
+nếu cần đánh giá phức tạp. Vai trò Final Evaluator được quyết định bằng API
+và snapshot, không phải tên route. MCP không ép chính xác một profile
+CLI nào: model, effort và permission do YAML quyết định. Nhưng evaluator
+Claude **luôn bỏ project/local settings, .mcp.json** bằng
+`--setting-sources user`, `--strict-mcp-config`, và chặn MCP/skills.
+Native Stop/StopFailure hooks được cấp qua `--settings` chỉ để
+capture kết quả. Không thêm override chính sách memory từ `--add-dir`;
+user/managed settings do operator kiểm soát trong workflow đáng tin cậy.
+Không đặt `--mcp-config` hay `--setting-sources` trong evaluator route;
+các flags này thuộc ranh giới khởi động do runtime quản lý.
+**Codex Evaluator** cũng bảo vệ thư mục khởi chạy trung lập: route cho
+Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
+`-C/path`, `--cd=/path`, vì các cờ này có thể buộc Codex nạp
+`AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải
+dùng phiên native mới ở host cục bộ**, không thể dùng
+`resume`/`fork`/`queue`/`--remote` hoặc non-interactive `exec`/`e`/`review`
+đối với Codex. Codex Final Evaluator chạy TUI tương tác từ neutral CWD;
+không dùng `--skip-git-repo-check` (cờ chỉ dành cho `codex exec`), hoặc
+`--resume`/`-r`, `--continue`/`-c`, `--fork-session`,
+`--from-pr`, `--teleport`, `--session-id`, `attach`, `respawn`,
+`--cloud`/`--remote`/`--environment` đối với Claude. Claude
+Evaluator cũng chặn `-p`/`--print`, `--desktop`, `--bg`/`--background`,
+`--init-only` và các tham số print-only `--max-turns`/`--max-budget-usd`.
+Những tùy chọn này không tương thích với phiên tương tác foreground nhận
+prompt và ghi kết quả bằng Stop hooks (bao gồm các dạng `--flag=value`).
+Final Evaluation kiểm tra **cấu trúc và số lượng giá trị của từng CLI option**,
+chỉ chấp nhận các options tương thích với phiên interactive foreground;
+lệnh quản trị, non-interactive, positional prompt hoặc options chưa được
+nhận diện sẽ bị từ chối **trước khi dispatch**. Giá trị của option hợp lệ
+vẫn được giữ nguyên (ví dụ `--name attach` hoặc `--profile review`
+không phải subcommand). Claude `--add-dir` có thể nhận nhiều thư mục;
+`--restricted` của Claude, `--approve-for-me`/`--not-so-yolo`,
+`--no-daemon`/`--strict-config` của Codex là cờ không có giá trị.
+Claude Final Evaluator hỗ trợ `--ax-screen-reader` để hiển thị cho trình đọc màn hình.
+Các tùy chọn đường dẫn `--system-prompt-file`, `--append-system-prompt-file`,
+`--add-dir` (kể cả nhiều thư mục sau cùng một flag), `--plugin-dir` và
+`--debug-file` nhận đường dẫn tương đối hoặc tuyệt đối. Đối với Final
+Evaluation, đường dẫn tương đối được giải quyết từ workspace điều phối
+(nơi chứa `agent-routing.yaml`), không phải `evaluator-neutral-cwd`.
+Các đường dẫn tuyệt đối và route Peer thông thường được giữ nguyên;
+native Claude vẫn kiểm tra path/type tại thời điểm khởi chạy.
+Evaluator không chấp nhận `--permission-prompt-tool` vì tùy chọn đó chỉ
+dành cho non-interactive mode.
+Claude hỗ trợ `--advisor <model>` và `--debug` hoặc `--debug=filter`,
+cùng các aliases
+`-n`, `--allowed-tools`, `--disallowed-tools`. Các tùy chọn
+`--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`
+nhận nhiều quy tắc sau một flag. Claude `--tools` và `--betas`
+cũng nhận nhiều giá trị (ví dụ `--tools Read Glob`,
+`--betas=beta-one beta-two`); cấu trúc giá trị được kiểm tra trước khi
+khởi chạy evaluator, còn tên tool/beta được Claude xác thực khi chạy.
+Codex `--image`/`-i` hỗ trợ nhiều
+đường dẫn ảnh ngay cả khi ảnh đầu tiên gắn với flag (ví dụ
+`--image=before.png after.png`, `-ibefore.png after.png`).
+Cú pháp gán giá trị cho
+zero-arity flag như `--search=false` sẽ bị từ chối. Model, effort, permission tiếp tục
+do route YAML lựa chọn. `workspace_info().route_details.model` nhận
+diện cả `--model` và native alias `-m` (bao gồm `-mVALUE`).
+Route Peer thông thường không bị giới hạn bởi bộ kiểm tra này.
 
-**CAUTION:** `--yolo` cho phép Codex bỏ qua approval và sandbox thông thường. `--permission-mode auto` chọn chế độ quyền tự động của Claude. Chỉ sử dụng các mặc định này trong workspace và Git repository mà bạn tin cậy.
+Lưu ý: `--add-dir` cung cấp quyền truy cập thư mục, không áp đặt
+filesystem chỉ đọc. Phiên Final Evaluator dùng bản sao tạm của toàn bộ
+repository cần đánh giá, không sửa trực tiếp các repo khi thao tác trên
+bản sao đó. Với route permissive, native agent/tools vẫn có thể có side
+effects ngoài bản sao: chỉ chạy workflow này trong môi trường đáng tin
+cậy. PR này **không triển khai sandbox, inotify hoặc kiểm chứng tính bất
+biến của snapshot trước tác nhân đối kháng**; hardening như vậy nằm
+ngoài phạm vi và được theo dõi riêng tại Issue #20.
 
-Muốn giữ chế độ yêu cầu xác nhận, sửa `args: []` cho từng route. Installer chỉ tạo `agent-routing.yaml` khi file chưa tồn tại; chạy lại installer không ghi đè cấu hình hiện có.
+Runtime sở hữu native Stop/StopFailure hooks; không thêm `--settings` hoặc
+`hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
+vào `args`. Claude Final Evaluation từ chối `--safe-mode` vì chế độ này
+vô hiệu hóa native hooks cần thiết để capture kết quả. Route Peer thông thường
+vẫn có thể sử dụng `--safe-mode`. Installer **không ghi đè** `agent-routing.yaml`
+đã tồn tại; workspace cũ cần tự cập nhật cấu hình.
 
 ## Workflow mới: Lead → MCP → Peer (server-owned orchestration)
 
@@ -484,41 +566,40 @@ including cross-module contracts, before delivery is finalized.
    ineligible for independent final PASS; their old APIs remain usable.
 2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
    `graph_state="complete"` remains an execution-only state, not a final PASS.
-3. Chọn route evaluator riêng trong `agent-routing.yaml`. Workspace mới tạo sẵn
-   `codex-evaluator` và `claude-evaluator` (xem phần khai báo route). Workspace
-   đã cài phải thêm route thủ công vì installer không ghi đè `agent-routing.yaml`.
-
-   - Codex: chỉ chấp nhận `--sandbox read-only`.
-   - Claude: chỉ chấp nhận đúng profile `--restricted`,
-     `--permission-mode dontAsk`, `--tools Read,Glob,Grep`,
-     `--allowedTools Read,Glob,Grep`, `--disallowedTools mcp__*`,
-     `--strict-mcp-config` (không có `--mcp-config`) và
-     `--disable-slash-commands`. Yêu cầu Claude Code từ phiên bản `2.1.248`
-     (có `--restricted`); bản cũ sẽ không khởi động evaluator.
-
-   Claude evaluator chỉ được gọi tool đọc file, chặn MCP tool calls và không
-   nạp MCP server từ cấu hình user/project thông thường. `--disallowedTools`
-   **không ngăn server khởi động**; `--strict-mcp-config` mới giới hạn nguồn
-   cấu hình MCP. Một số chính sách managed MCP/hook cấp hệ thống có thể có
-   quyền ưu tiên riêng. Đây là ràng buộc ở tầng Claude CLI, **không phải
-   OS-level read-only sandbox**. Không chạy evaluator với untrusted managed
-   hooks/chính sách cục bộ có thể thực hiện side effect. Runtime từ chối
-   cờ thiếu, thừa hoặc thay đổi thứ tự.
-4. Gọi `start_final_evaluation(graph_run_id, "codex-evaluator", expected_revision)`
-   hoặc đổi route thành `"claude-evaluator"`.
+3. Chọn route có model và effort thích hợp trong `agent-routing.yaml`,
+   ví dụ `claude-high` (đa số Final Evaluation), `claude-xhigh` (phức tạp)
+   hoặc `codex-evaluator`. Model, effort, permission mode
+   do người dùng tự cấu hình; runtime không ép `--restricted` hay
+   `--sandbox read-only`. Nhưng Claude evaluator luôn bỏ project/local
+   settings và MCP config để tránh chạy hooks/MCP nằm trong code ứng viên;
+   runtime chặn override của các flags bảo vệ và result hooks.
+   Mặc định cài mới: Claude dùng `--permission-mode auto`.
+   Final Evaluator làm việc trên bản sao thư mục tạm để không cần dùng
+   live repository làm CWD. Mỗi bản sao được truyền qua `--add-dir`;
+   đây chỉ là quyền truy cập thư mục, không phải filesystem sandbox.
+   Hệ thống không yêu cầu Linux inotify hay kernel snapshot monitoring.
+4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
+   hoặc sử dụng `"claude-xhigh"` / `"codex-evaluator"` theo độ khó.
+   Không cần tạo riêng một route Claude có cùng model và effort.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
-   **one fresh native Evaluator session** with snapshot CWD + `--add-dir`
-   for additional module roots. The bounded TaskPacket contains only
+   **one fresh native Evaluator session** in a neutral CWD, with every
+   snapshot root passed via `--add-dir` and identified by absolute paths
+   in the native prompt. This is a disposable working copy, not an
+   immutable or read-only mount. Native Stop/StopFailure capture stays
+   runtime-owned. Operator/user/managed agent configuration remains a
+   trusted deployment input; no OS sandbox or extra memory-policy override
+   is installed by the Final Evaluation workflow.
+   The bounded TaskPacket contains only
    small routing metadata and relative archive locations, not the entire
    original request and TaskGraph inline. In the primary isolated snapshot,
    `.qiqi-final-task-sources/index.json` stores the **full verbatim original
    request**, assessed requirements, and an index of every source (including
    sources omitted by Lead). `.qiqi-final-task-sources/task-graph.json`
    preserves every node and acceptance criterion. Complete original source
-   contents are separate read-only files, including large native captures.
+   contents are separate files in the temporary copy, including large native captures.
    The Evaluator must read all relevant archives; no 100k-character prompt
-   truncation is allowed. Missing/tampered input blocks dispatch.
+   truncation is allowed. Missing or changed source during snapshot materialization blocks dispatch.
 5. Inspect `get_final_evaluation(graph_run_id, evaluation_id?)`. The durable
    structured report has `verdict`, `requirement_results`,
    `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
@@ -583,12 +664,13 @@ final PASS evidence. Restore a complete working tree and clear skip-worktree
 flags before evaluating. Ordinary staged/unstaged deletions in a complete
 working tree remain supported.
 `--add-dir` grants additional directory access: **it is not a sandbox**.
-The route is only allowed with explicit Codex `--sandbox read-only`.
+A route may choose its own native permission flags; Final Evaluation does
+not impose an immutable filesystem or a kernel monitor.
 The feature does not execute arbitrary verification commands from reports or
 independently attest LLM-reported test runs; do not treat test claims as
-deterministic proof. Read permissions outside snapshots depend on the
-host/Herdr deployment: if the host cannot confine the agent as required,
-do not run final evaluation on secret-bearing or untrusted workspaces.
+deterministic proof. Host filesystem access and side effects depend on the configured native
+agent permissions. Use trusted workspaces and tools; hostile-agent filesystem
+confinement is outside this PR's scope.
 A model finding no errors cannot prove mathematical correctness.
 
 **Crash/concurrency semantics:** Store evaluation IDs and native turn bindings
@@ -612,8 +694,13 @@ closing its workspace, `start_final_evaluation` returns
 across MCP restarts. `finalize_graph` rejects the result, and a second
 evaluation is blocked until exact operator recovery; an LLM's captured PASS
 is evidence for inspection, not permission to deliver. During startup
-recovery, an outstanding native-turn write claim also blocks automatic
-PASS restoration, even if a settled capture exists.
+recovery, **no abandoned attempt is automatically restored as PASS**, even
+when a settled native capture is durable and no write claim remains: a process
+crash can occur before the Coordinator has validated and persisted
+a complete FinalEvaluationReport. Recovery retains the original native response for
+operator inspection, marks the attempt `interrupted`, and requires operator
+confirmation of worker termination before a new attempt. If a write claim
+remains, it must also be safely released.
 
 **Operator recovery for preserved Evaluator workspaces:** The Herdr Evaluator
 runs inside a disposable snapshot, but its write claim records the stable
