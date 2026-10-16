@@ -126,9 +126,9 @@ và snapshot, không phải tên route. MCP không ép chính xác một profile
 CLI nào: model, effort và permission do YAML quyết định. Nhưng evaluator
 Claude **luôn bỏ project/local settings, .mcp.json** bằng
 `--setting-sources user`, `--strict-mcp-config`, và chặn MCP/skills.
-CLI `--settings` cho evaluator còn bắt buộc
-`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=0`, để vô hiệu hóa
-memory từ `--add-dir` ngay cả khi shell hoặc user settings cấu hình `1`.
+Native Stop/StopFailure hooks được cấp qua `--settings` chỉ để
+capture kết quả. Không thêm override chính sách memory từ `--add-dir`;
+user/managed settings do operator kiểm soát trong workflow đáng tin cậy.
 Không đặt `--mcp-config` hay `--setting-sources` trong evaluator route;
 các flags này thuộc ranh giới khởi động do runtime quản lý.
 **Codex Evaluator** cũng bảo vệ thư mục khởi chạy trung lập: route cho
