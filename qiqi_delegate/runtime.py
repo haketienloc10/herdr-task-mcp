@@ -47,13 +47,14 @@ _EVALUATOR_SWITCH_OPTIONS = {
     "claude": frozenset({
         "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
         "--verbose", "--debug", "--no-session-persistence",
-        "--chrome", "--no-chrome", "--ide",
+        "--chrome", "--no-chrome", "--ide", "--restricted",
         "--strict-mcp-config", "--disable-slash-commands",
     }),
     "codex": frozenset({
         "--yolo", "--dangerously-bypass-approvals-and-sandbox",
         "--search", "--oss", "--skip-git-repo-check",
-        "--no-alt-screen", "--full-auto",
+        "--no-alt-screen", "--full-auto", "--approve-for-me",
+        "--not-so-yolo",
     }),
 }
 
@@ -67,6 +68,9 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
     """
     values = _EVALUATOR_VALUE_OPTIONS[adapter]
     switches = _EVALUATOR_SWITCH_OPTIONS[adapter]
+    # Claude accepts one or more paths after one --add-dir; Codex uses
+    # a single path per occurrence. Any following option terminates the list.
+    variadic = {"--add-dir"} if adapter == "claude" else set()
     index = 0
     while index < len(args):
         token = args[index].strip()
@@ -104,9 +108,17 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
                     raise ValueError(
                         f"Final Evaluation requires a value for {option}"
                     )
+                if option in variadic:
+                    # Keep consuming directory paths until the next CLI flag;
+                    # values are paths, not commands or option names.
+                    while (index + 1 < len(args) and
+                           not args[index + 1].strip().startswith("-")):
+                        index += 1
         elif option in switches:
-            if equals and inline_value not in {"true", "false"}:
-                raise ValueError(f"Final Evaluation invalid option value: {token}")
+            if equals:
+                raise ValueError(
+                    f"Final Evaluation option {option} takes no value: {token}"
+                )
         else:
             raise ValueError(
                 "Final Evaluation requires a fresh native session; "
