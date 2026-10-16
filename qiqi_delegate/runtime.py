@@ -34,7 +34,7 @@ _EVALUATOR_VALUE_OPTIONS = {
         "--disallowedTools", "--disallowed-tools",
         "--agent", "--agents", "--fallback-model", "--system-prompt",
         "--append-system-prompt", "--permission-prompt-tool",
-        "--max-turns", "--max-budget-usd", "--betas", "--plugin-dir",
+        "--betas", "--plugin-dir",
         "--debug-file", "--json-schema", "--advisor",
     }),
     "codex": frozenset({
@@ -59,7 +59,7 @@ _EVALUATOR_SWITCH_OPTIONS = {
     }),
     "codex": frozenset({
         "--yolo", "--dangerously-bypass-approvals-and-sandbox",
-        "--search", "--oss", "--skip-git-repo-check",
+        "--search", "--oss",
         "--no-alt-screen", "--full-auto", "--approve-for-me",
         "--not-so-yolo", "--no-daemon", "--strict-config",
     }),
@@ -813,8 +813,6 @@ class DelegateRuntime:
                     "--disallowedTools", "mcp__*",
                     "--disable-slash-commands",
                 ]
-            else:
-                args.append("--skip-git-repo-check")
             # Every snapshot is passed as explicitly authorized source data.
             # The native agent starts from a neutral directory (see below);
             # otherwise CLAUDE.md/AGENTS.md in candidate code becomes startup
