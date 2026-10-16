@@ -136,12 +136,13 @@ Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
 `-C/path`, `--cd=/path`, vì các cờ này có thể buộc Codex nạp
 `AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải
 dùng phiên native mới ở host cục bộ**, không thể dùng
-`resume`/`fork`/`queue`/`--remote` đối với Codex, hoặc
+`resume`/`fork`/`queue`/`--remote` hoặc non-interactive `exec`/`e`/`review`
+đối với Codex, hoặc
 `--resume`/`-r`, `--continue`/`-c`, `--fork-session`,
 `--from-pr`, `--teleport`, `--session-id`, `attach`, `respawn`,
 `--cloud`/`--remote`/`--environment` đối với Claude. Claude
-Evaluator cũng chặn `--desktop`, `--bg`/`--background` và `--init-only`
-vì các mode này không chạy phiên tương tác ở foreground để nhận prompt
+Evaluator cũng chặn `-p`/`--print`, `--desktop`, `--bg`/`--background`
+và `--init-only` vì các mode này không chạy phiên tương tác ở foreground để nhận prompt
 và ghi kết quả bằng Stop hooks (bao gồm các dạng `--flag=value`).
 Các tham số đó có thể dùng lại phiên cũ, chuyển worker sang host khác,
 hoặc không tạo phiên tương thích với Final Evaluation.
