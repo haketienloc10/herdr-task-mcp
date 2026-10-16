@@ -763,6 +763,23 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
 
 
 @pytest.mark.parametrize("agent,native_args", [
+    ("codex", ["login"]),
+    ("codex", ["completion", "bash"]),
+    ("codex", ["app-server"]),
+    ("codex", ["mcp", "list"]),
+    ("codex", ["--model", "gpt-6", "login"]),
+    ("codex", ["--unknown-interactive-flag", "value"]),
+    ("codex", ["--"]),
+    ("claude", ["doctor"]),
+    ("claude", ["ultrareview"]),
+    ("claude", ["update"]),
+    ("claude", ["--exec"]),
+    ("claude", ["--exec=true"]),
+    ("claude", ["--help"]),
+    ("claude", ["--version"]),
+    ("claude", ["--model", "claude-sonnet-5-5", "doctor"]),
+    ("claude", ["--unknown-interactive-flag", "value"]),
+    ("claude", ["--"]),
     ("codex", ["exec", "Inspect this code"]),
     ("codex", ["e", "Inspect this code"]),
     ("codex", ["review"]),
@@ -907,6 +924,55 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
                 evaluation_id="unreserved-test-evaluation",
             ))
     # Rejected before Herdr is needed, and before native turn persistence.
+    with runtime._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("agent,native_args", [
+    ("claude", ["--name", "attach", "--model", "claude-sonnet-5-5"]),
+    ("claude", ["--name=doctor", "--effort", "high"]),
+    ("claude", ["--model", "review", "--permission-mode", "auto"]),
+    ("claude", ["--name", "ultrareview", "--permission-mode=auto"]),
+    ("codex", ["--profile", "review", "--model", "gpt-6"]),
+    ("codex", ["--model", "app-server", "-c", "model_reasoning_effort=high"]),
+    ("codex", ["-cmodel_reasoning_effort=high", "--sandbox", "read-only"]),
+    ("codex", ["--config=model_reasoning_effort=high", "-mGPT-6"]),
+    ("codex", ["-p", "login", "--ask-for-approval", "on-request"]),
+])
+def test_evaluator_allows_command_names_as_native_option_values(
+    tmp_path, monkeypatch, agent, native_args,
+):
+    """Only actual commands are excluded, never values like --name attach."""
+    import qiqi_delegate.runtime as runtime_module
+    from qiqi_delegate.core import build_task_packet
+    import yaml
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    config = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
+    config["routes"]["interactive-custom"] = {
+        "agent": agent, "args": native_args,
+    }
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8",
+    )
+    assert runtime.route("interactive-custom") == (agent, native_args)
+    monkeypatch.setattr(runtime_module.shutil, "which", lambda _: None)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        # A valid interactive invocation passes route validation and reaches
+        # the normal Herdr availability check without dispatching any turn.
+        with pytest.raises(RuntimeError, match="Herdr CLI not found"):
+            asyncio.run(runtime.delegate(
+                repository="backend",
+                route="interactive-custom",
+                packet=build_task_packet(
+                    objective="Independent review",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Verify integration evidence"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="unreserved-test-evaluation",
+            ))
     with runtime._connect() as db:
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
 
