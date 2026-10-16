@@ -389,14 +389,22 @@ async def workspace_info() -> dict[str, Any]:
     summary = {}
     route_details = {}
 
-    def cli_option(args: list[str], flag: str) -> str | None:
-        # Support both '--model value' and '--model=value'.
+    def cli_option(
+        args: list[str], flag: str, short: str | None = None,
+    ) -> str | None:
+        # Resolve the last configured value, including a native short alias.
+        # Codex/Claude -m accepts both "-m model" and attached "-mmodel".
         for index in range(len(args) - 1, -1, -1):
             arg = args[index]
             if arg.startswith(flag + "="):
                 return arg[len(flag) + 1:]
             if arg == flag and index + 1 < len(args):
                 return args[index + 1]
+            if short:
+                if arg == short and index + 1 < len(args):
+                    return args[index + 1]
+                if arg.startswith(short) and len(arg) > len(short):
+                    return arg[len(short):].removeprefix("=")
         return None
 
     for name in routes:
@@ -404,7 +412,7 @@ async def workspace_info() -> dict[str, Any]:
         summary[name] = details["agent"]
         route_details[name] = {
             **details,
-            "model": cli_option(details["args"], "--model"),
+            "model": cli_option(details["args"], "--model", "-m"),
             "effort": cli_option(details["args"], "--effort"),
         }
     return {
