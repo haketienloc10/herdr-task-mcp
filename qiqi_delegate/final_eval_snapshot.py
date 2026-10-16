@@ -1,6 +1,6 @@
-"""Reproducible, bounded, isolated snapshots for graph-level final evaluation.
+"""Reproducible, bounded Git working-tree copies for final evaluation.
 
-Do not mount original registered working trees in an Evaluator. Snapshot all
+Do not use live registered working trees as evaluator CWD. Copy all
 tracked and non-ignored untracked files, not just HEAD: Peer output may be dirty.
 """
 from __future__ import annotations
