@@ -789,6 +789,10 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("claude", ["--restricted=true"]),
     ("claude", ["--verbose=true"]),
     ("claude", ["--no-session-persistence=false"]),
+    ("claude", ["--debug=mcp,startup", "doctor"]),
+    ("claude", ["--debug", "mcp,startup"]),
+    ("codex", ["--no-daemon=true"]),
+    ("codex", ["--strict-config=false"]),
     ("codex", ["exec", "Inspect this code"]),
     ("codex", ["e", "Inspect this code"]),
     ("codex", ["review"]),
@@ -938,6 +942,21 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
 
 
 @pytest.mark.parametrize("agent,native_args", [
+    ("claude", ["--debug"]),
+    ("claude", ["--debug=mcp,startup"]),
+    ("claude", ["--debug=startup", "--model", "claude-sonnet-5-5"]),
+    ("claude", ["-n", "evaluation"]),
+    ("claude", ["-n", "attach", "--model", "claude-sonnet-5-5"]),
+    ("claude", ["--allowed-tools", "Read,Glob,Grep"]),
+    ("claude", ["--disallowed-tools", "Bash"]),
+    ("claude", ["--allowed-tools=Read,Glob", "--disallowed-tools=Bash"]),
+    ("codex", ["--image", "before.png", "after.png"]),
+    ("codex", ["--image", "before.png", "after.png", "--model", "gpt-6"]),
+    ("codex", ["--image=before.png,after.png"]),
+    ("codex", ["-i", "before.png", "after.png"]),
+    ("codex", ["--no-daemon"]),
+    ("codex", ["--strict-config"]),
+    ("codex", ["--no-daemon", "--strict-config", "--model", "gpt-6"]),
     ("claude", ["--restricted"]),
     ("claude", ["--restricted", "--model", "claude-sonnet-5-5"]),
     ("codex", ["--approve-for-me"]),
@@ -987,6 +1006,46 @@ def test_evaluator_allows_command_names_as_native_option_values(
                     objective="Independent review",
                     scope=["backend", "frontend"],
                     acceptance_criteria=["Verify integration evidence"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="unreserved-test-evaluation",
+            ))
+    with runtime._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("agent, native_args, expected", [
+    ("claude", ["--debug="], "requires a nonempty value"),
+    ("codex", ["--image"], "requires a value"),
+    ("codex", ["--image", "--model", "gpt-6"], "requires a value"),
+    ("claude", ["-n"], "requires a value"),
+    ("claude", ["--allowed-tools"], "requires a value"),
+    ("claude", ["--disallowed-tools"], "requires a value"),
+])
+def test_evaluator_cli_rejects_missing_required_and_empty_optional_values(
+    tmp_path, agent, native_args, expected,
+):
+    """Validation happens before Herdr startup when option arity is invalid."""
+    from qiqi_delegate.core import build_task_packet
+    import yaml
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    cfg = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
+    cfg["routes"]["invalid-arity"] = {"agent": agent, "args": native_args}
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(cfg), encoding="utf-8",
+    )
+    assert runtime.route("invalid-arity") == (agent, native_args)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        with pytest.raises(ValueError, match=expected):
+            asyncio.run(runtime.delegate(
+                repository="backend",
+                route="invalid-arity",
+                packet=build_task_packet(
+                    objective="Independent evaluation",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Validate integration behavior"],
                 ),
                 evaluation_repositories=("backend", "frontend"),
                 evaluation_roots=snap.paths,
