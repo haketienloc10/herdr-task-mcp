@@ -135,12 +135,16 @@ các flags này thuộc ranh giới khởi động do runtime quản lý.
 Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
 `-C/path`, `--cd=/path`, vì các cờ này có thể buộc Codex nạp
 `AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải
-dùng phiên native mới**, không thể `resume`/`fork`/`queue` đối với Codex, hoặc
+dùng phiên native mới ở host cục bộ**, không thể dùng
+`resume`/`fork`/`queue`/`--remote` đối với Codex, hoặc
 `--resume`/`-r`, `--continue`/`-c`, `--fork-session`,
 `--from-pr`, `--teleport`, `--session-id`, `attach`, `respawn`,
-hoặc `--cloud`/`--remote`/`--environment` đối với Claude
-(bao gồm dạng `--flag=value`). Các tham số
-có thể khôi phục ngữ cảnh không đáng tin cậy từ phiên cũ dù CWD trung lập.
+`--cloud`/`--remote`/`--environment` đối với Claude. Claude
+Evaluator cũng chặn `--desktop`, `--bg`/`--background` và `--init-only`
+vì các mode này không chạy phiên tương tác ở foreground để nhận prompt
+và ghi kết quả bằng Stop hooks (bao gồm các dạng `--flag=value`).
+Các tham số đó có thể dùng lại phiên cũ, chuyển worker sang host khác,
+hoặc không tạo phiên tương thích với Final Evaluation.
 Route Peer thông thường vẫn cho phép các flags native này nếu cần.
 
 Lưu ý: `--add-dir` cung cấp quyền truy cập thư mục, không áp đặt
