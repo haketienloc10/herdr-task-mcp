@@ -143,17 +143,23 @@ Route Peer thông thường vẫn cho phép các flags native này nếu cần.
 
 Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**.
 Final Evaluation trên **Linux** thiết lập watcher kernel `inotify`
-cho tất cả thư mục snapshot **trước native dispatch**, đồng thời hash
-toàn bộ file/metadata trước và sau phiên. Bất kỳ sự kiện write, chmod,
+cho tất cả thư mục snapshot **và inode của từng file** trước native
+dispatch, đồng thời hash toàn bộ file/metadata trước và sau phiên.
+Theo dõi inode giúp phát hiện thao tác ghi/chmod qua hard link trỏ ra
+ngoài các thư mục snapshot được giám sát. Bất kỳ sự kiện write, chmod,
 create, delete hoặc rename nào (kể cả sửa rồi khôi phục dữ liệu y hệt)
 đều làm kết quả `inconclusive` và chặn PASS. Nếu không thể khởi động
 watcher hoặc OS không hỗ trợ, MCP từ chối Final Evaluation trước dispatch
 thay vì chỉ dựa vào hash cuối. Watcher là **phát hiện thay đổi, không phải
-OS sandbox**: inotify có hạn chế (ví dụ ghi trực tiếp qua memory mapping),
-không chặn side effect ngoài snapshot và không thay thế quyền cách ly
-filesystem của tiến trình. Không dùng route permissive với mã không đáng
-tin cậy nếu chưa có OS-enforced sandbox thực sự; tránh mọi user/managed
-settings, hooks và tools không đáng tin cậy.
+OS sandbox**: theo dõi inode chỉ đóng đường lách hard link đã biết,
+inotify vẫn có thể bỏ sót các ghi qua memory mapping hoặc một số
+cơ chế sửa dữ liệu cấp thấp. Vì vậy, nếu yêu cầu **đảm bảo input bất biến
+trước evaluator không đáng tin cậy**, cần read-only bind mount trong
+namespace riêng hoặc OS-enforced filesystem isolation, với backing path
+không thể truy cập và quyền mount đã bị tước khỏi worker. Hiện tại
+native Herdr worker **chưa được cách ly ở mức này**. Không dùng
+route permissive để đánh giá code không đáng tin cậy nếu chưa có sandbox
+tách biệt; tránh user/managed settings, hooks và tools không đáng tin cậy.
 
 Runtime sở hữu native result hooks; không thêm `--settings` hoặc
 `hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
