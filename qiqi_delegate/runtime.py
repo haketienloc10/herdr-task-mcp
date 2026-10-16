@@ -29,8 +29,9 @@ from qiqi_delegate.core import (
 # routes remain fully user-configurable.
 _EVALUATOR_VALUE_OPTIONS = {
     "claude": frozenset({
-        "--model", "-m", "--effort", "--permission-mode", "--name",
-        "--add-dir", "--tools", "--allowedTools", "--disallowedTools",
+        "--model", "-m", "--effort", "--permission-mode", "--name", "-n",
+        "--add-dir", "--tools", "--allowedTools", "--allowed-tools",
+        "--disallowedTools", "--disallowed-tools",
         "--agent", "--agents", "--fallback-model", "--system-prompt",
         "--append-system-prompt", "--permission-prompt-tool",
         "--max-turns", "--max-budget-usd", "--betas", "--plugin-dir",
@@ -43,10 +44,16 @@ _EVALUATOR_VALUE_OPTIONS = {
         "--enable", "--disable",
     }),
 }
+_EVALUATOR_OPTIONAL_EQUALS_OPTIONS = {
+    # Anthropic's CLI documents --debug[=filter]; a separate positional
+    # filter is not consumed, preserving the evaluator command boundary.
+    "claude": frozenset({"--debug"}),
+    "codex": frozenset(),
+}
 _EVALUATOR_SWITCH_OPTIONS = {
     "claude": frozenset({
         "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
-        "--verbose", "--debug", "--no-session-persistence",
+        "--verbose", "--no-session-persistence",
         "--chrome", "--no-chrome", "--ide", "--restricted",
         "--strict-mcp-config", "--disable-slash-commands",
     }),
@@ -54,7 +61,7 @@ _EVALUATOR_SWITCH_OPTIONS = {
         "--yolo", "--dangerously-bypass-approvals-and-sandbox",
         "--search", "--oss", "--skip-git-repo-check",
         "--no-alt-screen", "--full-auto", "--approve-for-me",
-        "--not-so-yolo",
+        "--not-so-yolo", "--no-daemon", "--strict-config",
     }),
 }
 
@@ -68,9 +75,11 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
     """
     values = _EVALUATOR_VALUE_OPTIONS[adapter]
     switches = _EVALUATOR_SWITCH_OPTIONS[adapter]
-    # Claude accepts one or more paths after one --add-dir; Codex uses
-    # a single path per occurrence. Any following option terminates the list.
-    variadic = {"--add-dir"} if adapter == "claude" else set()
+    optional_equals = _EVALUATOR_OPTIONAL_EQUALS_OPTIONS[adapter]
+    # Both options consume one or more paths up to the next CLI flag:
+    # Claude --add-dir and Codex --image (also accepts comma-delimited paths).
+    # Codex --add-dir remains single-valued.
+    variadic = {"--add-dir"} if adapter == "claude" else {"--image", "-i"}
     index = 0
     while index < len(args):
         token = args[index].strip()
@@ -109,11 +118,16 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
                         f"Final Evaluation requires a value for {option}"
                     )
                 if option in variadic:
-                    # Keep consuming directory paths until the next CLI flag;
-                    # values are paths, not commands or option names.
+                    # Keep consuming paths until the next CLI flag;
+                    # values are data, not subcommands.
                     while (index + 1 < len(args) and
                            not args[index + 1].strip().startswith("-")):
                         index += 1
+        elif option in optional_equals:
+            if equals and not inline_value:
+                raise ValueError(
+                    f"Final Evaluation requires a nonempty value for {option}"
+                )
         elif option in switches:
             if equals:
                 raise ValueError(
