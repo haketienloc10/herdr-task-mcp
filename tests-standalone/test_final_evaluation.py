@@ -872,7 +872,7 @@ def test_evaluator_requires_fresh_native_session_but_peer_routes_keep_args(
     ["--safe-mode"],
     ["--safe-mode=true"],
     ["--safe-mode=false"],
-    ["-p", "--safe-mode"],
+    ["--safe-mode", "--model", "claude-sonnet-5-5"],
 ])
 def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
     tmp_path, native_args,
