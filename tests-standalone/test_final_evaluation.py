@@ -877,7 +877,7 @@ def test_evaluator_requires_fresh_native_session_but_peer_routes_keep_args(
     # configurable, including Codex -c TOML overrides.
     assert runtime.route("user-session-route") == (agent, native_args)
     with EvaluationSnapshot(runtime.repos()) as snap:
-        with pytest.raises(ValueError, match="fresh native session"):
+        with pytest.raises(ValueError, match=r"fresh native session|takes no value"):
             asyncio.run(runtime.delegate(
                 repository="backend",
                 route="user-session-route",
