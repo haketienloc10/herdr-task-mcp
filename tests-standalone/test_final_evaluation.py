@@ -287,7 +287,7 @@ def test_snapshot_drift_includes_dirty_and_untracked_changes(tmp_path):
 
 
 
-def test_abandoned_native_capture_never_restores_pass_without_attestation(tmp_path):
+def test_abandoned_native_capture_never_restores_pass_before_validation(tmp_path):
     from qiqi_delegate.final_eval_store import FinalEvaluationStore
     from qiqi_delegate.maintenance import recover_final_evaluation
 
@@ -314,9 +314,8 @@ def test_abandoned_native_capture_never_restores_pass_without_attestation(tmp_pa
             "UPDATE final_evaluations SET owner_pid=?, owner_start_token=? "
             "WHERE evaluation_id=?", (987654321, "dead-process", evaluation_id),
         )
-    # Simulate process death after native response persistence but BEFORE the
-    # coordinator's snapshot event queue/hash verification. Even an unchanged
-    # A captured response alone cannot substitute for coordinator validation.
+    # Simulate process death after native capture persistence but before
+    # Coordinator validation. A captured response alone cannot authorize PASS.
     restarted = FinalEvaluationStore(runtime.db)
     restored = restarted.get(evaluation_id)
     assert restored["status"] == "interrupted"
