@@ -71,13 +71,11 @@ class FinalEvaluationStore:
     def recover_abandoned(self) -> int:
         """Fail closed for orphaned evaluator attempts, retaining native evidence.
 
-        A native Stop hook may persist a settled response before the parent
-        verifies snapshot integrity. If the parent then dies, its temporary
-        snapshot and inotify event queue are gone. A syntactically valid PASS
-        is NOT proof that the snapshot stayed unchanged. Never promote an
-        abandoned attempt to passed/failed based only on its native capture.
-        Only normal coordinator completion (after integrity verification) may
-        persist an evaluation verdict.
+        A native Stop hook may persist a settled response before the
+        Coordinator validates the report and completes the evaluation. A
+        crash between capture and completion cannot establish a successful
+        independent evaluation. Do not promote abandoned attempts based
+        only on a native capture; wait for a new complete evaluation.
         """
         changed = 0
         with self._connect() as db:
@@ -95,8 +93,8 @@ class FinalEvaluationStore:
                 ).fetchone() if row["turn_id"] else None
                 response = turn["response"] if turn and turn["state"] == "settled" else None
                 detail = (
-                    "Evaluator owner exited without durable, verified snapshot "
-                    "integrity attestation; native capture cannot authorize PASS. "
+                    "Evaluator owner exited before coordinator verification "
+                    "of the native response; capture alone cannot authorize PASS. "
                     "Operator must confirm worker termination before retry"
                     if response else
                     "Owner exited before verifiable native completion; "
