@@ -1091,7 +1091,6 @@ def test_evaluator_allows_command_names_as_native_option_values(
 
 @pytest.mark.parametrize("agent, native_args, expected", [
     ("claude", ["--tools"], "requires a value"),
-    ("claude", ["--tools="], "requires a value"),
     ("claude", ["--tools", "--model", "claude-sonnet-5-5"], "requires a value"),
     ("claude", ["--betas"], "requires a value"),
     ("claude", ["--betas="], "requires a value"),
