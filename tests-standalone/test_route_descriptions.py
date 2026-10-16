@@ -124,26 +124,14 @@ def test_codex_toml_override_allows_unrelated_config(environment):
     assert runtime.route("custom")[0] == "codex"
 
 
-def test_claude_native_hook_settings_force_evaluator_add_dir_memory_off(
-    environment, monkeypatch,
+def test_claude_native_hook_settings_capture_stop_without_policy_overrides(
+    environment,
 ):
     _server, runtime, *_ = environment
     import json
     from pathlib import Path
 
-    # A user shell can enable the feature, but evaluator-owned CLI settings
-    # override it for this one native session without changing normal peers.
-    monkeypatch.setenv("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
-    normal = runtime._hook_args("claude", Path("/tmp"), "normal")
-    evaluator = runtime._hook_args(
-        "claude", Path("/tmp"), "evaluator", evaluator=True,
-    )
-    normal_settings = json.loads(normal[normal.index("--settings") + 1])
-    evaluator_settings = json.loads(
-        evaluator[evaluator.index("--settings") + 1]
-    )
-    assert "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD" not in normal_settings.get("env", {})
-    assert evaluator_settings["env"] == {
-        "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "0",
-    }
-    assert {"Stop", "StopFailure"} <= set(evaluator_settings["hooks"])
+    argv = runtime._hook_args("claude", Path("/tmp"), "capture")
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert set(settings) == {"hooks"}
+    assert {"Stop", "StopFailure"} <= set(settings["hooks"])
