@@ -769,6 +769,9 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("codex", ["mcp", "list"]),
     ("codex", ["--model", "gpt-6", "login"]),
     ("codex", ["--unknown-interactive-flag", "value"]),
+    # Removed from current Codex interactive CLI; reject before native startup.
+    ("codex", ["--full-auto"]),
+    ("codex", ["--model", "gpt-6", "--full-auto"]),
     ("codex", ["--"]),
     ("codex", ["--search=false"]),
     ("codex", ["--search=true"]),
@@ -777,6 +780,10 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("codex", ["--no-alt-screen=true"]),
     ("codex", ["--skip-git-repo-check"]),
     ("codex", ["--skip-git-repo-check=true"]),
+    # Claude --json-schema requires print mode, which evaluators cannot use.
+    ("claude", ["--json-schema", '{"type":"object"}']),
+    ("claude", ['--json-schema={"type":"object"}']),
+    ("claude", ["--model", "claude-sonnet-5-5", "--json-schema", '{"type":"object"}']),
     ("claude", ["--max-turns", "5"]),
     ("claude", ["--max-turns=5"]),
     ("claude", ["--max-budget-usd", "10"]),

@@ -35,7 +35,7 @@ _EVALUATOR_VALUE_OPTIONS = {
         "--agent", "--agents", "--fallback-model", "--system-prompt",
         "--append-system-prompt", "--permission-prompt-tool",
         "--betas", "--plugin-dir",
-        "--debug-file", "--json-schema", "--advisor",
+        "--debug-file", "--advisor",
     }),
     "codex": frozenset({
         "--model", "-m", "--config", "-c", "--sandbox", "-s",
@@ -60,7 +60,7 @@ _EVALUATOR_SWITCH_OPTIONS = {
     "codex": frozenset({
         "--yolo", "--dangerously-bypass-approvals-and-sandbox",
         "--search", "--oss",
-        "--no-alt-screen", "--full-auto", "--approve-for-me",
+        "--no-alt-screen", "--approve-for-me",
         "--not-so-yolo", "--no-daemon", "--strict-config",
     }),
 }
