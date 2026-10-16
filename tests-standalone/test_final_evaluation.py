@@ -973,6 +973,16 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
     ("claude", ["--debug-file=./native.log"]),
     ("claude", ["--add-dir", "./reference-a", "./reference-b"]),
     ("claude", ["--add-dir=./reference-a", "./reference-b"]),
+    # Claude --tools <tools...> and --betas <betas...> are variadic.
+    ("claude", ["--tools", "Read", "Glob"]),
+    ("claude", ["--tools=Read", "Glob", "--model", "claude-sonnet-5-5"]),
+    ("claude", ["--tools", "Bash", "Edit", "Read", "--effort", "high"]),
+    ("claude", ["--tools=Bash,Edit", "Read"]),
+    ("claude", ["--betas", "beta-one", "beta-two"]),
+    ("claude", ["--betas=beta-one", "beta-two", "--model", "claude-sonnet-5-5"]),
+    ("claude", ["--betas", "beta-one", "beta-two", "--tools", "Read", "Glob"]),
+    ("claude", ["--tools", "Read", "Glob", "--betas=beta-one", "beta-two",
+                "--effort", "high"]),
     ("claude", ["--autocompact", "500k"]),
     ("claude", ["--autocompact=auto", "--model", "claude-sonnet-5-5"]),
     ("claude", ["--append-system-prompt-file", "./instructions.txt"]),
@@ -1074,6 +1084,12 @@ def test_evaluator_allows_command_names_as_native_option_values(
 
 
 @pytest.mark.parametrize("agent, native_args, expected", [
+    ("claude", ["--tools"], "requires a value"),
+    ("claude", ["--tools="], "requires a value"),
+    ("claude", ["--tools", "--model", "claude-sonnet-5-5"], "requires a value"),
+    ("claude", ["--betas"], "requires a value"),
+    ("claude", ["--betas="], "requires a value"),
+    ("claude", ["--betas", "--model", "claude-sonnet-5-5"], "requires a value"),
     ("claude", ["--autocompact"], "requires a value"),
     ("claude", ["--autocompact="], "requires a value"),
     ("claude", ["--append-system-prompt-file"], "requires a value"),
@@ -1207,6 +1223,7 @@ def test_claude_evaluator_forwards_workspace_paths_outside_neutral_cwd(
                   "--append-system-prompt-file=./additional prompt.txt",
                   "--add-dir", "./reference-a", "./reference-b",
                   "--plugin-dir=./local-plugin", "--debug-file", "./trace.log",
+                  "--tools", "Read", "Glob", "--betas=beta-one", "beta-two",
                   "--ax-screen-reader"]
     config["routes"][route] = {"agent": "claude", "args": route_args}
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -1264,6 +1281,9 @@ def test_claude_evaluator_forwards_workspace_paths_outside_neutral_cwd(
                     ]
         assert f"--plugin-dir={plugin_dir}" in argv
         assert argv[argv.index("--debug-file") + 1] == str(log_file)
+        assert argv[argv.index("--tools") + 1:
+                    argv.index("--tools") + 3] == ["Read", "Glob"]
+        assert argv[argv.index("--betas=beta-one") + 1] == "beta-two"
         assert "--ax-screen-reader" in argv
         assert captured["cwd"] != runtime.root
         assert captured["cwd"] not in snap.paths.values()
