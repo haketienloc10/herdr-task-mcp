@@ -61,6 +61,7 @@ _EVALUATOR_SWITCH_OPTIONS = {
     }),
     "codex": frozenset({
         "--yolo", "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
         "--search", "--oss",
         "--no-alt-screen", "--approve-for-me",
         "--not-so-yolo", "--no-daemon", "--strict-config",
@@ -115,13 +116,19 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
             )
         if option in values:
             if equals:
-                if not inline_value:
+                # Claude explicitly uses --tools="" to disable built-in tools.
+                if not inline_value and not (adapter == "claude" and option == "--tools"):
                     raise ValueError(
                         f"Final Evaluation requires a value for {option}"
                     )
             else:
                 index += 1
-                if index >= len(args) or args[index].strip().startswith("-"):
+                if (index >= len(args) or
+                        args[index].strip().startswith("-") or
+                        (not args[index].strip() and not (
+                            adapter == "claude" and option == "--tools" and
+                            args[index] == ""
+                        ))):
                     raise ValueError(
                         f"Final Evaluation requires a value for {option}"
                     )
@@ -373,7 +380,16 @@ class DelegateRuntime:
         if agent not in {"codex", "claude"}:
             raise ValueError("route agent must be codex or claude")
         if (not isinstance(args, list) or len(args) > 32 or
-            any(not isinstance(a, str) or not a.strip() or "\x00" in a for a in args)):
+            any(
+                not isinstance(arg, str) or "\x00" in arg or
+                (not arg.strip() and not (
+                    # An explicit empty Claude --tools operand disables all
+                    # built-in tools; every other blank route arg is invalid.
+                    agent == "claude" and arg == "" and
+                    index > 0 and args[index - 1] == "--tools"
+                ))
+                for index, arg in enumerate(args)
+            )):
             raise ValueError("route args must be an array of CLI argument strings")
         if (not isinstance(description, str) or
                 len(description) > 500 or

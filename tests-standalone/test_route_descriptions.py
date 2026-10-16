@@ -86,6 +86,39 @@ def test_route_rejects_invalid_optional_description(environment, description):
         runtime.route("bad")
 
 
+@pytest.mark.parametrize("agent,args", [
+    ("claude", ["--model", ""]),
+    ("claude", ["--tools", " "]),
+    ("claude", ["--tools", "", ""]),
+    ("claude", ["--allowedTools", ""]),
+    ("codex", ["--model", ""]),
+])
+def test_route_rejects_blank_cli_operands_except_empty_claude_tools(
+    environment, agent, args,
+):
+    import yaml
+
+    _server, runtime, *_ = environment
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump({"routes": {"invalid": {"agent": agent, "args": args}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="route args"):
+        runtime.route("invalid")
+
+
+@pytest.mark.parametrize("agent,args", [
+    ("claude", ["--tools"]),
+    ("claude", ["--model="]),
+    ("codex", ["--dangerously-bypass-hook-trust=true"]),
+])
+def test_evaluator_rejects_missing_or_illegal_option_values(agent, args):
+    from qiqi_delegate.runtime import _validate_interactive_evaluator_argv
+
+    with pytest.raises(ValueError):
+        _validate_interactive_evaluator_argv(agent, args)
+
+
 def test_legacy_routes_accept_missing_descriptions(environment):
     _server, runtime, *_ = environment
     assert runtime.route("codex-balanced") == ("codex", [])
