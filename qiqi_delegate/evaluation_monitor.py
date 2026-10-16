@@ -4,6 +4,9 @@ The SHA256 fingerprint taken before/after evaluation cannot detect an agent
 that edits a file and restores its bytes before completing. Linux inotify
 records write/attribute/create/delete/move events while the native worker is
 running; the events remain queued until the Coordinator verifies them.
+Both directory entries AND existing file inodes are watched: file watches
+also detect writes and link-count changes through hard links created in
+otherwise unwatched directories.
 
 This is NOT a write sandbox or a substitute for OS-enforced isolation. Linux
 inotify cannot observe every possible memory-mapped write, and a permissive
@@ -68,11 +71,14 @@ class SnapshotMutationMonitor:
             err = ctypes.get_errno()
             raise OSError(err, "cannot initialize evaluator snapshot mutation monitor")
         try:
-            count = 0
+            directories_watched = 0
+            files_watched = 0
             for root in self._roots:
-                for directory, subdirs, _files in os.walk(root, followlinks=False):
-                    # Symlinked directories are not inspectable evidence and
-                    # must not silently bypass recursive mutation monitoring.
+                for directory, subdirs, filenames in os.walk(root, followlinks=False):
+                    # A directory watch observes changes made through its own
+                    # entries; it does NOT observe writes through hard links
+                    # elsewhere on the same filesystem. Watch each existing
+                    # inode too, before the native Evaluator is dispatched.
                     for subdir in subdirs:
                         entry = Path(directory) / subdir
                         if not stat.S_ISDIR(entry.lstat().st_mode):
@@ -86,11 +92,29 @@ class SnapshotMutationMonitor:
                     if wd < 0:
                         err = ctypes.get_errno()
                         raise OSError(
-                            err, "cannot watch evaluator snapshot: " + directory
+                            err, "cannot watch evaluator snapshot directory: " + directory
                         )
-                    count += 1
-            if count == 0:
-                raise RuntimeError("no evaluator snapshot directories were watched")
+                    directories_watched += 1
+                    for filename in filenames:
+                        entry = Path(directory) / filename
+                        if not stat.S_ISREG(entry.lstat().st_mode):
+                            raise RuntimeError(
+                                "unsafe nonregular file in evaluator snapshot: " + str(entry)
+                            )
+                        wd = watch(
+                            fd, os.fsencode(entry),
+                            _MUTATION_EVENTS | _NO_FOLLOW,
+                        )
+                        if wd < 0:
+                            err = ctypes.get_errno()
+                            raise OSError(
+                                err, "cannot watch evaluator snapshot file: " + str(entry)
+                            )
+                        files_watched += 1
+            if directories_watched == 0 or files_watched == 0:
+                raise RuntimeError(
+                    "no evaluator snapshot directories or files were watched"
+                )
             self._fd = fd
         except BaseException:
             os.close(fd)
