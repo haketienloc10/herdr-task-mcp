@@ -55,7 +55,7 @@ _EVALUATOR_OPTIONAL_EQUALS_OPTIONS = {
 _EVALUATOR_SWITCH_OPTIONS = {
     "claude": frozenset({
         "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
-        "--verbose",
+        "--verbose", "--ax-screen-reader",
         "--chrome", "--no-chrome", "--ide", "--restricted",
         "--strict-mcp-config", "--disable-slash-commands",
     }),
@@ -146,6 +146,33 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
                 f"unsupported interactive option or command: {token!r}"
             )
         index += 1
+
+
+_CLAUDE_EVALUATOR_PROMPT_FILE_OPTIONS = frozenset({
+    "--system-prompt-file", "--append-system-prompt-file",
+})
+
+
+def _resolve_evaluator_claude_prompt_file_args(args: list[str], route_root: Path) -> list[str]:
+    """Resolve prompt files from the routing workspace, not the neutral evaluator CWD.
+
+    The route lives in route_root/agent-routing.yaml. Only evaluator arguments
+    are normalized; ordinary Peers retain their user-configured native args.
+    The native Claude CLI remains responsible for checking file existence.
+    """
+    resolved = list(args)
+    for index, token in enumerate(args):
+        option, equals, inline_value = token.strip().partition("=")
+        if option not in _CLAUDE_EVALUATOR_PROMPT_FILE_OPTIONS:
+            continue
+        # Interactive argv arity has already been validated before this call.
+        value = inline_value if equals else args[index + 1]
+        absolute = str((route_root / Path(value).expanduser()).resolve())
+        if equals:
+            resolved[index] = f"{option}={absolute}"
+        else:
+            resolved[index + 1] = absolute
+    return resolved
 
 
 class AgentStartupBlocked(RuntimeError):
@@ -809,6 +836,7 @@ class DelegateRuntime:
                     )
             _validate_interactive_evaluator_argv(adapter, args)
             if adapter == "claude":
+                args = _resolve_evaluator_claude_prompt_file_args(args, self.root)
                 args += [
                     "--setting-sources", "user",
                     "--strict-mcp-config",

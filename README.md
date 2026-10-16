@@ -154,6 +154,12 @@ vẫn được giữ nguyên (ví dụ `--name attach` hoặc `--profile review`
 không phải subcommand). Claude `--add-dir` có thể nhận nhiều thư mục;
 `--restricted` của Claude, `--approve-for-me`/`--not-so-yolo`,
 `--no-daemon`/`--strict-config` của Codex là cờ không có giá trị.
+Claude Final Evaluator hỗ trợ `--ax-screen-reader` để hiển thị cho trình đọc màn hình.
+Các tùy chọn `--system-prompt-file` và `--append-system-prompt-file` có thể
+nhận đường dẫn tuyệt đối hoặc tương đối; đường dẫn tương đối được giải
+quyết dựa trên workspace điều phối (nơi chứa `agent-routing.yaml`),
+không phải `evaluator-neutral-cwd` của phiên native mới. File được Claude
+kiểm tra khi khởi chạy. Route Peer thông thường vẫn giữ nguyên đường dẫn.
 Claude hỗ trợ `--advisor <model>` và `--debug` hoặc `--debug=filter`,
 cùng các aliases
 `-n`, `--allowed-tools`, `--disallowed-tools`. Các tùy chọn

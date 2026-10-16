@@ -806,6 +806,7 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("claude", ["--no-session-persistence"]),
     ("claude", ["--model", "claude-sonnet-5-5", "--no-session-persistence"]),
     ("claude", ["--no-session-persistence=false"]),
+    ("claude", ["--ax-screen-reader=true"]),
     ("claude", ["--debug=mcp,startup", "doctor"]),
     ("claude", ["--debug", "mcp,startup"]),
     ("codex", ["--no-daemon=true"]),
@@ -960,6 +961,8 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
 
 @pytest.mark.parametrize("agent,native_args", [
     # Officially supported foreground Claude options and their value arities.
+    ("claude", ["--ax-screen-reader"]),
+    ("claude", ["--ax-screen-reader", "--model", "claude-sonnet-5-5"]),
     ("claude", ["--autocompact", "500k"]),
     ("claude", ["--autocompact=auto", "--model", "claude-sonnet-5-5"]),
     ("claude", ["--append-system-prompt-file", "./instructions.txt"]),
@@ -1113,6 +1116,124 @@ def test_evaluator_cli_rejects_missing_required_and_empty_optional_values(
             ))
     with runtime._connect() as db:
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
+
+@pytest.mark.parametrize("args, expected", [
+    (["--system-prompt-file", "./rules.txt"],
+     ["--system-prompt-file", "rules.txt"]),
+    (["--append-system-prompt-file=./extra.txt"],
+     ["--append-system-prompt-file=extra.txt"]),
+    (["--system-prompt-file", "../shared/guide.txt",
+      "--append-system-prompt-file", "./extra.txt"],
+     ["--system-prompt-file", "../shared/guide.txt",
+      "--append-system-prompt-file", "extra.txt"]),
+])
+def test_claude_evaluator_rebases_prompt_files_against_routing_workspace(
+    tmp_path, args, expected,
+):
+    from qiqi_delegate.runtime import _resolve_evaluator_claude_prompt_file_args
+
+    workspace_root = tmp_path / "control"
+    workspace_root.mkdir()
+    actual = _resolve_evaluator_claude_prompt_file_args(args, workspace_root)
+    for original, normalized in zip(expected, actual):
+        if original.startswith("--"):
+            assert normalized == original
+        else:
+            assert normalized == str((workspace_root / original).resolve())
+    # Route arguments are never mutated in place.
+    assert args[0] == expected[0]
+
+
+def test_claude_evaluator_keeps_absolute_prompt_files_unchanged(tmp_path):
+    from qiqi_delegate.runtime import _resolve_evaluator_claude_prompt_file_args
+
+    absolute = str((tmp_path / "shared prompt.txt").resolve())
+    args = ["--system-prompt-file", absolute,
+            f"--append-system-prompt-file={absolute}"]
+    assert _resolve_evaluator_claude_prompt_file_args(
+        args, tmp_path / "control",
+    ) == args
+
+
+def test_claude_evaluator_forwards_prompt_files_outside_neutral_cwd(
+    tmp_path, monkeypatch,
+):
+    import qiqi_delegate.runtime as runtime_module
+    from qiqi_delegate.core import build_task_packet
+    import yaml
+
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    first = runtime.root / "base prompt.txt"
+    second = runtime.root / "additional prompt.txt"
+    first.write_text("Baseline evaluation guidance", encoding="utf-8")
+    second.write_text("Supplemental evaluation guidance", encoding="utf-8")
+    route = "claude-prompt-files"
+    config_path = runtime.root / "agent-routing.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    route_args = ["--system-prompt-file", "./base prompt.txt",
+                  "--append-system-prompt-file=./additional prompt.txt",
+                  "--ax-screen-reader"]
+    config["routes"][route] = {"agent": "claude", "args": route_args}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    assert runtime.route(route)[1] == route_args
+
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        binding = requests.graph_binding(gid)
+        reserved, _ = coordinator.store.reserve(
+            gid, graph_rt.get_graph(gid)["revision"], binding["request_id"],
+            binding["request_revision"], route, snap.manifest, snap.digest,
+        )
+        captured = {}
+        monkeypatch.setattr(runtime_module.shutil, "which", lambda _: "/usr/bin/herdr")
+
+        async def fake_ensure():
+            pass
+
+        async def fake_json(*args, **kwargs):
+            assert args[:3] == ("workspace", "create", "--cwd")
+            captured["cwd"] = Path(args[3])
+            return {"workspace": {"workspace_id": "prompt-workspace"},
+                    "root_pane": {"pane_id": "prompt-pane"}}
+
+        async def fake_start(_pane, adapter, argv):
+            assert adapter == "claude"
+            captured["argv"] = argv
+            raise RuntimeError("captured prompt file argv")
+
+        async def fake_run(*args, **kwargs):
+            return (0, "", "")
+
+        monkeypatch.setattr(runtime, "_ensure_herdr_server", fake_ensure)
+        monkeypatch.setattr(runtime, "_json", fake_json)
+        monkeypatch.setattr(runtime, "_start_agent", fake_start)
+        monkeypatch.setattr(runtime, "_run", fake_run)
+
+        with pytest.raises(RuntimeError, match="captured prompt file argv"):
+            asyncio.run(runtime.delegate(
+                repository="backend", route=route,
+                packet=build_task_packet(
+                    objective="Verify prompt file routing", scope=["backend"],
+                    acceptance_criteria=["Read both configured prompts"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id=reserved["evaluation_id"],
+            ))
+
+        argv = captured["argv"]
+        assert argv[argv.index("--system-prompt-file") + 1] == str(first)
+        assert f"--append-system-prompt-file={second}" in argv
+        assert "--ax-screen-reader" in argv
+        assert captured["cwd"] != runtime.root
+        assert captured["cwd"] not in snap.paths.values()
+        assert not (captured["cwd"] / first.name).exists()
+        assert first.is_file() and second.is_file()
+        # All other runtime-owned native capture/startup arguments remain.
+        assert "--settings" in argv
+        assert "--setting-sources" in argv
+        assert argv[argv.index("--setting-sources") + 1] == "user"
 
 
 def test_claude_evaluator_allows_normal_interactive_mode(
