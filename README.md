@@ -555,9 +555,9 @@ including cross-module contracts, before delivery is finalized.
    request**, assessed requirements, and an index of every source (including
    sources omitted by Lead). `.qiqi-final-task-sources/task-graph.json`
    preserves every node and acceptance criterion. Complete original source
-   contents are separate read-only files, including large native captures.
+   contents are separate files in the temporary copy, including large native captures.
    The Evaluator must read all relevant archives; no 100k-character prompt
-   truncation is allowed. Missing/tampered input blocks dispatch.
+   truncation is allowed. Missing or changed source during snapshot materialization blocks dispatch.
 5. Inspect `get_final_evaluation(graph_run_id, evaluation_id?)`. The durable
    structured report has `verdict`, `requirement_results`,
    `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
