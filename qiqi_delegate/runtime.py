@@ -689,6 +689,18 @@ class DelegateRuntime:
                     "entry points are not allowed"
                 )
             if adapter == "claude":
+                # Final Evaluation captures its only native result using the
+                # runtime-owned Stop/StopFailure hooks. Claude safe mode
+                # disables CLI-configured hooks, so never dispatch this route
+                # as an evaluator. Normal Peer routes retain this option.
+                if any(
+                    token == "--safe-mode" or token.startswith("--safe-mode=")
+                    for token in tokens
+                ):
+                    raise ValueError(
+                        "Claude Final Evaluation cannot use --safe-mode: "
+                        "it disables native Stop/StopFailure result hooks"
+                    )
                 if any(
                     arg in {"--mcp-config", "--setting-sources"} or
                     arg.startswith(("--mcp-config=", "--setting-sources="))
