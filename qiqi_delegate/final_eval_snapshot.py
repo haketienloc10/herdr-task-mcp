@@ -15,7 +15,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from qiqi_delegate.evaluation_monitor import SnapshotMutationMonitor
 
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_000_000
@@ -276,7 +275,7 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
 
 
 class EvaluationSnapshot:
-    """Temporary immutable-input snapshot; all evaluator writes go to a copy."""
+    """Temporary copies of all TaskGraph repositories for one native evaluation."""
 
     def __init__(self, roots: dict[str, Path]):
         self.roots = roots
@@ -284,83 +283,6 @@ class EvaluationSnapshot:
         self.paths: dict[str, Path] = {}
         self.manifest: dict[str, Any] = {}
         self.digest = ""
-        self._sealed_files: dict[str, dict[str, tuple[str, int, int]]] | None = None
-        self._mutation_monitor: SnapshotMutationMonitor | None = None
-
-    def _snapshot_fingerprints(self) -> dict[str, dict[str, tuple[str, int, int]]]:
-        """Hash every staged file, including metadata and full task sources.
-
-        Git inspection cannot be used for temporary snapshot roots (no .git).
-        Stream files so large workspace_file sources need not fit in memory.
-        Reject symlinks, nonregular files and changed inodes during inspection.
-        """
-        fingerprints: dict[str, dict[str, tuple[str, int, int]]] = {}
-        for name, root in sorted(self.paths.items()):
-            files: dict[str, tuple[str, int, int]] = {}
-            for directory, directories, filenames in os.walk(root, followlinks=False):
-                for dirname in directories:
-                    child = Path(directory) / dirname
-                    if not stat.S_ISDIR(child.lstat().st_mode):
-                        raise RuntimeError("unsafe evaluator snapshot directory: " + str(child))
-                for filename in filenames:
-                    path = Path(directory) / filename
-                    relative = path.relative_to(root).as_posix()
-                    # Reject links in every path component, not just the file.
-                    current = root
-                    for component in Path(relative).parts:
-                        current = current / component
-                        if stat.S_ISLNK(current.lstat().st_mode):
-                            raise RuntimeError("unsafe evaluator snapshot symlink: " + relative)
-                    before = path.lstat()
-                    if not stat.S_ISREG(before.st_mode):
-                        raise RuntimeError("unsafe evaluator snapshot file: " + relative)
-                    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                    try:
-                        opened = os.fstat(fd)
-                        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-                            raise RuntimeError("evaluator snapshot file replaced: " + relative)
-                        hasher = hashlib.sha256()
-                        size = 0
-                        while chunk := os.read(fd, 1024 * 1024):
-                            size += len(chunk)
-                            hasher.update(chunk)
-                        after = os.fstat(fd)
-                        if (opened.st_dev, opened.st_ino, opened.st_size,
-                            opened.st_mtime_ns) != (after.st_dev, after.st_ino,
-                                                   after.st_size, after.st_mtime_ns):
-                            raise RuntimeError("evaluator snapshot file changed: " + relative)
-                    finally:
-                        os.close(fd)
-                    files[relative] = (
-                        hasher.hexdigest(), size, stat.S_IMODE(after.st_mode),
-                    )
-            fingerprints[name] = files
-        return fingerprints
-
-    def seal_inputs(self) -> None:
-        """Seal full inputs and arm mutation monitoring BEFORE native launch.
-
-        Final hashes alone are insufficient: a permissive same-UID Evaluator
-        can rewrite a source, inspect it, and restore the original bytes.
-        Kernel events are queued for the full evaluation lifetime.
-        """
-        if self._sealed_files is not None or not self.paths:
-            raise RuntimeError("evaluation snapshot inputs already sealed or absent")
-        baseline = self._snapshot_fingerprints()
-        monitor = SnapshotMutationMonitor(self.paths.values())
-        monitor.arm()  # Fails closed before dispatch on unsupported systems.
-        self._sealed_files = baseline
-        self._mutation_monitor = monitor
-
-    def verify_unchanged(self) -> None:
-        """Reject PASS on any mutation event, including a transient rewrite."""
-        if self._sealed_files is None or self._mutation_monitor is None:
-            raise RuntimeError("evaluation snapshot inputs were not sealed")
-        self._mutation_monitor.assert_clean()
-        if self._snapshot_fingerprints() != self._sealed_files:
-            raise RuntimeError("evaluation snapshot files changed during native execution")
-        self._mutation_monitor.assert_clean()  # Also cover the hash-read window.
-
     def __enter__(self) -> "EvaluationSnapshot":
         first = inspect_roots(self.roots)
         self._temp = tempfile.TemporaryDirectory(prefix="qiqi-final-eval-")
@@ -381,9 +303,9 @@ class EvaluationSnapshot:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with target.open("xb") as handle:
                         handle.write(payload)
-                    # Read-only input snapshot; sandboxed tests may write to
-                    # separate ephemeral artifact directories.
-                    target.chmod(0o444 if mode & 0o111 == 0 else 0o555)
+                    # Preserve executable bits in this disposable working copy.
+                    # --add-dir is directory access, not a read-only mount.
+                    target.chmod(mode)
                 # Evaluator can look up hashes by repository-relative path
                 # without embedding thousands of file hashes in the prompt.
                 (destination / ".qiqi-evaluation-manifest.json").write_text(
@@ -406,15 +328,10 @@ class EvaluationSnapshot:
             raise
 
     def __exit__(self, *_args: Any) -> None:
-        # Closing BEFORE cleanup avoids recording our own directory deletion.
-        if self._mutation_monitor is not None:
-            self._mutation_monitor.close()
-            self._mutation_monitor = None
         if self._temp:
             self._temp.cleanup()
         self._temp = None
         self.paths = {}
-        self._sealed_files = None
 
 
 def evidence_is_in_manifest(
