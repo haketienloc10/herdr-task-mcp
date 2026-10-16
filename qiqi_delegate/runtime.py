@@ -35,7 +35,7 @@ _EVALUATOR_VALUE_OPTIONS = {
         "--agent", "--agents", "--fallback-model", "--system-prompt",
         "--append-system-prompt", "--permission-prompt-tool",
         "--max-turns", "--max-budget-usd", "--betas", "--plugin-dir",
-        "--debug-file", "--json-schema",
+        "--debug-file", "--json-schema", "--advisor",
     }),
     "codex": frozenset({
         "--model", "-m", "--config", "-c", "--sandbox", "-s",
