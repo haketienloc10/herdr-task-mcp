@@ -153,8 +153,12 @@ không phải subcommand). Claude `--add-dir` có thể nhận nhiều thư mụ
 `--restricted` của Claude, `--approve-for-me`/`--not-so-yolo`,
 `--no-daemon`/`--strict-config` của Codex là cờ không có giá trị.
 Claude hỗ trợ `--debug` hoặc `--debug=filter`, cùng các aliases
-`-n`, `--allowed-tools`, `--disallowed-tools`. Codex `--image`
-hỗ trợ nhiều đường dẫn ảnh sau một flag. Cú pháp gán giá trị cho
+`-n`, `--allowed-tools`, `--disallowed-tools`. Các tùy chọn
+`--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`
+nhận nhiều quy tắc sau một flag. Codex `--image`/`-i` hỗ trợ nhiều
+đường dẫn ảnh ngay cả khi ảnh đầu tiên gắn với flag (ví dụ
+`--image=before.png after.png`, `-ibefore.png after.png`).
+Cú pháp gán giá trị cho
 zero-arity flag như `--search=false` sẽ bị từ chối. Model, effort, permission tiếp tục
 do route YAML lựa chọn. Route Peer thông thường không bị giới hạn bởi
 bộ kiểm tra này.
