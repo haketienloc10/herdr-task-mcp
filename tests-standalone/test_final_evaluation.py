@@ -839,6 +839,49 @@ def test_evaluator_requires_fresh_native_session_but_peer_routes_keep_args(
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("native_args", [
+    ["--safe-mode"],
+    ["--safe-mode=true"],
+    ["--safe-mode=false"],
+    ["-p", "--safe-mode"],
+])
+def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
+    tmp_path, native_args,
+):
+    from qiqi_delegate.core import build_task_packet
+    import yaml
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    config = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
+    config["routes"]["claude-safe-peer"] = {
+        "agent": "claude",
+        "args": native_args,
+        "description": "Safe mode remains an ordinary Peer routing choice",
+    }
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8",
+    )
+    # The route itself is valid for ordinary peers.
+    assert runtime.route("claude-safe-peer") == ("claude", native_args)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        with pytest.raises(ValueError, match=r"--safe-mode.*Stop/StopFailure"):
+            asyncio.run(runtime.delegate(
+                repository="backend",
+                route="claude-safe-peer",
+                packet=build_task_packet(
+                    objective="Independent verification",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Return captured final report"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="unreserved-test-evaluation",
+            ))
+    # Rejected before Herdr is needed, and before native turn persistence.
+    with runtime._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
 def test_claude_evaluator_allows_print_mode_without_cloud_session_reuse(
     tmp_path, monkeypatch,
 ):
