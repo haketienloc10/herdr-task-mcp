@@ -768,6 +768,8 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("codex", ["fork", "old-session"]),
     ("codex", ["exec", "resume", "old-session"]),
     ("codex", ["exec", "fork", "old-session"]),
+    ("codex", ["queue", "existing-session-id", "Please review these changes"]),
+    ("codex", ["queue", "--last", "Check the integration contract"]),
     ("codex", ["--resume", "old-session"]),
     ("codex", ["--resume=old-session"]),
     ("codex", ["--fork", "old-session"]),
@@ -801,6 +803,10 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("claude", ["--remote", "existing-session-id"]),
     ("claude", ["--remote=existing-session-id"]),
     ("claude", ["--remote"]),
+    ("claude", ["-p", "--environment", "remote-env-id"]),
+    ("claude", ["-p", "--environment=remote-env-id"]),
+    ("claude", ["--environment", "remote-env-id"]),
+    ("claude", ["--environment=remote-env-id"]),
 ])
 def test_evaluator_requires_fresh_native_session_but_peer_routes_keep_args(
     tmp_path, agent, native_args,
