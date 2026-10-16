@@ -137,13 +137,15 @@ Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
 `AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải
 dùng phiên native mới ở host cục bộ**, không thể dùng
 `resume`/`fork`/`queue`/`--remote` hoặc non-interactive `exec`/`e`/`review`
-đối với Codex, hoặc
+đối với Codex. Codex Final Evaluator chạy TUI tương tác từ neutral CWD;
+không dùng `--skip-git-repo-check` (cờ chỉ dành cho `codex exec`), hoặc
 `--resume`/`-r`, `--continue`/`-c`, `--fork-session`,
 `--from-pr`, `--teleport`, `--session-id`, `attach`, `respawn`,
 `--cloud`/`--remote`/`--environment` đối với Claude. Claude
-Evaluator cũng chặn `-p`/`--print`, `--desktop`, `--bg`/`--background`
-và `--init-only` vì các mode này không chạy phiên tương tác ở foreground để nhận prompt
-và ghi kết quả bằng Stop hooks (bao gồm các dạng `--flag=value`).
+Evaluator cũng chặn `-p`/`--print`, `--desktop`, `--bg`/`--background`,
+`--init-only` và các tham số print-only `--max-turns`/`--max-budget-usd`.
+Những tùy chọn này không tương thích với phiên tương tác foreground nhận
+prompt và ghi kết quả bằng Stop hooks (bao gồm các dạng `--flag=value`).
 Final Evaluation kiểm tra **cấu trúc và số lượng giá trị của từng CLI option**,
 chỉ chấp nhận các options tương thích với phiên interactive foreground;
 lệnh quản trị, non-interactive, positional prompt hoặc options chưa được
