@@ -150,9 +150,12 @@ lệnh quản trị, non-interactive, positional prompt hoặc options chưa đ�
 nhận diện sẽ bị từ chối **trước khi dispatch**. Giá trị của option hợp lệ
 vẫn được giữ nguyên (ví dụ `--name attach` hoặc `--profile review`
 không phải subcommand). Claude `--add-dir` có thể nhận nhiều thư mục;
-`--restricted` của Claude, `--approve-for-me`/`--not-so-yolo` của
-Codex là cờ không có giá trị. Cú pháp gán giá trị cho zero-arity flag
-như `--search=false` sẽ bị từ chối. Model, effort, permission tiếp tục
+`--restricted` của Claude, `--approve-for-me`/`--not-so-yolo`,
+`--no-daemon`/`--strict-config` của Codex là cờ không có giá trị.
+Claude hỗ trợ `--debug` hoặc `--debug=filter`, cùng các aliases
+`-n`, `--allowed-tools`, `--disallowed-tools`. Codex `--image`
+hỗ trợ nhiều đường dẫn ảnh sau một flag. Cú pháp gán giá trị cho
+zero-arity flag như `--search=false` sẽ bị từ chối. Model, effort, permission tiếp tục
 do route YAML lựa chọn. Route Peer thông thường không bị giới hạn bởi
 bộ kiểm tra này.
 
