@@ -784,6 +784,10 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("claude", ["--json-schema", '{"type":"object"}']),
     ("claude", ['--json-schema={"type":"object"}']),
     ("claude", ["--model", "claude-sonnet-5-5", "--json-schema", '{"type":"object"}']),
+    # Non-interactive MCP permission handler cannot run in foreground evaluation.
+    ("claude", ["--permission-prompt-tool", "mcp_approval"]),
+    ("claude", ["--permission-prompt-tool=mcp_approval"]),
+    ("claude", ["--model", "claude-sonnet-5-5", "--permission-prompt-tool", "mcp_approval"]),
     ("claude", ["--max-turns", "5"]),
     ("claude", ["--max-turns=5"]),
     ("claude", ["--max-budget-usd", "10"]),
@@ -963,6 +967,12 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
     # Officially supported foreground Claude options and their value arities.
     ("claude", ["--ax-screen-reader"]),
     ("claude", ["--ax-screen-reader", "--model", "claude-sonnet-5-5"]),
+    ("claude", ["--plugin-dir", "./local-plugin"]),
+    ("claude", ["--plugin-dir=./local-plugin"]),
+    ("claude", ["--debug-file", "./native.log"]),
+    ("claude", ["--debug-file=./native.log"]),
+    ("claude", ["--add-dir", "./reference-a", "./reference-b"]),
+    ("claude", ["--add-dir=./reference-a", "./reference-b"]),
     ("claude", ["--autocompact", "500k"]),
     ("claude", ["--autocompact=auto", "--model", "claude-sonnet-5-5"]),
     ("claude", ["--append-system-prompt-file", "./instructions.txt"]),
@@ -1128,40 +1138,50 @@ def test_evaluator_cli_rejects_missing_required_and_empty_optional_values(
       "--append-system-prompt-file", "./extra.txt"],
      ["--system-prompt-file", "../shared/guide.txt",
       "--append-system-prompt-file", "extra.txt"]),
+    (["--add-dir", "./reference-a", "../reference-b", "--model", "sonnet"],
+     ["--add-dir", "reference-a", "../reference-b", "--model", "sonnet"]),
+    (["--add-dir=./reference-a", "./reference-b", "--effort", "high"],
+     ["--add-dir=reference-a", "reference-b", "--effort", "high"]),
+    (["--plugin-dir", "./plugins", "--plugin-dir=./plugin.zip"],
+     ["--plugin-dir", "plugins", "--plugin-dir=plugin.zip"]),
+    (["--debug-file", "./logs/debug.log", "--debug-file=../trace.log"],
+     ["--debug-file", "logs/debug.log", "--debug-file=../trace.log"]),
 ])
-def test_claude_evaluator_rebases_prompt_files_against_routing_workspace(
+def test_claude_evaluator_rebases_path_operands_against_routing_workspace(
     tmp_path, args, expected,
 ):
-    from qiqi_delegate.runtime import _resolve_evaluator_claude_prompt_file_args
+    from qiqi_delegate.runtime import _resolve_evaluator_claude_path_args
 
     workspace_root = tmp_path / "control"
     workspace_root.mkdir()
     original_args = list(args)
-    actual = _resolve_evaluator_claude_prompt_file_args(args, workspace_root)
+    actual = _resolve_evaluator_claude_path_args(args, workspace_root)
     for original, normalized in zip(expected, actual):
         if original.startswith("--") and "=" in original:
             option, relative = original.split("=", 1)
             assert normalized == f"{option}={(workspace_root / relative).resolve()}"
         elif original.startswith("--"):
             assert normalized == original
+        elif original in {"sonnet", "high"}:
+            assert normalized == original
         else:
             assert normalized == str((workspace_root / original).resolve())
-    # Route arguments are never mutated in place.
     assert args == original_args
 
 
-def test_claude_evaluator_keeps_absolute_prompt_files_unchanged(tmp_path):
-    from qiqi_delegate.runtime import _resolve_evaluator_claude_prompt_file_args
+def test_claude_evaluator_keeps_absolute_paths_unchanged(tmp_path):
+    from qiqi_delegate.runtime import _resolve_evaluator_claude_path_args
 
     absolute = str((tmp_path / "shared prompt.txt").resolve())
     args = ["--system-prompt-file", absolute,
-            f"--append-system-prompt-file={absolute}"]
-    assert _resolve_evaluator_claude_prompt_file_args(
+            f"--append-system-prompt-file={absolute}",
+            "--add-dir", absolute, "--plugin-dir", absolute,
+            f"--debug-file={absolute}"]
+    assert _resolve_evaluator_claude_path_args(
         args, tmp_path / "control",
     ) == args
 
-
-def test_claude_evaluator_forwards_prompt_files_outside_neutral_cwd(
+def test_claude_evaluator_forwards_workspace_paths_outside_neutral_cwd(
     tmp_path, monkeypatch,
 ):
     import qiqi_delegate.runtime as runtime_module
@@ -1173,11 +1193,20 @@ def test_claude_evaluator_forwards_prompt_files_outside_neutral_cwd(
     second = runtime.root / "additional prompt.txt"
     first.write_text("Baseline evaluation guidance", encoding="utf-8")
     second.write_text("Supplemental evaluation guidance", encoding="utf-8")
+    reference_a = runtime.root / "reference-a"
+    reference_b = runtime.root / "reference-b"
+    plugin_dir = runtime.root / "local-plugin"
+    reference_a.mkdir()
+    reference_b.mkdir()
+    plugin_dir.mkdir()
+    log_file = runtime.root / "trace.log"
     route = "claude-prompt-files"
     config_path = runtime.root / "agent-routing.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     route_args = ["--system-prompt-file", "./base prompt.txt",
                   "--append-system-prompt-file=./additional prompt.txt",
+                  "--add-dir", "./reference-a", "./reference-b",
+                  "--plugin-dir=./local-plugin", "--debug-file", "./trace.log",
                   "--ax-screen-reader"]
     config["routes"][route] = {"agent": "claude", "args": route_args}
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -1229,6 +1258,12 @@ def test_claude_evaluator_forwards_prompt_files_outside_neutral_cwd(
         argv = captured["argv"]
         assert argv[argv.index("--system-prompt-file") + 1] == str(first)
         assert f"--append-system-prompt-file={second}" in argv
+        assert argv[argv.index("--add-dir") + 1:
+                    argv.index("--add-dir") + 3] == [
+                        str(reference_a), str(reference_b),
+                    ]
+        assert f"--plugin-dir={plugin_dir}" in argv
+        assert argv[argv.index("--debug-file") + 1] == str(log_file)
         assert "--ax-screen-reader" in argv
         assert captured["cwd"] != runtime.root
         assert captured["cwd"] not in snap.paths.values()
