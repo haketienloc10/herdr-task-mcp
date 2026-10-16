@@ -22,6 +22,97 @@ from qiqi_delegate.core import (
     codex_session_hook_key, load_capture_events, resolve_capture_events,
 )
 
+# Final Evaluation must start a foreground interactive CLI. For the evaluator
+# only, parse supported OPTION arities instead of treating every token as a
+# subcommand: e.g. "--name attach" is a valid Claude session name, not "attach".
+# Unknown options/positional commands fail before native startup. Ordinary Peer
+# routes remain fully user-configurable.
+_EVALUATOR_VALUE_OPTIONS = {
+    "claude": frozenset({
+        "--model", "-m", "--effort", "--permission-mode", "--name",
+        "--add-dir", "--tools", "--allowedTools", "--disallowedTools",
+        "--agent", "--agents", "--fallback-model", "--system-prompt",
+        "--append-system-prompt", "--permission-prompt-tool",
+        "--max-turns", "--max-budget-usd", "--betas", "--plugin-dir",
+        "--debug-file", "--json-schema",
+    }),
+    "codex": frozenset({
+        "--model", "-m", "--config", "-c", "--sandbox", "-s",
+        "--ask-for-approval", "-a", "--profile", "-p",
+        "--image", "-i", "--add-dir", "--local-provider",
+        "--enable", "--disable",
+    }),
+}
+_EVALUATOR_SWITCH_OPTIONS = {
+    "claude": frozenset({
+        "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+        "--verbose", "--debug", "--no-session-persistence",
+        "--chrome", "--no-chrome", "--ide",
+        "--strict-mcp-config", "--disable-slash-commands",
+    }),
+    "codex": frozenset({
+        "--yolo", "--dangerously-bypass-approvals-and-sandbox",
+        "--search", "--oss", "--skip-git-repo-check",
+        "--no-alt-screen", "--full-auto",
+    }),
+}
+
+
+def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
+    """Accept only option-only, interactive local CLI invocations.
+
+    Standalone positional tokens are CLI subcommands/prompts, never consumed
+    unless preceded by an option documented to take a value. Unknown options
+    are rejected instead of guessing their arity or startup behavior.
+    """
+    values = _EVALUATOR_VALUE_OPTIONS[adapter]
+    switches = _EVALUATOR_SWITCH_OPTIONS[adapter]
+    index = 0
+    while index < len(args):
+        token = args[index].strip()
+        option, equals, inline_value = token.partition("=")
+        if token.startswith("--"):
+            pass
+        elif token.startswith("-"):
+            # Codex also accepts attached values: -cmodel=..., -mMODEL,
+            # -sMODE, etc. All such values are opaque option payloads.
+            # Claude -p/-c/-r are deliberately NOT valid evaluator options.
+            attached = next(
+                (short for short in ("-c", "-m", "-s", "-a", "-p", "-i")
+                 if adapter == "codex" and
+                 short in values and token.startswith(short) and len(token) > 2),
+                None,
+            )
+            if attached and not equals:
+                option, inline_value, equals = attached, token[len(attached):], "="
+        else:
+            raise ValueError(
+                "Final Evaluation requires a fresh native session; "
+                f"positional/subcommand argument is not supported: {token!r}"
+            )
+        if option in values:
+            if equals:
+                if not inline_value:
+                    raise ValueError(
+                        f"Final Evaluation requires a value for {option}"
+                    )
+            else:
+                index += 1
+                if index >= len(args) or args[index].strip().startswith("-"):
+                    raise ValueError(
+                        f"Final Evaluation requires a value for {option}"
+                    )
+        elif option in switches:
+            if equals and inline_value not in {"true", "false"}:
+                raise ValueError(f"Final Evaluation invalid option value: {token}")
+        else:
+            raise ValueError(
+                "Final Evaluation requires a fresh native session; "
+                f"unsupported interactive option or command: {token!r}"
+            )
+        index += 1
+
+
 class AgentStartupBlocked(RuntimeError):
     """Herdr started a named Peer, but its startup UI requires attention."""
 
@@ -647,60 +738,13 @@ class DelegateRuntime:
             # and .mcp.json; --strict-mcp-config denies ambient MCP config.
             # User/managed settings remain trusted operator-controlled inputs.
             args = list(args)
-            # A fresh Herdr pane alone is insufficient: native CLI resume/fork
-            # options can restore previous instructions and even a recorded cwd.
-            # Apply this boundary only to Final Evaluation; normal Peer routes
-            # retain the user's full native session CLI flexibility. For Codex
-            # -c remains a configuration override, NOT Claude's -c (continue).
+            # A new Herdr pane is not sufficient if the native CLI selects
+            # another session, a remote worker or a non-interactive command.
+            # Apply only to evaluator routes; Peers retain their native CLI.
             tokens = [arg.strip() for arg in args]
-            if adapter == "codex":
-                forbidden_sessions = {
-                    "resume", "fork", "queue", "exec", "e", "review",
-                    "--resume", "--fork", "--continue", "--session-id",
-                    "--remote",
-                }
-                forbidden_prefixes = (
-                    "--resume=", "--fork=", "--continue=", "--session-id=",
-                    "--remote=",
-                )
-            else:
-                forbidden_sessions = {
-                    "attach", "respawn", "--cloud", "--remote",
-                    "--environment", "--resume", "--continue",
-                    "--fork-session", "--from-pr", "--session-id",
-                    "--teleport", "--desktop", "--bg", "--background",
-                    "--init-only", "--print", "-p", "-r", "-c",
-                }
-                forbidden_prefixes = (
-                    "--cloud=", "--remote=", "--environment=",
-                    "--resume=", "--continue=", "--fork-session=",
-                    "--from-pr=", "--session-id=", "--teleport=",
-                    "--desktop=", "--bg=", "--background=", "--init-only=",
-                    "--print=",
-                )
-            if any(
-                token in forbidden_sessions or
-                token.startswith(forbidden_prefixes) or
-                (adapter == "claude" and (
-                    (token.startswith("-r") and len(token) > 2 and
-                     not token.startswith("--")) or
-                    (token.startswith("-c") and len(token) > 2 and
-                     not token.startswith("--")) or
-                    (token.startswith("-p") and len(token) > 2 and
-                     not token.startswith("--"))
-                ))
-                for token in tokens
-            ):
-                raise ValueError(
-                    "Final Evaluation requires a fresh native session; "
-                    "session-reuse, remote-dispatch, non-interactive "
-                    "or non-foreground entry points are not allowed"
-                )
             if adapter == "claude":
-                # Final Evaluation captures its only native result using the
-                # runtime-owned Stop/StopFailure hooks. Claude safe mode
-                # disables CLI-configured hooks, so never dispatch this route
-                # as an evaluator. Normal Peer routes retain this option.
+                # Safe mode disables the CLI-configured Stop/StopFailure hooks
+                # that are required for the final report capture.
                 if any(
                     token == "--safe-mode" or token.startswith("--safe-mode=")
                     for token in tokens
@@ -710,13 +754,26 @@ class DelegateRuntime:
                         "it disables native Stop/StopFailure result hooks"
                     )
                 if any(
-                    arg in {"--mcp-config", "--setting-sources"} or
-                    arg.startswith(("--mcp-config=", "--setting-sources="))
-                    for arg in args
+                    token in {"--mcp-config", "--setting-sources"} or
+                    token.startswith(("--mcp-config=", "--setting-sources="))
+                    for token in tokens
                 ):
                     raise ValueError(
                         "evaluator MCP and project settings isolation is runtime-owned"
                     )
+            else:
+                # This native flag can override Herdr's neutral CWD.
+                if any(
+                    token == "-C" or token.startswith("-C") or
+                    token == "--cd" or token.startswith("--cd=")
+                    for token in tokens
+                ):
+                    raise ValueError(
+                        "evaluator native working directory is runtime-owned; "
+                        "Codex -C/--cd flags are not allowed"
+                    )
+            _validate_interactive_evaluator_argv(adapter, args)
+            if adapter == "claude":
                 args += [
                     "--setting-sources", "user",
                     "--strict-mcp-config",
@@ -724,19 +781,6 @@ class DelegateRuntime:
                     "--disable-slash-commands",
                 ]
             else:
-                # Codex -C/--cd overrides the native agent's working root,
-                # independently of Herdr's neutral workspace CWD. Candidate
-                # AGENTS.md can then become startup instructions. Keep these
-                # flags user-configurable for regular peers, but not Evaluators.
-                if any(
-                    token == "-C" or token.startswith("-C") or
-                    token == "--cd" or token.startswith("--cd=")
-                    for arg in args for token in (arg.strip(),)
-                ):
-                    raise ValueError(
-                        "evaluator native working directory is runtime-owned; "
-                        "Codex -C/--cd flags are not allowed"
-                    )
                 args.append("--skip-git-repo-check")
             # Every snapshot is passed as explicitly authorized source data.
             # The native agent starts from a neutral directory (see below);
