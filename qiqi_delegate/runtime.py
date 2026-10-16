@@ -655,8 +655,9 @@ class DelegateRuntime:
             tokens = [arg.strip() for arg in args]
             if adapter == "codex":
                 forbidden_sessions = {
-                    "resume", "fork", "queue", "--resume", "--fork",
-                    "--continue", "--session-id", "--remote",
+                    "resume", "fork", "queue", "exec", "e", "review",
+                    "--resume", "--fork", "--continue", "--session-id",
+                    "--remote",
                 }
                 forbidden_prefixes = (
                     "--resume=", "--fork=", "--continue=", "--session-id=",
@@ -668,13 +669,14 @@ class DelegateRuntime:
                     "--environment", "--resume", "--continue",
                     "--fork-session", "--from-pr", "--session-id",
                     "--teleport", "--desktop", "--bg", "--background",
-                    "--init-only", "-r", "-c",
+                    "--init-only", "--print", "-p", "-r", "-c",
                 }
                 forbidden_prefixes = (
                     "--cloud=", "--remote=", "--environment=",
                     "--resume=", "--continue=", "--fork-session=",
                     "--from-pr=", "--session-id=", "--teleport=",
                     "--desktop=", "--bg=", "--background=", "--init-only=",
+                    "--print=",
                 )
             if any(
                 token in forbidden_sessions or
@@ -683,14 +685,16 @@ class DelegateRuntime:
                     (token.startswith("-r") and len(token) > 2 and
                      not token.startswith("--")) or
                     (token.startswith("-c") and len(token) > 2 and
+                     not token.startswith("--")) or
+                    (token.startswith("-p") and len(token) > 2 and
                      not token.startswith("--"))
                 ))
                 for token in tokens
             ):
                 raise ValueError(
                     "Final Evaluation requires a fresh native session; "
-                    "session-reuse, remote-dispatch and non-foreground "
-                    "entry points are not allowed"
+                    "session-reuse, remote-dispatch, non-interactive "
+                    "or non-foreground entry points are not allowed"
                 )
             if adapter == "claude":
                 # Final Evaluation captures its only native result using the
