@@ -663,10 +663,12 @@ class DelegateRuntime:
                 )
             else:
                 forbidden_sessions = {
+                    "attach", "respawn", "--cloud", "--remote",
                     "--resume", "--continue", "--fork-session", "--from-pr",
                     "--session-id", "--teleport", "-r", "-c",
                 }
                 forbidden_prefixes = (
+                    "--cloud=", "--remote=",
                     "--resume=", "--continue=", "--fork-session=",
                     "--from-pr=", "--session-id=", "--teleport=",
                 )
@@ -683,7 +685,8 @@ class DelegateRuntime:
             ):
                 raise ValueError(
                     "Final Evaluation requires a fresh native session; "
-                    "resume/continue/fork flags are not allowed"
+                    "resume/continue/fork/attach/respawn/cloud/remote "
+                    "entry points are not allowed"
                 )
             if adapter == "claude":
                 if any(
