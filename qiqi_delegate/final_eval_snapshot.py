@@ -15,6 +15,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from qiqi_delegate.evaluation_monitor import SnapshotMutationMonitor
+
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 24_000_000
@@ -283,6 +285,7 @@ class EvaluationSnapshot:
         self.manifest: dict[str, Any] = {}
         self.digest = ""
         self._sealed_files: dict[str, dict[str, tuple[str, int, int]]] | None = None
+        self._mutation_monitor: SnapshotMutationMonitor | None = None
 
     def _snapshot_fingerprints(self) -> dict[str, dict[str, tuple[str, int, int]]]:
         """Hash every staged file, including metadata and full task sources.
@@ -335,17 +338,28 @@ class EvaluationSnapshot:
         return fingerprints
 
     def seal_inputs(self) -> None:
-        """Seal the full inputs after staging the Lead task sources."""
+        """Seal full inputs and arm mutation monitoring BEFORE native launch.
+
+        Final hashes alone are insufficient: a permissive same-UID Evaluator
+        can rewrite a source, inspect it, and restore the original bytes.
+        Kernel events are queued for the full evaluation lifetime.
+        """
         if self._sealed_files is not None or not self.paths:
             raise RuntimeError("evaluation snapshot inputs already sealed or absent")
-        self._sealed_files = self._snapshot_fingerprints()
+        baseline = self._snapshot_fingerprints()
+        monitor = SnapshotMutationMonitor(self.paths.values())
+        monitor.arm()  # Fails closed before dispatch on unsupported systems.
+        self._sealed_files = baseline
+        self._mutation_monitor = monitor
 
     def verify_unchanged(self) -> None:
-        """Reject PASS if any input was added, deleted, rewritten or chmod'ed."""
-        if self._sealed_files is None:
+        """Reject PASS on any mutation event, including a transient rewrite."""
+        if self._sealed_files is None or self._mutation_monitor is None:
             raise RuntimeError("evaluation snapshot inputs were not sealed")
+        self._mutation_monitor.assert_clean()
         if self._snapshot_fingerprints() != self._sealed_files:
             raise RuntimeError("evaluation snapshot files changed during native execution")
+        self._mutation_monitor.assert_clean()  # Also cover the hash-read window.
 
     def __enter__(self) -> "EvaluationSnapshot":
         first = inspect_roots(self.roots)
@@ -392,6 +406,10 @@ class EvaluationSnapshot:
             raise
 
     def __exit__(self, *_args: Any) -> None:
+        # Closing BEFORE cleanup avoids recording our own directory deletion.
+        if self._mutation_monitor is not None:
+            self._mutation_monitor.close()
+            self._mutation_monitor = None
         if self._temp:
             self._temp.cleanup()
         self._temp = None
