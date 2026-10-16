@@ -111,8 +111,8 @@ class FinalEvaluationStore:
                     detail = (
                         "Recovered native capture with an unresolved Herdr "
                         "write claim; verify workspace/worker termination and "
-                        "release claim before operator recovery. Snapshot "
-                        "integrity was not attested"
+                        "release claim before operator recovery. "
+                        "Coordinator completion was not confirmed"
                     )
                 updated = db.execute(
                     "UPDATE final_evaluations SET status='interrupted', "
