@@ -763,6 +763,10 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
 
 
 @pytest.mark.parametrize("agent,native_args", [
+    ("codex", ["exec", "Inspect this code"]),
+    ("codex", ["e", "Inspect this code"]),
+    ("codex", ["review"]),
+    ("codex", ["review", "Please verify changes"]),
     ("codex", ["resume", "old-session"]),
     ("codex", ["resume", "--last"]),
     ("codex", ["fork", "old-session"]),
@@ -778,6 +782,12 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("codex", ["--fork=old-session"]),
     ("codex", ["--continue"]),
     ("codex", ["--session-id=old-session"]),
+    ("claude", ["-p"]),
+    ("claude", ["--print"]),
+    ("claude", ["-p", "Review this code"]),
+    ("claude", ["--print=Review this code"]),
+    ("claude", ["--print=false"]),
+    ("claude", ["-pReview this code"]),
     ("claude", ["--resume", "old-session"]),
     ("claude", ["--resume=old-session"]),
     ("claude", ["--continue"]),
@@ -901,18 +911,18 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
 
 
-def test_claude_evaluator_allows_print_mode_without_cloud_session_reuse(
+def test_claude_evaluator_allows_normal_interactive_mode(
     tmp_path, monkeypatch,
 ):
-    """Claude -p itself does not reuse any existing conversation."""
+    """Foreground Claude launches remain accepted without -p/--print."""
     from qiqi_delegate.core import build_task_packet
     import qiqi_delegate.runtime as runtime_module
     import yaml
 
     runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
     config = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
-    config["routes"]["claude-print"] = {
-        "agent": "claude", "args": ["-p", "--model", "claude-sonnet-5-5"],
+    config["routes"]["claude-interactive"] = {
+        "agent": "claude", "args": ["--model", "claude-sonnet-5-5"],
     }
     (runtime.root / "agent-routing.yaml").write_text(
         yaml.safe_dump(config), encoding="utf-8",
@@ -923,7 +933,7 @@ def test_claude_evaluator_allows_print_mode_without_cloud_session_reuse(
         with pytest.raises(RuntimeError, match="Herdr CLI not found"):
             asyncio.run(runtime.delegate(
                 repository="backend",
-                route="claude-print",
+                route="claude-interactive",
                 packet=build_task_packet(
                     objective="Independent verification",
                     scope=["backend", "frontend"],
