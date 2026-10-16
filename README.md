@@ -168,7 +168,11 @@ Claude hỗ trợ `--advisor <model>` và `--debug` hoặc `--debug=filter`,
 cùng các aliases
 `-n`, `--allowed-tools`, `--disallowed-tools`. Các tùy chọn
 `--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`
-nhận nhiều quy tắc sau một flag. Codex `--image`/`-i` hỗ trợ nhiều
+nhận nhiều quy tắc sau một flag. Claude `--tools` và `--betas`
+cũng nhận nhiều giá trị (ví dụ `--tools Read Glob`,
+`--betas=beta-one beta-two`); cấu trúc giá trị được kiểm tra trước khi
+khởi chạy evaluator, còn tên tool/beta được Claude xác thực khi chạy.
+Codex `--image`/`-i` hỗ trợ nhiều
 đường dẫn ảnh ngay cả khi ảnh đầu tiên gắn với flag (ví dụ
 `--image=before.png after.png`, `-ibefore.png after.png`).
 Cú pháp gán giá trị cho
