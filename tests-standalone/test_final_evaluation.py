@@ -587,6 +587,88 @@ def test_evaluator_snapshot_unchanged_with_full_source_metadata(tmp_path):
             snapshot.seal_inputs()
 
 
+@pytest.mark.parametrize("mutation", ["rewrite-and-restore", "chmod-and-restore",
+                                     "create-and-delete", "rename-and-restore"])
+def test_evaluator_detects_transient_mutation_even_if_final_hash_matches(
+    tmp_path, mutation,
+):
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        root = snap.paths["backend"]
+        target = root / "orders.py"
+        original = target.read_bytes()
+        original_mode = target.stat().st_mode & 0o777
+        snap.seal_inputs()
+        if mutation == "rewrite-and-restore":
+            target.chmod(0o644)
+            target.write_text("temporary malicious replacement\\n", encoding="utf-8")
+            target.write_bytes(original)
+            target.chmod(original_mode)
+        elif mutation == "chmod-and-restore":
+            target.chmod(0o644)
+            target.chmod(original_mode)
+        elif mutation == "create-and-delete":
+            transient = root / "transient.py"
+            transient.write_text("temporary = True\\n", encoding="utf-8")
+            transient.unlink()
+        else:
+            alternate = root / "renamed.py"
+            target.rename(alternate)
+            alternate.rename(target)
+        # Final-state hashing alone would incorrectly accept every case.
+        assert target.read_bytes() == original
+        assert (target.stat().st_mode & 0o777) == original_mode
+        assert snap._snapshot_fingerprints() == snap._sealed_files
+        with pytest.raises(RuntimeError, match="kernel mutation event"):
+            snap.verify_unchanged()
+
+
+def test_transient_evaluator_tampering_never_authorizes_pass(tmp_path, monkeypatch):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+
+    async def fake_delegate(**kwargs):
+        eid = kwargs["evaluation_id"]
+        coordinator.store.bind_turn(eid, "transient-write-native")
+        row = coordinator.store.get(eid)
+        body = json.dumps(report(row["manifest"]))
+        target = kwargs["evaluation_roots"]["backend"] / "orders.py"
+        original = target.read_bytes()
+        mode = target.stat().st_mode & 0o777
+        # Same-UID native tools can modify and then restore nominally
+        # read-only sources before the Coordinator checks the final digest.
+        target.chmod(0o644)
+        target.write_text("injected = True\\n", encoding="utf-8")
+        target.write_bytes(original)
+        target.chmod(mode)
+        return {"state": "settled", "turn_id": "transient-write-native",
+                "agent_response": body}
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    result = asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
+    assert result["status"] == "inconclusive"
+    assert "snapshot integrity" in result["detail"]
+    assert "mutation event" in result["detail"]
+    assert result["report"] is None
+    with pytest.raises(ValueError, match="PASS"):
+        coordinator.finalize(gid, result["evaluation_id"], revision)
+
+
+def test_missing_snapshot_mutation_monitor_fails_closed_before_native_dispatch(
+    tmp_path, monkeypatch,
+):
+    import qiqi_delegate.evaluation_monitor as monitor_module
+
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    monkeypatch.setattr(monitor_module.sys, "platform", "no-kernel-monitor")
+    revision = graph_rt.get_graph(gid)["revision"]
+    with pytest.raises(RuntimeError, match="refusing unmonitored evaluation"):
+        asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
+    assert coordinator.store.latest(gid) is None
+    with runtime._connect() as db:
+        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("args", [
     ["--mcp-config", "{}"],
     ["--mcp-config={}"],
