@@ -668,8 +668,13 @@ closing its workspace, `start_final_evaluation` returns
 across MCP restarts. `finalize_graph` rejects the result, and a second
 evaluation is blocked until exact operator recovery; an LLM's captured PASS
 is evidence for inspection, not permission to deliver. During startup
-recovery, an outstanding native-turn write claim also blocks automatic
-PASS restoration, even if a settled capture exists.
+recovery, **no abandoned attempt is automatically restored as PASS**, even
+when a settled native capture is durable and no write claim remains: a process
+crash can destroy the temporary snapshot/inotify evidence before successful
+integrity verification. Recovery retains the original native response for
+operator inspection, marks the attempt `interrupted`, and requires operator
+confirmation of worker termination before a new attempt. If a write claim
+remains, it must also be safely released.
 
 **Operator recovery for preserved Evaluator workspaces:** The Herdr Evaluator
 runs inside a disposable snapshot, but its write claim records the stable
