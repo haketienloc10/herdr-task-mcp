@@ -141,25 +141,14 @@ dùng phiên native mới**, không thể `resume`/`fork` đối với Codex, ho
 có thể khôi phục ngữ cảnh không đáng tin cậy từ phiên cũ dù CWD trung lập.
 Route Peer thông thường vẫn cho phép các flags native này nếu cần.
 
-Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**.
-Final Evaluation trên **Linux** thiết lập watcher kernel `inotify`
-cho tất cả thư mục snapshot **và inode của từng file** trước native
-dispatch, đồng thời hash toàn bộ file/metadata trước và sau phiên.
-Theo dõi inode giúp phát hiện thao tác ghi/chmod qua hard link trỏ ra
-ngoài các thư mục snapshot được giám sát. Bất kỳ sự kiện write, chmod,
-create, delete hoặc rename nào (kể cả sửa rồi khôi phục dữ liệu y hệt)
-đều làm kết quả `inconclusive` và chặn PASS. Nếu không thể khởi động
-watcher hoặc OS không hỗ trợ, MCP từ chối Final Evaluation trước dispatch
-thay vì chỉ dựa vào hash cuối. Watcher là **phát hiện thay đổi, không phải
-OS sandbox**: theo dõi inode chỉ đóng đường lách hard link đã biết,
-inotify vẫn có thể bỏ sót các ghi qua memory mapping hoặc một số
-cơ chế sửa dữ liệu cấp thấp. Vì vậy, nếu yêu cầu **đảm bảo input bất biến
-trước evaluator không đáng tin cậy**, cần read-only bind mount trong
-namespace riêng hoặc OS-enforced filesystem isolation, với backing path
-không thể truy cập và quyền mount đã bị tước khỏi worker. Hiện tại
-native Herdr worker **chưa được cách ly ở mức này**. Không dùng
-route permissive để đánh giá code không đáng tin cậy nếu chưa có sandbox
-tách biệt; tránh user/managed settings, hooks và tools không đáng tin cậy.
+Lưu ý: `--add-dir` cung cấp quyền truy cập thư mục, không áp đặt
+filesystem chỉ đọc. Phiên Final Evaluator dùng bản sao tạm của toàn bộ
+repository cần đánh giá, không sửa trực tiếp các repo khi thao tác trên
+bản sao đó. Với route permissive, native agent/tools vẫn có thể có side
+effects ngoài bản sao: chỉ chạy workflow này trong môi trường đáng tin
+cậy. PR này **không triển khai sandbox, inotify hoặc kiểm chứng tính bất
+biến của snapshot trước tác nhân đối kháng**; hardening như vậy nằm
+ngoài phạm vi và được theo dõi riêng tại Issue #20.
 
 Runtime sở hữu native result hooks; không thêm `--settings` hoặc
 `hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
@@ -543,28 +532,22 @@ including cross-module contracts, before delivery is finalized.
    settings và MCP config để tránh chạy hooks/MCP nằm trong code ứng viên;
    runtime chặn override của các flags bảo vệ và result hooks.
    Mặc định cài mới: Claude dùng `--permission-mode auto`.
-   **Các flags permissive có thể cho evaluator ghi vào bản sao snapshot.**
-   Runtime sẽ so hash toàn bộ snapshot sau native execution và trên
-   Linux còn duy trì watcher inotify từ trước dispatch để phát hiện cả
-   sửa đổi tạm thời rồi khôi phục nội dung cũ. Nếu watcher không khả dụng,
-   Final Evaluation từ chối trước dispatch. Snapshot được mount bằng
-   `--add-dir` thay vì trở thành process CWD, tránh candidate memory
-   file ở vị trí khởi chạy. Không dùng `--safe-mode` vì cờ này
-   cũng vô hiệu hóa native Stop hooks cần cho capture. Đây không phải
-   OS-level sandbox, và không ngăn mọi side effect ở ngoài snapshot.
+   Final Evaluator làm việc trên bản sao thư mục tạm để không cần dùng
+   live repository làm CWD. Mỗi bản sao được truyền qua `--add-dir`;
+   đây chỉ là quyền truy cập thư mục, không phải filesystem sandbox.
+   Hệ thống không yêu cầu Linux inotify hay kernel snapshot monitoring.
 4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
    hoặc sử dụng `"claude-xhigh"` / `"codex-evaluator"` theo độ khó.
    Không cần tạo riêng một route Claude có cùng model và effort.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
    **one fresh native Evaluator session** in a neutral CWD, with every
-   snapshot root passed as a read-only *input by convention* via `--add-dir`
-   and identified by absolute paths in the native prompt. To prevent candidate
-   `CLAUDE.md` from being loaded as memory from add-dirs, runtime CLI
-   settings force `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=0` for each
-   Claude evaluation. Organization-managed settings can take precedence
-   over CLI settings; deployments that enforce the opposite policy must
-   not use permissive evaluators without an external sandbox.
+   snapshot root passed via `--add-dir` and identified by absolute paths
+   in the native prompt. This is a disposable working copy, not an
+   immutable or read-only mount. Native Stop/StopFailure capture stays
+   runtime-owned. Operator/user/managed agent configuration remains a
+   trusted deployment input; no OS sandbox or extra memory-policy override
+   is installed by the Final Evaluation workflow.
    The bounded TaskPacket contains only
    small routing metadata and relative archive locations, not the entire
    original request and TaskGraph inline. In the primary isolated snapshot,
@@ -639,12 +622,13 @@ final PASS evidence. Restore a complete working tree and clear skip-worktree
 flags before evaluating. Ordinary staged/unstaged deletions in a complete
 working tree remain supported.
 `--add-dir` grants additional directory access: **it is not a sandbox**.
-The route is only allowed with explicit Codex `--sandbox read-only`.
+A route may choose its own native permission flags; Final Evaluation does
+not impose an immutable filesystem or a kernel monitor.
 The feature does not execute arbitrary verification commands from reports or
 independently attest LLM-reported test runs; do not treat test claims as
-deterministic proof. Read permissions outside snapshots depend on the
-host/Herdr deployment: if the host cannot confine the agent as required,
-do not run final evaluation on secret-bearing or untrusted workspaces.
+deterministic proof. Host filesystem access and side effects depend on the configured native
+agent permissions. Use trusted workspaces and tools; hostile-agent filesystem
+confinement is outside this PR's scope.
 A model finding no errors cannot prove mathematical correctness.
 
 **Crash/concurrency semantics:** Store evaluation IDs and native turn bindings
@@ -670,8 +654,8 @@ evaluation is blocked until exact operator recovery; an LLM's captured PASS
 is evidence for inspection, not permission to deliver. During startup
 recovery, **no abandoned attempt is automatically restored as PASS**, even
 when a settled native capture is durable and no write claim remains: a process
-crash can destroy the temporary snapshot/inotify evidence before successful
-integrity verification. Recovery retains the original native response for
+crash can occur before the Coordinator has validated and persisted
+a complete FinalEvaluationReport. Recovery retains the original native response for
 operator inspection, marks the attempt `interrupted`, and requires operator
 confirmation of worker termination before a new attempt. If a write claim
 remains, it must also be safely released.
