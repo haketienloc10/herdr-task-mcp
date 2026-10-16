@@ -144,9 +144,13 @@ dùng phiên native mới ở host cục bộ**, không thể dùng
 Evaluator cũng chặn `-p`/`--print`, `--desktop`, `--bg`/`--background`
 và `--init-only` vì các mode này không chạy phiên tương tác ở foreground để nhận prompt
 và ghi kết quả bằng Stop hooks (bao gồm các dạng `--flag=value`).
-Các tham số đó có thể dùng lại phiên cũ, chuyển worker sang host khác,
-hoặc không tạo phiên tương thích với Final Evaluation.
-Route Peer thông thường vẫn cho phép các flags native này nếu cần.
+Final Evaluation kiểm tra **cấu trúc đối số CLI**, chỉ chấp nhận các
+options tương thích với phiên interactive foreground; lệnh quản trị,
+non-interactive, positional prompt hoặc options chưa được nhận diện sẽ bị
+từ chối **trước khi dispatch**. Giá trị của option hợp lệ vẫn được giữ
+nguyên (ví dụ `--name attach` hoặc `--profile review` không phải
+subcommand). Model, effort, permission tiếp tục do route YAML lựa chọn.
+Route Peer thông thường không bị giới hạn bởi bộ kiểm tra này.
 
 Lưu ý: `--add-dir` cung cấp quyền truy cập thư mục, không áp đặt
 filesystem chỉ đọc. Phiên Final Evaluator dùng bản sao tạm của toàn bộ
