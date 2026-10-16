@@ -43,6 +43,35 @@ def test_workspace_info_descriptions_and_cli_model_effort(environment):
     assert "least effort" in result["route_usage"]
 
 
+@pytest.mark.parametrize("agent,args,expected_model", [
+    ("codex", ["-m", "gpt-6"], "gpt-6"),
+    ("codex", ["-mgpt-6"], "gpt-6"),
+    ("codex", ["-m=gpt-6"], "gpt-6"),
+    ("codex", ["--model", "initial", "-m", "gpt-6"], "gpt-6"),
+    ("codex", ["-mgpt-6", "--model=final"], "final"),
+    ("claude", ["-m", "claude-sonnet-5-5"], "claude-sonnet-5-5"),
+    ("claude", ["-mclaude-sonnet-5-5"], "claude-sonnet-5-5"),
+])
+def test_workspace_info_model_metadata_accepts_short_native_alias(
+    environment, agent, args, expected_model,
+):
+    server, runtime, *_ = environment
+    import yaml
+
+    path = runtime.root / "agent-routing.yaml"
+    path.write_text(yaml.safe_dump({"routes": {
+        "short-model": {
+            "agent": agent,
+            "args": args,
+            "description": "Model specified by its native short CLI option",
+        },
+    }}), encoding="utf-8")
+    result = asyncio.run(server.workspace_info())
+    assert result["route_details"]["short-model"]["model"] == expected_model
+    assert result["route_details"]["short-model"]["args"] == args
+    assert result["routes"]["short-model"] == agent
+
+
 @pytest.mark.parametrize("description", ["", "  ", 7, [], "x" * 501])
 def test_route_rejects_invalid_optional_description(environment, description):
     _server, runtime, *_ = environment
