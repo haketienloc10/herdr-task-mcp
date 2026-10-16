@@ -789,6 +789,18 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("claude", ["-rold-session"]),
     ("claude", ["-c"]),
     ("claude", ["-c=true"]),
+    ("claude", ["attach", "existing-session-id"]),
+    ("claude", ["respawn", "existing-session-id"]),
+    ("claude", ["-p", "--cloud", "existing-session-id"]),
+    ("claude", ["-p", "--cloud=existing-session-id"]),
+    ("claude", ["--cloud", "existing-session-id"]),
+    ("claude", ["--cloud=existing-session-id"]),
+    ("claude", ["--cloud"]),
+    ("claude", ["-p", "--remote", "existing-session-id"]),
+    ("claude", ["-p", "--remote=existing-session-id"]),
+    ("claude", ["--remote", "existing-session-id"]),
+    ("claude", ["--remote=existing-session-id"]),
+    ("claude", ["--remote"]),
 ])
 def test_evaluator_requires_fresh_native_session_but_peer_routes_keep_args(
     tmp_path, agent, native_args,
@@ -825,6 +837,40 @@ def test_evaluator_requires_fresh_native_session_but_peer_routes_keep_args(
             ))
     with runtime._connect() as db:
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+
+
+def test_claude_evaluator_allows_print_mode_without_cloud_session_reuse(
+    tmp_path, monkeypatch,
+):
+    """Claude -p itself does not reuse any existing conversation."""
+    from qiqi_delegate.core import build_task_packet
+    import qiqi_delegate.runtime as runtime_module
+    import yaml
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    config = yaml.safe_load((runtime.root / "agent-routing.yaml").read_text())
+    config["routes"]["claude-print"] = {
+        "agent": "claude", "args": ["-p", "--model", "claude-sonnet-5-5"],
+    }
+    (runtime.root / "agent-routing.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_module.shutil, "which", lambda _: None)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        # Passes evaluator-only argument checks; native launch requires Herdr.
+        with pytest.raises(RuntimeError, match="Herdr CLI not found"):
+            asyncio.run(runtime.delegate(
+                repository="backend",
+                route="claude-print",
+                packet=build_task_packet(
+                    objective="Independent verification",
+                    scope=["backend", "frontend"],
+                    acceptance_criteria=["Review the combined implementation"],
+                ),
+                evaluation_repositories=("backend", "frontend"),
+                evaluation_roots=snap.paths,
+                evaluation_id="unreserved-test-evaluation",
+            ))
 
 
 def test_codex_evaluator_allows_regular_config_flags_without_session_resume(
