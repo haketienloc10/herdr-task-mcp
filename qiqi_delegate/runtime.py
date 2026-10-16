@@ -655,8 +655,8 @@ class DelegateRuntime:
             tokens = [arg.strip() for arg in args]
             if adapter == "codex":
                 forbidden_sessions = {
-                    "resume", "fork", "--resume", "--fork", "--continue",
-                    "--session-id",
+                    "resume", "fork", "queue", "--resume", "--fork",
+                    "--continue", "--session-id",
                 }
                 forbidden_prefixes = (
                     "--resume=", "--fork=", "--continue=", "--session-id=",
@@ -664,11 +664,12 @@ class DelegateRuntime:
             else:
                 forbidden_sessions = {
                     "attach", "respawn", "--cloud", "--remote",
-                    "--resume", "--continue", "--fork-session", "--from-pr",
-                    "--session-id", "--teleport", "-r", "-c",
+                    "--environment", "--resume", "--continue",
+                    "--fork-session", "--from-pr", "--session-id",
+                    "--teleport", "-r", "-c",
                 }
                 forbidden_prefixes = (
-                    "--cloud=", "--remote=",
+                    "--cloud=", "--remote=", "--environment=",
                     "--resume=", "--continue=", "--fork-session=",
                     "--from-pr=", "--session-id=", "--teleport=",
                 )
@@ -685,8 +686,8 @@ class DelegateRuntime:
             ):
                 raise ValueError(
                     "Final Evaluation requires a fresh native session; "
-                    "resume/continue/fork/attach/respawn/cloud/remote "
-                    "entry points are not allowed"
+                    "resume/continue/fork/attach/respawn/queue/remote "
+                    "session entry points are not allowed"
                 )
             if adapter == "claude":
                 # Final Evaluation captures its only native result using the
