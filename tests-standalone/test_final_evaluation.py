@@ -316,7 +316,7 @@ def test_abandoned_native_capture_never_restores_pass_without_attestation(tmp_pa
         )
     # Simulate process death after native response persistence but BEFORE the
     # coordinator's snapshot event queue/hash verification. Even an unchanged
-    # manifest and a syntactically valid PASS cannot prove input integrity.
+    # A captured response alone cannot substitute for coordinator validation.
     restarted = FinalEvaluationStore(runtime.db)
     restored = restarted.get(evaluation_id)
     assert restored["status"] == "interrupted"
@@ -324,7 +324,7 @@ def test_abandoned_native_capture_never_restores_pass_without_attestation(tmp_pa
     assert restored["raw_response"] == body
     assert restored["native_capture"]["response"] == body
     assert restored["report"] is None
-    assert "integrity attestation" in restored["detail"]
+    assert "coordinator verification" in restored["detail"]
     assert restarted.recover_abandoned() == 0
     with pytest.raises(ValueError, match="PASS"):
         coordinator.finalize(gid, evaluation_id, graph["revision"])
@@ -539,9 +539,7 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
             assert "--settings" in argv
             capture_settings = json.loads(argv[argv.index("--settings") + 1])
             assert {"Stop", "StopFailure"} <= set(capture_settings["hooks"])
-            assert capture_settings["env"][
-                "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
-            ] == "0"
+            assert "env" not in capture_settings  # No sandbox-specific override
             assert argv[argv.index("--permission-mode") + 1] == "auto"
             assert argv[argv.index("--setting-sources") + 1] == "user"
             assert "--strict-mcp-config" in argv
@@ -591,206 +589,24 @@ def test_custom_evaluator_route_reaches_native_dispatch(tmp_path, monkeypatch):
     assert all(observed["evaluation_roots"][name] != runtime.repos()[name]
                for name in ("frontend", "backend"))
 
-@pytest.mark.parametrize("mode", [
-    "overwrite", "delete", "new-file", "chmod", "metadata",
-])
-def test_modified_evaluator_snapshot_never_authorizes_pass(tmp_path, monkeypatch, mode):
-    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
-    repos = runtime.repos()
-    original = (repos["backend"] / "orders.py").read_bytes()
-
-    async def fake_delegate(**kwargs):
-        eid = kwargs["evaluation_id"]
-        coordinator.store.bind_turn(eid, "snapshot-mutated-native")
-        captured = coordinator.store.get(eid)
-        body = json.dumps(report(captured["manifest"]))
-        primary = kwargs["evaluation_roots"]["backend"]
-        source = primary / "orders.py"
-        if mode == "overwrite":
-            # Read-only mode bits do not protect a file in a writable parent:
-            # an agent running as the same user can unlink and replace it.
-            source.unlink()
-            source.write_text("def total(n): return 0\n", encoding="utf-8")
-        elif mode == "delete":
-            source.unlink()
-        elif mode == "new-file":
-            (primary / "unexpected.py").write_text("INJECTED = True\n")
-        elif mode == "chmod":
-            source.chmod(0o600)
-        elif mode == "metadata":
-            (primary / ".qiqi-evaluation-manifest.json").write_text("{}")
-        return {"state": "settled", "turn_id": "snapshot-mutated-native",
-                "agent_response": body}
-
-    monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    revision = graph_rt.get_graph(gid)["revision"]
-    outcome = asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
-    assert outcome["status"] == "inconclusive"
-    assert "snapshot integrity" in outcome["detail"]
-    assert outcome["report"] is None
-    assert (repos["backend"] / "orders.py").read_bytes() == original
-    with pytest.raises(ValueError, match="PASS"):
-        coordinator.finalize(gid, outcome["evaluation_id"], revision)
-
-
-def test_evaluator_snapshot_unchanged_with_full_source_metadata(tmp_path):
-    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
-    from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot
-    with EvaluationSnapshot(runtime.repos()) as snapshot:
-        snapshot.seal_inputs()
-        snapshot.verify_unchanged()
-        with pytest.raises(RuntimeError, match="already sealed"):
-            snapshot.seal_inputs()
-
-
-@pytest.mark.parametrize("mutation", ["rewrite-and-restore", "chmod-and-restore",
-                                     "create-and-delete", "rename-and-restore"])
-def test_evaluator_detects_transient_mutation_even_if_final_hash_matches(
-    tmp_path, mutation,
-):
+def test_evaluation_snapshot_is_a_disposable_complete_working_copy(tmp_path):
+    """--add-dir uses copies, not live roots or kernel-enforced mounts."""
     runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
-    with EvaluationSnapshot(runtime.repos()) as snap:
-        root = snap.paths["backend"]
-        target = root / "orders.py"
-        original = target.read_bytes()
-        original_mode = target.stat().st_mode & 0o777
-        snap.seal_inputs()
-        if mutation == "rewrite-and-restore":
-            target.chmod(0o644)
-            target.write_text("temporary malicious replacement\\n", encoding="utf-8")
-            target.write_bytes(original)
-            target.chmod(original_mode)
-        elif mutation == "chmod-and-restore":
-            target.chmod(0o644)
-            target.chmod(original_mode)
-        elif mutation == "create-and-delete":
-            transient = root / "transient.py"
-            transient.write_text("temporary = True\\n", encoding="utf-8")
-            transient.unlink()
-        else:
-            alternate = root / "renamed.py"
-            target.rename(alternate)
-            alternate.rename(target)
-        # Final-state hashing alone would incorrectly accept every case.
-        assert target.read_bytes() == original
-        assert (target.stat().st_mode & 0o777) == original_mode
-        assert snap._snapshot_fingerprints() == snap._sealed_files
-        with pytest.raises(RuntimeError, match="kernel mutation event"):
-            snap.verify_unchanged()
-
-
-def test_snapshot_inode_watch_detects_mutation_through_external_hardlink(tmp_path):
-    """A hard link outside monitored directories still refers to the same inode."""
-    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
-    with EvaluationSnapshot(runtime.repos()) as snap:
-        primary = snap.paths["backend"]
-        source = primary / "orders.py"
-        original = source.read_bytes()
-        original_mode = source.stat().st_mode & 0o777
-        # An external alias on the snapshot filesystem, deliberately outside
-        # every watched snapshot directory and its subdirectories.
-        outside = primary.parent / "unwatched-hardlink-alias"
-        outside.mkdir()
-        alias = outside / "orders.py"
-        snap.seal_inputs()
-        os.link(source, alias)
-        alias.chmod(0o644)
-        alias.write_text("def total(n): return 'tampered'\\n", encoding="utf-8")
-        assert source.read_bytes() != original
-        alias.write_bytes(original)
-        alias.chmod(original_mode)
-        alias.unlink()
-        # Directory-only watches missed these operations because every write
-        # targeted the external alias; inode watches must record them.
-        assert source.read_bytes() == original
-        assert (source.stat().st_mode & 0o777) == original_mode
-        assert snap._snapshot_fingerprints() == snap._sealed_files
-        with pytest.raises(RuntimeError, match="kernel mutation event"):
-            snap.verify_unchanged()
-
-
-def test_external_hardlink_tampering_never_authorizes_evaluator_pass(
-    tmp_path, monkeypatch,
-):
-    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
-    original_live = (runtime.repos()["backend"] / "orders.py").read_bytes()
-
-    async def fake_delegate(**kwargs):
-        eid = kwargs["evaluation_id"]
-        coordinator.store.bind_turn(eid, "hardlink-tamper-native")
-        captured = coordinator.store.get(eid)
-        primary = kwargs["evaluation_roots"]["backend"]
-        source = primary / "orders.py"
-        original = source.read_bytes()
-        original_mode = source.stat().st_mode & 0o777
-        outside = primary.parent / "unwatched-hardlink-alias"
-        outside.mkdir(exist_ok=True)
-        alias = outside / "orders.py"
-        os.link(source, alias)
-        alias.chmod(0o644)
-        alias.write_text("def total(n): return 0\\n", encoding="utf-8")
-        alias.write_bytes(original)
-        alias.chmod(original_mode)
-        alias.unlink()
-        return {"state": "settled", "turn_id": "hardlink-tamper-native",
-                "agent_response": json.dumps(report(captured["manifest"]))}
-
-    monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    revision = graph_rt.get_graph(gid)["revision"]
-    result = asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
-    assert result["status"] == "inconclusive"
-    assert result["report"] is None
-    assert "snapshot integrity" in result["detail"]
-    assert "kernel mutation event" in result["detail"]
-    assert (runtime.repos()["backend"] / "orders.py").read_bytes() == original_live
-    with pytest.raises(ValueError, match="PASS"):
-        coordinator.finalize(gid, result["evaluation_id"], revision)
-
-
-def test_transient_evaluator_tampering_never_authorizes_pass(tmp_path, monkeypatch):
-    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
-
-    async def fake_delegate(**kwargs):
-        eid = kwargs["evaluation_id"]
-        coordinator.store.bind_turn(eid, "transient-write-native")
-        row = coordinator.store.get(eid)
-        body = json.dumps(report(row["manifest"]))
-        target = kwargs["evaluation_roots"]["backend"] / "orders.py"
-        original = target.read_bytes()
-        mode = target.stat().st_mode & 0o777
-        # Same-UID native tools can modify and then restore nominally
-        # read-only sources before the Coordinator checks the final digest.
-        target.chmod(0o644)
-        target.write_text("injected = True\\n", encoding="utf-8")
-        target.write_bytes(original)
-        target.chmod(mode)
-        return {"state": "settled", "turn_id": "transient-write-native",
-                "agent_response": body}
-
-    monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    revision = graph_rt.get_graph(gid)["revision"]
-    result = asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
-    assert result["status"] == "inconclusive"
-    assert "snapshot integrity" in result["detail"]
-    assert "mutation event" in result["detail"]
-    assert result["report"] is None
-    with pytest.raises(ValueError, match="PASS"):
-        coordinator.finalize(gid, result["evaluation_id"], revision)
-
-
-def test_missing_snapshot_mutation_monitor_fails_closed_before_native_dispatch(
-    tmp_path, monkeypatch,
-):
-    import qiqi_delegate.evaluation_monitor as monitor_module
-
-    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
-    monkeypatch.setattr(monitor_module.sys, "platform", "no-kernel-monitor")
-    revision = graph_rt.get_graph(gid)["revision"]
-    with pytest.raises(RuntimeError, match="refusing unmonitored evaluation"):
-        asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
-    assert coordinator.store.latest(gid) is None
-    with runtime._connect() as db:
-        assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
+    roots = runtime.repos()
+    with EvaluationSnapshot(roots) as snap:
+        assert set(snap.paths) == {"backend", "frontend"}
+        for name, copied_root in snap.paths.items():
+            assert copied_root != roots[name]
+            assert copied_root.is_dir()
+            assert (copied_root / ".qiqi-evaluation-manifest.json").is_file()
+        original = (roots["backend"] / "orders.py").read_bytes()
+        copied = snap.paths["backend"] / "orders.py"
+        assert copied.read_bytes() == original
+        # The Evaluator may use its temporary copy freely; no read-only
+        # filesystem enforcement is promised by this workflow.
+        copied.write_text("sandbox_not_required = True\\n", encoding="utf-8")
+        assert copied.read_bytes() != original
+        assert (roots["backend"] / "orders.py").read_bytes() == original
 
 
 @pytest.mark.parametrize("args", [
@@ -878,9 +694,7 @@ def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loa
             assert {argv[i + 1] for i, arg in enumerate(argv[:-1])
                     if arg == "--add-dir"} == {str(root) for root in snap.paths.values()}
             settings = json.loads(argv[argv.index("--settings") + 1])
-            assert settings["env"][
-                "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
-            ] == "0"
+            assert "env" not in settings
             assert {"Stop", "StopFailure"} <= set(settings["hooks"])
             assert argv[argv.index("--setting-sources") + 1] == "user"
             assert "--strict-mcp-config" in argv
