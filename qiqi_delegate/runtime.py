@@ -35,7 +35,7 @@ _EVALUATOR_VALUE_OPTIONS = {
         "--agent", "--agents", "--fallback-model", "--system-prompt",
         "--system-prompt-file", "--append-system-prompt",
         "--append-system-prompt-file", "--system-prompt-snapshot",
-        "--autocompact", "--permission-prompt-tool",
+        "--autocompact",
         "--betas", "--plugin-dir",
         "--debug-file", "--advisor",
     }),
@@ -148,30 +148,44 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
         index += 1
 
 
-_CLAUDE_EVALUATOR_PROMPT_FILE_OPTIONS = frozenset({
+_CLAUDE_EVALUATOR_PATH_OPTIONS = frozenset({
     "--system-prompt-file", "--append-system-prompt-file",
+    "--add-dir", "--plugin-dir", "--debug-file",
 })
 
 
-def _resolve_evaluator_claude_prompt_file_args(args: list[str], route_root: Path) -> list[str]:
-    """Resolve prompt files from the routing workspace, not the neutral evaluator CWD.
+def _resolve_evaluator_claude_path_args(args: list[str], route_root: Path) -> list[str]:
+    """Resolve evaluator CLI paths relative to the agent-routing.yaml directory.
 
-    The route lives in route_root/agent-routing.yaml. Only evaluator arguments
-    are normalized; ordinary Peers retain their user-configured native args.
-    The native Claude CLI remains responsible for checking file existence.
+    The evaluator starts in a neutral CWD, not the operator's routing workspace.
+    Only known filesystem path operands are normalized; unrelated CLI values
+    and ordinary Peer routes retain their original semantics. Claude validates
+    path existence and file types at native startup.
     """
     resolved = list(args)
-    for index, token in enumerate(args):
-        option, equals, inline_value = token.strip().partition("=")
-        if option not in _CLAUDE_EVALUATOR_PROMPT_FILE_OPTIONS:
+
+    def absolute(value: str) -> str:
+        return str((route_root / Path(value).expanduser()).resolve())
+
+    index = 0
+    while index < len(args):
+        option, equals, inline_value = args[index].strip().partition("=")
+        if option not in _CLAUDE_EVALUATOR_PATH_OPTIONS:
+            index += 1
             continue
-        # Interactive argv arity has already been validated before this call.
-        value = inline_value if equals else args[index + 1]
-        absolute = str((route_root / Path(value).expanduser()).resolve())
+        # _validate_interactive_evaluator_argv has checked option arity.
         if equals:
-            resolved[index] = f"{option}={absolute}"
+            resolved[index] = f"{option}={absolute(inline_value)}"
         else:
-            resolved[index + 1] = absolute
+            index += 1
+            resolved[index] = absolute(args[index])
+        if option == "--add-dir":
+            # Unlike --plugin-dir, Claude --add-dir consumes multiple paths.
+            while (index + 1 < len(args) and
+                   not args[index + 1].strip().startswith("-")):
+                index += 1
+                resolved[index] = absolute(args[index])
+        index += 1
     return resolved
 
 
@@ -836,7 +850,7 @@ class DelegateRuntime:
                     )
             _validate_interactive_evaluator_argv(adapter, args)
             if adapter == "claude":
-                args = _resolve_evaluator_claude_prompt_file_args(args, self.root)
+                args = _resolve_evaluator_claude_path_args(args, self.root)
                 args += [
                     "--setting-sources", "user",
                     "--strict-mcp-config",
