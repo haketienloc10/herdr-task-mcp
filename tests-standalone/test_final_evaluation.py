@@ -802,6 +802,9 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("claude", ["--restricted=false"]),
     ("claude", ["--restricted=true"]),
     ("claude", ["--verbose=true"]),
+    # Print-mode-only option is invalid even when passed as a plain switch.
+    ("claude", ["--no-session-persistence"]),
+    ("claude", ["--model", "claude-sonnet-5-5", "--no-session-persistence"]),
     ("claude", ["--no-session-persistence=false"]),
     ("claude", ["--debug=mcp,startup", "doctor"]),
     ("claude", ["--debug", "mcp,startup"]),
@@ -956,6 +959,18 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
 
 
 @pytest.mark.parametrize("agent,native_args", [
+    # Officially supported foreground Claude options and their value arities.
+    ("claude", ["--autocompact", "500k"]),
+    ("claude", ["--autocompact=auto", "--model", "claude-sonnet-5-5"]),
+    ("claude", ["--append-system-prompt-file", "./instructions.txt"]),
+    ("claude", ["--append-system-prompt-file=./instructions.txt"]),
+    ("claude", ["--system-prompt-file", "./instructions.txt"]),
+    ("claude", ["--system-prompt-file=./instructions.txt"]),
+    ("claude", ["--system-prompt-snapshot", "off"]),
+    ("claude", ["--system-prompt-snapshot=on"]),
+    ("claude", ["--system-prompt-file", "./base.txt",
+                "--append-system-prompt-file", "./extra.txt",
+                "--system-prompt-snapshot", "off", "--autocompact", "500k"]),
     ("claude", ["--advisor", "opus"]),
     ("claude", ["--advisor=opus"]),
     ("claude", ["--advisor", "opus", "--model", "claude-sonnet-5-5"]),
@@ -1046,6 +1061,14 @@ def test_evaluator_allows_command_names_as_native_option_values(
 
 
 @pytest.mark.parametrize("agent, native_args, expected", [
+    ("claude", ["--autocompact"], "requires a value"),
+    ("claude", ["--autocompact="], "requires a value"),
+    ("claude", ["--append-system-prompt-file"], "requires a value"),
+    ("claude", ["--append-system-prompt-file="], "requires a value"),
+    ("claude", ["--system-prompt-file"], "requires a value"),
+    ("claude", ["--system-prompt-file="], "requires a value"),
+    ("claude", ["--system-prompt-snapshot"], "requires a value"),
+    ("claude", ["--system-prompt-snapshot="], "requires a value"),
     ("claude", ["--advisor"], "requires a value"),
     ("claude", ["--advisor=", "--model", "claude-sonnet-5-5"], "requires a value"),
     ("claude", ["--advisor", "--model", "claude-sonnet-5-5"], "requires a value"),

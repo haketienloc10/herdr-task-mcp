@@ -33,7 +33,9 @@ _EVALUATOR_VALUE_OPTIONS = {
         "--add-dir", "--tools", "--allowedTools", "--allowed-tools",
         "--disallowedTools", "--disallowed-tools",
         "--agent", "--agents", "--fallback-model", "--system-prompt",
-        "--append-system-prompt", "--permission-prompt-tool",
+        "--system-prompt-file", "--append-system-prompt",
+        "--append-system-prompt-file", "--system-prompt-snapshot",
+        "--autocompact", "--permission-prompt-tool",
         "--betas", "--plugin-dir",
         "--debug-file", "--advisor",
     }),
@@ -53,7 +55,7 @@ _EVALUATOR_OPTIONAL_EQUALS_OPTIONS = {
 _EVALUATOR_SWITCH_OPTIONS = {
     "claude": frozenset({
         "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
-        "--verbose", "--no-session-persistence",
+        "--verbose",
         "--chrome", "--no-chrome", "--ide", "--restricted",
         "--strict-mcp-config", "--disable-slash-commands",
     }),
