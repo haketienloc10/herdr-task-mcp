@@ -603,7 +603,7 @@ def test_evaluation_snapshot_is_a_disposable_complete_working_copy(tmp_path):
         assert copied.read_bytes() == original
         # The Evaluator may use its temporary copy freely; no read-only
         # filesystem enforcement is promised by this workflow.
-        copied.write_text("sandbox_not_required = True\\n", encoding="utf-8")
+        copied.write_text("temporary_copy = True\\n", encoding="utf-8")
         assert copied.read_bytes() != original
         assert (roots["backend"] / "orders.py").read_bytes() == original
 
