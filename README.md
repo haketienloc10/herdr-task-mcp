@@ -152,7 +152,8 @@ vẫn được giữ nguyên (ví dụ `--name attach` hoặc `--profile review`
 không phải subcommand). Claude `--add-dir` có thể nhận nhiều thư mục;
 `--restricted` của Claude, `--approve-for-me`/`--not-so-yolo`,
 `--no-daemon`/`--strict-config` của Codex là cờ không có giá trị.
-Claude hỗ trợ `--debug` hoặc `--debug=filter`, cùng các aliases
+Claude hỗ trợ `--advisor <model>` và `--debug` hoặc `--debug=filter`,
+cùng các aliases
 `-n`, `--allowed-tools`, `--disallowed-tools`. Các tùy chọn
 `--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`
 nhận nhiều quy tắc sau một flag. Codex `--image`/`-i` hỗ trợ nhiều
@@ -160,8 +161,9 @@ nhận nhiều quy tắc sau một flag. Codex `--image`/`-i` hỗ trợ nhiều
 `--image=before.png after.png`, `-ibefore.png after.png`).
 Cú pháp gán giá trị cho
 zero-arity flag như `--search=false` sẽ bị từ chối. Model, effort, permission tiếp tục
-do route YAML lựa chọn. Route Peer thông thường không bị giới hạn bởi
-bộ kiểm tra này.
+do route YAML lựa chọn. `workspace_info().route_details.model` nhận
+diện cả `--model` và native alias `-m` (bao gồm `-mVALUE`).
+Route Peer thông thường không bị giới hạn bởi bộ kiểm tra này.
 
 Lưu ý: `--add-dir` cung cấp quyền truy cập thư mục, không áp đặt
 filesystem chỉ đọc. Phiên Final Evaluator dùng bản sao tạm của toàn bộ
