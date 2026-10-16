@@ -137,7 +137,8 @@ Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
 `AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải
 dùng phiên native mới**, không thể `resume`/`fork` đối với Codex, hoặc
 `--resume`/`-r`, `--continue`/`-c`, `--fork-session`,
-`--from-pr`, `--teleport`, `--session-id` đối với Claude. Các tham số
+`--from-pr`, `--teleport`, `--session-id`, `attach`, `respawn`,
+hoặc `--cloud`/`--remote` đối với Claude (bao gồm dạng `--flag=value`). Các tham số
 có thể khôi phục ngữ cảnh không đáng tin cậy từ phiên cũ dù CWD trung lập.
 Route Peer thông thường vẫn cho phép các flags native này nếu cần.
 
