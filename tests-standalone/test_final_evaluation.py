@@ -623,6 +623,74 @@ def test_evaluator_detects_transient_mutation_even_if_final_hash_matches(
             snap.verify_unchanged()
 
 
+def test_snapshot_inode_watch_detects_mutation_through_external_hardlink(tmp_path):
+    """A hard link outside monitored directories still refers to the same inode."""
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        primary = snap.paths["backend"]
+        source = primary / "orders.py"
+        original = source.read_bytes()
+        original_mode = source.stat().st_mode & 0o777
+        # An external alias on the snapshot filesystem, deliberately outside
+        # every watched snapshot directory and its subdirectories.
+        outside = primary.parent / "unwatched-hardlink-alias"
+        outside.mkdir()
+        alias = outside / "orders.py"
+        snap.seal_inputs()
+        os.link(source, alias)
+        alias.chmod(0o644)
+        alias.write_text("def total(n): return 'tampered'\\n", encoding="utf-8")
+        assert source.read_bytes() != original
+        alias.write_bytes(original)
+        alias.chmod(original_mode)
+        alias.unlink()
+        # Directory-only watches missed these operations because every write
+        # targeted the external alias; inode watches must record them.
+        assert source.read_bytes() == original
+        assert (source.stat().st_mode & 0o777) == original_mode
+        assert snap._snapshot_fingerprints() == snap._sealed_files
+        with pytest.raises(RuntimeError, match="kernel mutation event"):
+            snap.verify_unchanged()
+
+
+def test_external_hardlink_tampering_never_authorizes_evaluator_pass(
+    tmp_path, monkeypatch,
+):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    original_live = (runtime.repos()["backend"] / "orders.py").read_bytes()
+
+    async def fake_delegate(**kwargs):
+        eid = kwargs["evaluation_id"]
+        coordinator.store.bind_turn(eid, "hardlink-tamper-native")
+        captured = coordinator.store.get(eid)
+        primary = kwargs["evaluation_roots"]["backend"]
+        source = primary / "orders.py"
+        original = source.read_bytes()
+        original_mode = source.stat().st_mode & 0o777
+        outside = primary.parent / "unwatched-hardlink-alias"
+        outside.mkdir(exist_ok=True)
+        alias = outside / "orders.py"
+        os.link(source, alias)
+        alias.chmod(0o644)
+        alias.write_text("def total(n): return 0\\n", encoding="utf-8")
+        alias.write_bytes(original)
+        alias.chmod(original_mode)
+        alias.unlink()
+        return {"state": "settled", "turn_id": "hardlink-tamper-native",
+                "agent_response": json.dumps(report(captured["manifest"]))}
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    result = asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
+    assert result["status"] == "inconclusive"
+    assert result["report"] is None
+    assert "snapshot integrity" in result["detail"]
+    assert "kernel mutation event" in result["detail"]
+    assert (runtime.repos()["backend"] / "orders.py").read_bytes() == original_live
+    with pytest.raises(ValueError, match="PASS"):
+        coordinator.finalize(gid, result["evaluation_id"], revision)
+
+
 def test_transient_evaluator_tampering_never_authorizes_pass(tmp_path, monkeypatch):
     runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
 
