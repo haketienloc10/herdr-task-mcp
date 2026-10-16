@@ -151,9 +151,11 @@ cậy. PR này **không triển khai sandbox, inotify hoặc kiểm chứng tín
 biến của snapshot trước tác nhân đối kháng**; hardening như vậy nằm
 ngoài phạm vi và được theo dõi riêng tại Issue #20.
 
-Runtime sở hữu native result hooks; không thêm `--settings` hoặc
+Runtime sở hữu native Stop/StopFailure hooks; không thêm `--settings` hoặc
 `hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
-vào `args`. Installer **không ghi đè** `agent-routing.yaml`
+vào `args`. Claude Final Evaluation từ chối `--safe-mode` vì chế độ này
+vô hiệu hóa native hooks cần thiết để capture kết quả. Route Peer thông thường
+vẫn có thể sử dụng `--safe-mode`. Installer **không ghi đè** `agent-routing.yaml`
 đã tồn tại; workspace cũ cần tự cập nhật cấu hình.
 
 ## Workflow mới: Lead → MCP → Peer (server-owned orchestration)
