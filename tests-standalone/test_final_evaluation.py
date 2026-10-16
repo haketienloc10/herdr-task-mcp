@@ -287,19 +287,21 @@ def test_snapshot_drift_includes_dirty_and_untracked_changes(tmp_path):
 
 
 
-def test_abandoned_native_capture_is_restored_after_restart(tmp_path):
+def test_abandoned_native_capture_never_restores_pass_without_attestation(tmp_path):
     from qiqi_delegate.final_eval_store import FinalEvaluationStore
+    from qiqi_delegate.maintenance import recover_final_evaluation
+
     runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
     graph = graph_rt.get_graph(gid)
     binding = requests.graph_binding(gid)
     manifest = inspect_roots(runtime.repos())
-    eid, created = coordinator.store.reserve(
+    reserved, created = coordinator.store.reserve(
         gid, graph["revision"], binding["request_id"],
         binding["request_revision"], "codex-evaluator",
         manifest, manifest_digest(manifest),
     )
     assert created
-    evaluation_id = eid["evaluation_id"]
+    evaluation_id = reserved["evaluation_id"]
     coordinator.store.bind_turn(evaluation_id, "recovery-capture")
     body = json.dumps(report(manifest))
     with sqlite3.connect(runtime.db) as db:
@@ -312,17 +314,71 @@ def test_abandoned_native_capture_is_restored_after_restart(tmp_path):
             "UPDATE final_evaluations SET owner_pid=?, owner_start_token=? "
             "WHERE evaluation_id=?", (987654321, "dead-process", evaluation_id),
         )
-
+    # Simulate process death after native response persistence but BEFORE the
+    # coordinator's snapshot event queue/hash verification. Even an unchanged
+    # manifest and a syntactically valid PASS cannot prove input integrity.
     restarted = FinalEvaluationStore(runtime.db)
     restored = restarted.get(evaluation_id)
-    assert restored["status"] == "passed"
+    assert restored["status"] == "interrupted"
     assert restored["turn_id"] == "recovery-capture"
     assert restored["raw_response"] == body
-    assert restored["report"]["verdict"] == "pass"
+    assert restored["native_capture"]["response"] == body
+    assert restored["report"] is None
+    assert "integrity attestation" in restored["detail"]
     assert restarted.recover_abandoned() == 0
-    assert coordinator.finalize(gid, evaluation_id, graph["revision"])[
-        "finalized_at_ns"
-    ]
+    with pytest.raises(ValueError, match="PASS"):
+        coordinator.finalize(gid, evaluation_id, graph["revision"])
+    with pytest.raises(RuntimeError, match="operator"):
+        restarted.reserve(
+            gid, graph["revision"], binding["request_id"],
+            binding["request_revision"], "codex-evaluator",
+            manifest, manifest_digest(manifest),
+        )
+    cleared = recover_final_evaluation(
+        workspace=runtime.root, evaluation_id=evaluation_id,
+        worker_termination_confirmed=True,
+    )
+    assert cleared["status"] == "errored"
+    assert cleared["report"] is None
+
+
+def test_abandoned_capture_with_held_claim_cannot_authorize_pass(tmp_path):
+    from qiqi_delegate.final_eval_store import FinalEvaluationStore
+
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    binding = requests.graph_binding(gid)
+    manifest = inspect_roots(runtime.repos())
+    reserved, _ = coordinator.store.reserve(
+        gid, graph_rt.get_graph(gid)["revision"], binding["request_id"],
+        binding["request_revision"], "codex-evaluator",
+        manifest, manifest_digest(manifest),
+    )
+    eid = reserved["evaluation_id"]
+    turn_id = "held-claim-capture"
+    coordinator.store.bind_turn(eid, turn_id)
+    native = json.dumps(report(manifest))
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "INSERT INTO turns VALUES (?,?,?,?,?,?,?)",
+            (turn_id, "native-session", "backend", "codex-evaluator",
+             "settled", native, 123),
+        )
+        db.execute(
+            "INSERT INTO write_claims(repository,claim_id,created_at_ns,repository_root) "
+            "VALUES (?,?,?,?)",
+            ("backend", "turn:" + turn_id, 123, str(runtime.repos()["backend"])),
+        )
+        db.execute(
+            "UPDATE final_evaluations SET owner_pid=?, owner_start_token=? "
+            "WHERE evaluation_id=?", (987654321, "dead-process", eid),
+        )
+    row = FinalEvaluationStore(runtime.db).get(eid)
+    assert row["status"] == "interrupted"
+    assert row["report"] is None
+    assert row["raw_response"] == native
+    assert "write claim" in row["detail"]
+    with pytest.raises(ValueError, match="PASS"):
+        coordinator.finalize(gid, eid, graph_rt.get_graph(gid)["revision"])
 
 
 def test_unproven_old_worker_requires_operator_clearance(tmp_path):
