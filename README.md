@@ -141,12 +141,19 @@ dùng phiên native mới**, không thể `resume`/`fork` đối với Codex, ho
 có thể khôi phục ngữ cảnh không đáng tin cậy từ phiên cũ dù CWD trung lập.
 Route Peer thông thường vẫn cho phép các flags native này nếu cần.
 
-Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**. MCP hash
-toàn bộ snapshot (kể cả metadata và task sources) trước khi dispatch và
-kiểm tra lại sau native capture; nếu byte/file/mode thay đổi thì kết quả
-`inconclusive`, không thể PASS. Kiểm tra này không phải OS-level sandbox
-và không loại trừ mọi hành vi side effect bên ngoài snapshot; chỉ chạy
-với user/managed settings, tools và workspace đáng tin cậy.
+Lưu ý `--permission-mode auto` **không tạo sandbox chỉ đọc**.
+Final Evaluation trên **Linux** thiết lập watcher kernel `inotify`
+cho tất cả thư mục snapshot **trước native dispatch**, đồng thời hash
+toàn bộ file/metadata trước và sau phiên. Bất kỳ sự kiện write, chmod,
+create, delete hoặc rename nào (kể cả sửa rồi khôi phục dữ liệu y hệt)
+đều làm kết quả `inconclusive` và chặn PASS. Nếu không thể khởi động
+watcher hoặc OS không hỗ trợ, MCP từ chối Final Evaluation trước dispatch
+thay vì chỉ dựa vào hash cuối. Watcher là **phát hiện thay đổi, không phải
+OS sandbox**: inotify có hạn chế (ví dụ ghi trực tiếp qua memory mapping),
+không chặn side effect ngoài snapshot và không thay thế quyền cách ly
+filesystem của tiến trình. Không dùng route permissive với mã không đáng
+tin cậy nếu chưa có OS-enforced sandbox thực sự; tránh mọi user/managed
+settings, hooks và tools không đáng tin cậy.
 
 Runtime sở hữu native result hooks; không thêm `--settings` hoặc
 `hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
@@ -531,10 +538,12 @@ including cross-module contracts, before delivery is finalized.
    runtime chặn override của các flags bảo vệ và result hooks.
    Mặc định cài mới: Claude dùng `--permission-mode auto`.
    **Các flags permissive có thể cho evaluator ghi vào bản sao snapshot.**
-   Runtime sẽ hash lại toàn bộ snapshot sau native execution; bất kỳ thay
-   đổi nào cũng làm evaluation inconclusive, không được PASS. Snapshot được
-   mount bằng `--add-dir` thay vì trở thành process CWD, tránh candidate
-   memory file ở vị trí khởi chạy. Không dùng `--safe-mode` vì cờ này
+   Runtime sẽ so hash toàn bộ snapshot sau native execution và trên
+   Linux còn duy trì watcher inotify từ trước dispatch để phát hiện cả
+   sửa đổi tạm thời rồi khôi phục nội dung cũ. Nếu watcher không khả dụng,
+   Final Evaluation từ chối trước dispatch. Snapshot được mount bằng
+   `--add-dir` thay vì trở thành process CWD, tránh candidate memory
+   file ở vị trí khởi chạy. Không dùng `--safe-mode` vì cờ này
    cũng vô hiệu hóa native Stop hooks cần cho capture. Đây không phải
    OS-level sandbox, và không ngăn mọi side effect ở ngoài snapshot.
 4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
