@@ -76,10 +76,15 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
     values = _EVALUATOR_VALUE_OPTIONS[adapter]
     switches = _EVALUATOR_SWITCH_OPTIONS[adapter]
     optional_equals = _EVALUATOR_OPTIONAL_EQUALS_OPTIONS[adapter]
-    # Both options consume one or more paths up to the next CLI flag:
-    # Claude --add-dir and Codex --image (also accepts comma-delimited paths).
-    # Codex --add-dir remains single-valued.
-    variadic = {"--add-dir"} if adapter == "claude" else {"--image", "-i"}
+    # Consume all native list-option values until the next flag. Codex
+    # --image and Claude --add-dir/tool lists are variadic; Codex --add-dir
+    # stays single-valued. The first list value may also be attached with
+    # --option=value or, for Codex -i, with a short attached value.
+    variadic = (
+        {"--add-dir", "--allowedTools", "--allowed-tools",
+         "--disallowedTools", "--disallowed-tools"}
+        if adapter == "claude" else {"--image", "-i"}
+    )
     index = 0
     while index < len(args):
         token = args[index].strip()
@@ -117,12 +122,12 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
                     raise ValueError(
                         f"Final Evaluation requires a value for {option}"
                     )
-                if option in variadic:
-                    # Keep consuming paths until the next CLI flag;
-                    # values are data, not subcommands.
-                    while (index + 1 < len(args) and
-                           not args[index + 1].strip().startswith("-")):
-                        index += 1
+            if option in variadic:
+                # An attached first value also permits trailing list values.
+                # Never mistake a tool rule or image path for a subcommand.
+                while (index + 1 < len(args) and
+                       not args[index + 1].strip().startswith("-")):
+                    index += 1
         elif option in optional_equals:
             if equals and not inline_value:
                 raise ValueError(
