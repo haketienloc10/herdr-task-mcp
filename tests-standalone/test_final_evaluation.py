@@ -531,7 +531,7 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
         assert "--yolo" not in argv
         if route == "codex-evaluator":
             assert argv[argv.index("--sandbox") + 1] == "read-only"
-            assert "--skip-git-repo-check" in argv
+            assert "--skip-git-repo-check" not in argv
         else:
             assert "--restricted" not in argv  # User did not request it.
             assert "--tools" not in argv
@@ -775,6 +775,13 @@ def test_codex_evaluator_refuses_cwd_override_but_regular_route_remains_flexible
     ("codex", ["--approve-for-me=false"]),
     ("codex", ["--not-so-yolo=true"]),
     ("codex", ["--no-alt-screen=true"]),
+    ("codex", ["--skip-git-repo-check"]),
+    ("codex", ["--skip-git-repo-check=true"]),
+    ("claude", ["--max-turns", "5"]),
+    ("claude", ["--max-turns=5"]),
+    ("claude", ["--max-budget-usd", "10"]),
+    ("claude", ["--max-budget-usd=10"]),
+    ("claude", ["--model", "claude-sonnet-5-5", "--max-turns", "3"]),
     ("claude", ["doctor"]),
     ("claude", ["ultrareview"]),
     ("claude", ["update"]),
