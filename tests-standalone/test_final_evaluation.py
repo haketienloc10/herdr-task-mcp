@@ -942,6 +942,9 @@ def test_claude_safe_mode_is_peer_only_because_evaluation_requires_stop_hooks(
 
 
 @pytest.mark.parametrize("agent,native_args", [
+    ("claude", ["--advisor", "opus"]),
+    ("claude", ["--advisor=opus"]),
+    ("claude", ["--advisor", "opus", "--model", "claude-sonnet-5-5"]),
     ("claude", ["--debug"]),
     ("claude", ["--debug=mcp,startup"]),
     ("claude", ["--debug=startup", "--model", "claude-sonnet-5-5"]),
@@ -1029,6 +1032,9 @@ def test_evaluator_allows_command_names_as_native_option_values(
 
 
 @pytest.mark.parametrize("agent, native_args, expected", [
+    ("claude", ["--advisor"], "requires a value"),
+    ("claude", ["--advisor=", "--model", "claude-sonnet-5-5"], "requires a value"),
+    ("claude", ["--advisor", "--model", "claude-sonnet-5-5"], "requires a value"),
     ("claude", ["--debug="], "requires a nonempty value"),
     ("codex", ["--image"], "requires a value"),
     ("codex", ["--image", "--model", "gpt-6"], "requires a value"),
