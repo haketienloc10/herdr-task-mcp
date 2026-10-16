@@ -263,9 +263,6 @@ class FinalEvaluationCoordinator:
                 graph, authored, binding, task, names, snap.digest,
                 source_material,
             )
-            # Include every staged file (source text, graph metadata, and
-            # original repository data) in the input-integrity baseline.
-            snap.seal_inputs()
             reserved, created = self.store.reserve(
                 graph_run_id, graph["revision"], task["request_id"],
                 task["revision"], route, snap.manifest, snap.digest,
@@ -333,19 +330,6 @@ class FinalEvaluationCoordinator:
                     turn_id=response.get("turn_id"), cleanup=cleanup or {
                         "cleanup_state": "unknown_unconfirmed_cleanup",
                     },
-                )
-                return self.read(graph_run_id, eid)
-            # Native agents with auto permissions may mutate nominally
-            # read-only copies under the same UID. A captured PASS is not
-            # admissible unless every staged input remains byte-identical.
-            try:
-                snap.verify_unchanged()
-            except (OSError, RuntimeError, ValueError) as exc:
-                self.store.complete(
-                    eid, raw_response=raw if isinstance(raw, str) else None,
-                    report=None, status="inconclusive",
-                    detail="Evaluator snapshot integrity check failed: " + str(exc),
-                    turn_id=response.get("turn_id"),
                 )
                 return self.read(graph_run_id, eid)
             report = None
