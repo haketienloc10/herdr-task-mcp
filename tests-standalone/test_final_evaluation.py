@@ -1136,14 +1136,18 @@ def test_claude_evaluator_rebases_prompt_files_against_routing_workspace(
 
     workspace_root = tmp_path / "control"
     workspace_root.mkdir()
+    original_args = list(args)
     actual = _resolve_evaluator_claude_prompt_file_args(args, workspace_root)
     for original, normalized in zip(expected, actual):
-        if original.startswith("--"):
+        if original.startswith("--") and "=" in original:
+            option, relative = original.split("=", 1)
+            assert normalized == f"{option}={(workspace_root / relative).resolve()}"
+        elif original.startswith("--"):
             assert normalized == original
         else:
             assert normalized == str((workspace_root / original).resolve())
     # Route arguments are never mutated in place.
-    assert args[0] == expected[0]
+    assert args == original_args
 
 
 def test_claude_evaluator_keeps_absolute_prompt_files_unchanged(tmp_path):
