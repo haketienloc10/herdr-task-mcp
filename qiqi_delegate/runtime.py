@@ -83,8 +83,10 @@ def _validate_interactive_evaluator_argv(adapter: str, args: list[str]) -> None:
                  short in values and token.startswith(short) and len(token) > 2),
                 None,
             )
-            if attached and not equals:
-                option, inline_value, equals = attached, token[len(attached):], "="
+            if attached and option not in values:
+                option = attached
+                inline_value = token[len(attached):].removeprefix("=")
+                equals = "="
         else:
             raise ValueError(
                 "Final Evaluation requires a fresh native session; "
