@@ -986,7 +986,8 @@ class TaskRequestStore:
         binding = self.graph_binding(graph_run_id)
         if binding is None:
             raise ValueError("graph has no bound task request")
-        # Optimistic preflight. Revalidate every file source under the write lock.
+        # This preflight may inspect mutable files, but it is NOT used as proof
+        # for a rebind. Mutable file-backed requests fail closed below.
         ready = self.assert_ready(binding["request_id"], expected_request_revision)
         if ready["stale_sources"]:
             raise ValueError("rebind blocked by stale context sources")
@@ -1019,8 +1020,17 @@ class TaskRequestStore:
                 raise RuntimeError("stale task context revision while rebinding")
             if expected_request_revision <= bound["request_revision"]:
                 raise ValueError("rebind requires a newer task request revision")
-            if self._stale_source_ids(json.loads(request["sources_json"])):
-                raise ValueError("rebind blocked by stale context sources")
+            sources = json.loads(request["sources_json"])
+            # SQLite write locks cannot stop other processes from editing
+            # workspace or repository files after hashing. No finite number
+            # of precommit hash checks can prove that live file bytes stayed
+            # fixed. Fail closed until immutable source snapshots are available.
+            if any(source["kind"] in {"repo_file", "workspace_file"}
+                   for source in sources):
+                raise ValueError(
+                    "safe rebind requires immutable context sources; "
+                    "repo_file/workspace_file references cannot be safely re-bound"
+                )
             if (request["assessment_json"] is None or
                     _request_content_digest(request) != baseline["context_digest"]):
                 raise ValueError(
