@@ -1135,14 +1135,22 @@ async def start_graph(
         raise ValueError("task_request_id is required for context-bound graph")
     if task_request_id is not None:
         _preflight_bound_packets(authored, current, requirement_map)
+    def bind_created_graph(conn, graph_run_id):
+        if task_request_id is not None:
+            task_requests.bind_graph(
+                graph_run_id, task_request_id, current["revision"],
+                [node.node_id for node in authored.nodes], requirement_map,
+                connection=conn,
+            )
+
+    # Both the persisted graph and its readiness guard commit atomically.
+    # If revision/source validation fails after the preflight, the graph and
+    # all newly created node states are rolled back instead of left unbound.
     result = graph_runtime.start_graph(
         authored, repository_names=runtime.repos().keys(),
+        on_created=bind_created_graph if task_request_id is not None else None,
     )
     if task_request_id is not None:
-        task_requests.bind_graph(
-            result["graph_run_id"], task_request_id, current["revision"],
-            [node.node_id for node in authored.nodes], requirement_map,
-        )
         result["task_request_binding"] = task_requests.graph_binding(result["graph_run_id"])
     else:
         result["task_readiness_policy"] = "legacy_unassessed"
