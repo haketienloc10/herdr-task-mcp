@@ -558,8 +558,11 @@ Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó khô
   `graph_runs.graph_json`: `graph.nodes[]` gồm `objective`, `scope`,
   `acceptance_criteria`, `constraints`, `context` (nếu có),
   `depends_on`, `repository`, `route`, kèm graph `revision` và
-  `task_request_binding`. Tool chỉ đọc, không gọi Peer, không sửa node.
-  Không dựng lại TaskPacket từ review preview hoặc suy luận thứ tự chạy.
+  `task_request_binding`. Graph definition và binding được đọc
+  bằng **một SQLite snapshot** để tránh ghép TaskPacket cũ với requirement_map
+  mới khi `reconcile_graph` diễn ra đồng thời. Tool chỉ đọc, không gọi Peer,
+  không sửa node. Không dựng lại TaskPacket từ review preview hoặc suy luận
+  thứ tự chạy.
 
 - Khi bind graph mới (hoặc bind lại sau `reconcile_graph`), runtime ghi
   fingerprint của **toàn bộ** nội dung user request, context sources và
