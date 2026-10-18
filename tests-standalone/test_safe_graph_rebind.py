@@ -363,3 +363,45 @@ def test_bound_start_graph_rolls_back_graph_if_binding_preflight_becomes_stale(
         assert db.execute("SELECT count(*) FROM graph_node_states").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM task_graph_bindings").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM task_graph_binding_snapshots").fetchone()[0] == 0
+
+
+def test_bound_graph_create_rollback_if_callback_rejects_after_graph_insert(
+    tmp_path, monkeypatch,
+):
+    runtime, requests = workspace(tmp_path)
+    req = requests.create("Retry 429 and 503 in backend")
+    ready = requests.assess(req["request_id"], 1, assessment())
+
+    import importlib
+    server = importlib.import_module("qiqi_delegate.server")
+    graph_rt = GraphRuntime(GraphRuntimeStore(runtime.db))
+    monkeypatch.setattr(server, "runtime", runtime)
+    monkeypatch.setattr(server, "task_requests", requests)
+    monkeypatch.setattr(server, "graph_runtime", graph_rt)
+
+    saw_provisional_rows = []
+    def deny_binding(db, *args, **kwargs):
+        saw_provisional_rows.append(db.execute(
+            "SELECT count(*) FROM graph_runs",
+        ).fetchone()[0])
+        assert db.execute(
+            "SELECT count(*) FROM graph_node_states",
+        ).fetchone()[0] == 1
+        raise RuntimeError("synthetic binding validation failed")
+
+    monkeypatch.setattr(requests, "_bind_graph_locked", deny_binding)
+    payload = {"nodes": [{
+        "node_id": "retry", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {"objective": "Retry 429/503", "scope": ["src"],
+                        "acceptance_criteria": ["Tests pass"]},
+    }]}
+    with pytest.raises(Exception, match="synthetic binding validation failed"):
+        asyncio.run(server.start_graph(
+            server.Graph.model_validate(payload),
+            req["request_id"], ready["revision"], {"retry": ["R1"]},
+        ))
+    assert saw_provisional_rows == [1]
+    with sqlite3.connect(runtime.db) as db:
+        for table in ("graph_runs", "graph_node_states", "task_graph_bindings",
+                      "task_graph_binding_snapshots"):
+            assert db.execute("SELECT count(*) FROM " + table).fetchone()[0] == 0
