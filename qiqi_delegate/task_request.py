@@ -870,49 +870,102 @@ class TaskRequestStore:
         if mapped != allowed:
             raise ValueError("graph does not cover all resolved requirements")
 
+    def _stale_source_ids(self, sources: list[dict[str, Any]]) -> list[str]:
+        """Revalidate every file source against current workspace/repository bytes."""
+        stale = []
+        for source in sources:
+            if source["kind"] not in {"repo_file", "workspace_file"}:
+                continue
+            try:
+                root = (self.repos()[source["repository"]]
+                        if source["kind"] == "repo_file" else self.workspace)
+                if (source["kind"] == "workspace_file" and
+                        source.get("transfer_mode") == "reference"):
+                    digest, _ = _workspace_file_hash(root, source["path"])
+                else:
+                    _, digest = _read_file(root, source["path"])
+                if digest != source["sha256"]:
+                    stale.append(source["id"])
+            except (ValueError, KeyError, OSError):
+                stale.append(source["id"])
+        return stale
+
+    def _bind_graph_locked(
+        self, db: sqlite3.Connection, graph_run_id: str, request_id: str,
+        revision: int, node_ids: list[str],
+        requirement_map: dict[str, list[str]], *,
+        replace: bool, expected_bound_revision: int | None,
+    ) -> None:
+        """Write a binding and baseline inside a caller-owned SQLite transaction."""
+        row = db.execute(
+            "SELECT user_request, sources_json, assessment_json, revision "
+            "FROM task_requests WHERE request_id=?", (request_id,),
+        ).fetchone()
+        if row is None or row["revision"] != revision:
+            raise RuntimeError("stale task context revision while binding graph")
+        assessment = (
+            json.loads(row["assessment_json"])
+            if row["assessment_json"] is not None else None
+        )
+        if (not assessment or assessment["decision"] != "direct"
+                or assessment["blocking_unknowns"]):
+            raise ValueError("implementation blocked until task readiness is direct")
+        self._check_map({"assessment": assessment}, node_ids, requirement_map)
+        if self._stale_source_ids(json.loads(row["sources_json"])):
+            raise ValueError("binding blocked by stale context sources")
+        digest = _request_content_digest(row)
+        if replace:
+            bound = db.execute(
+                "SELECT request_id, request_revision FROM task_graph_bindings "
+                "WHERE graph_run_id=?", (graph_run_id,),
+            ).fetchone()
+            if bound is None or bound["request_id"] != request_id:
+                raise ValueError("graph is not bound to this task request")
+            if (expected_bound_revision is not None and
+                    bound["request_revision"] != expected_bound_revision):
+                raise RuntimeError("task request binding changed while reconciling")
+            db.execute(
+                "UPDATE task_graph_bindings SET request_revision=?, "
+                "requirement_map_json=? WHERE graph_run_id=?",
+                (revision, json.dumps(requirement_map), graph_run_id),
+            )
+        else:
+            db.execute(
+                "INSERT INTO task_graph_bindings VALUES (?, ?, ?, ?)",
+                (graph_run_id, request_id, revision, json.dumps(requirement_map)),
+            )
+        db.execute(
+            "INSERT INTO task_graph_binding_snapshots "
+            "(graph_run_id, request_id, request_revision, context_digest) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(graph_run_id) DO UPDATE SET "
+            "request_id=excluded.request_id, "
+            "request_revision=excluded.request_revision, "
+            "context_digest=excluded.context_digest",
+            (graph_run_id, request_id, revision, digest),
+        )
+
     def bind_graph(self, graph_run_id: str, request_id: str, revision: int,
                    node_ids: list[str], requirement_map: dict[str, list[str]],
-                   *, replace: bool = False) -> None:
+                   *, replace: bool = False,
+                   connection: sqlite3.Connection | None = None,
+                   expected_bound_revision: int | None = None) -> None:
         current = self.assert_ready(request_id, revision)
         self._check_map(current, node_ids, requirement_map)
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            # A request may change between the readiness preflight and the write.
-            row = db.execute(
-                "SELECT user_request, sources_json, assessment_json, revision "
-                "FROM task_requests WHERE request_id=?", (request_id,),
-            ).fetchone()
-            if row is None or row["revision"] != revision:
-                raise RuntimeError("stale task context revision while binding graph")
-            digest = _request_content_digest(row)
-            if replace:
-                bound = db.execute(
-                    "SELECT request_id FROM task_graph_bindings WHERE graph_run_id=?",
-                    (graph_run_id,),
-                ).fetchone()
-                if bound is None or bound["request_id"] != request_id:
-                    raise ValueError("graph is not bound to this task request")
-                db.execute(
-                    "UPDATE task_graph_bindings SET request_revision=?, "
-                    "requirement_map_json=? WHERE graph_run_id=?",
-                    (revision, json.dumps(requirement_map), graph_run_id),
-                )
-            else:
-                db.execute(
-                    "INSERT INTO task_graph_bindings VALUES (?, ?, ?, ?)",
-                    (graph_run_id, request_id, revision, json.dumps(requirement_map)),
-                )
-            # Capture the assessed intent at binding time, not at recovery time.
-            db.execute(
-                "INSERT INTO task_graph_binding_snapshots "
-                "(graph_run_id, request_id, request_revision, context_digest) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(graph_run_id) DO UPDATE SET "
-                "request_id=excluded.request_id, "
-                "request_revision=excluded.request_revision, "
-                "context_digest=excluded.context_digest",
-                (graph_run_id, request_id, revision, digest),
+        if connection is not None:
+            self._bind_graph_locked(
+                connection, graph_run_id, request_id, revision, node_ids,
+                requirement_map, replace=replace,
+                expected_bound_revision=expected_bound_revision,
             )
+        else:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                self._bind_graph_locked(
+                    db, graph_run_id, request_id, revision, node_ids,
+                    requirement_map, replace=replace,
+                    expected_bound_revision=expected_bound_revision,
+                )
 
     def rebind_graph(
         self, graph_run_id: str, expected_graph_revision: int,
@@ -933,8 +986,10 @@ class TaskRequestStore:
         binding = self.graph_binding(graph_run_id)
         if binding is None:
             raise ValueError("graph has no bound task request")
-        # Inspect external file-source freshness before acquiring a SQLite write lock.
-        self.assert_ready(binding["request_id"], expected_request_revision)
+        # Optimistic preflight. Revalidate every file source under the write lock.
+        ready = self.assert_ready(binding["request_id"], expected_request_revision)
+        if ready["stale_sources"]:
+            raise ValueError("rebind blocked by stale context sources")
 
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -964,6 +1019,8 @@ class TaskRequestStore:
                 raise RuntimeError("stale task context revision while rebinding")
             if expected_request_revision <= bound["request_revision"]:
                 raise ValueError("rebind requires a newer task request revision")
+            if self._stale_source_ids(json.loads(request["sources_json"])):
+                raise ValueError("rebind blocked by stale context sources")
             if (request["assessment_json"] is None or
                     _request_content_digest(request) != baseline["context_digest"]):
                 raise ValueError(
