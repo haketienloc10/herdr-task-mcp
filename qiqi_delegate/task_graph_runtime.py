@@ -424,10 +424,11 @@ class GraphRuntime:
         graph: TaskGraph,
         *,
         repository_names: Collection[str],
+        on_created: Callable[[Any, str], None] | None = None,
     ) -> dict[str, Any]:
         validate_task_graph(graph, repository_names=repository_names)
         snapshot = initial_graph_snapshot(graph)
-        graph_run_id = self.store.create_run(snapshot)
+        graph_run_id = self.store.create_run(snapshot, on_created=on_created)
         return self.get_graph(graph_run_id)
 
     def _graph_for_run(self, graph_run_id: str) -> TaskGraph:
