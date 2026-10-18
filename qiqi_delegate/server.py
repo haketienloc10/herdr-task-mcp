@@ -1161,6 +1161,31 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @_public_tool_errors
+async def get_graph_definition(graph_run_id: str) -> dict[str, Any]:
+    """Read complete authored DAG/TaskPackets from SQLite, without dispatch or reset."""
+    result = graph_runtime.store.get_graph_definition(graph_run_id)
+    result["task_request_binding"] = task_requests.graph_binding(graph_run_id)
+    return result
+
+
+@mcp.tool()
+@_public_tool_errors
+async def rebind_graph(
+    graph_run_id: str, expected_graph_revision: int,
+    expected_request_revision: int,
+) -> dict[str, Any]:
+    """Preserve ACCEPT only for an exactly matching, snapshotted request context.
+
+    Rebind is not a substitute for reconcile_graph when any requirement, source,
+    user intent or assessment has changed. Older unanchored bindings fail closed.
+    """
+    return task_requests.rebind_graph(
+        graph_run_id, expected_graph_revision, expected_request_revision,
+    )
+
+
+@mcp.tool()
+@_public_tool_errors
 async def start_final_evaluation(
     graph_run_id: str, route: str, expected_revision: int,
 ) -> dict[str, Any]:
