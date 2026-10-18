@@ -53,6 +53,23 @@ def test_get_graph_definition_recovers_exact_authored_packets_after_restart(tmp_
     assert reloaded.get_graph_definition(gid) == restored
 
 
+@pytest.mark.parametrize("damage", ["missing", "mismatched"])
+def test_get_graph_definition_fails_closed_on_legacy_or_tampered_data(tmp_path, damage):
+    runtime, _requests, gr, _eval, gid = setup_graph(tmp_path)
+    with sqlite3.connect(runtime.db) as db:
+        if damage == "missing":
+            db.execute(
+                "UPDATE graph_runs SET graph_json=NULL WHERE graph_run_id=?", (gid,),
+            )
+        else:
+            db.execute(
+                "UPDATE graph_runs SET graph_json=? WHERE graph_run_id=?",
+                (json.dumps({"nodes": []}), gid),
+            )
+    with pytest.raises(RuntimeError, match="unavailable|fingerprint mismatch"):
+        gr.store.get_graph_definition(gid)
+
+
 def test_exact_context_rebind_preserves_accept_and_requires_fresh_eval(tmp_path):
     runtime, requests, gr, evaluator, gid = setup_graph(tmp_path)
     bound, req = _binding_data(requests, gid)
