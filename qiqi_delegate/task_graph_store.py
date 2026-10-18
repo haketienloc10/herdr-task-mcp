@@ -338,8 +338,8 @@ class GraphRuntimeStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def load_graph(self, graph_run_id: str) -> TaskGraph:
-        """Fail closed for pre-migration runs whose authored definition was never stored."""
+    def _load_authored_run(self, graph_run_id: str) -> tuple[dict[str, Any], TaskGraph]:
+        """Read and authenticate one persisted authored-graph snapshot."""
         run = self.get_run(graph_run_id)
         if run is None:
             raise RuntimeError(f"unknown graph_run_id: {graph_run_id!r}")
@@ -352,7 +352,20 @@ class GraphRuntimeStore:
         graph = _graph_from_json(encoded)
         if _graph_fingerprint(graph) != run["graph_fingerprint"]:
             raise RuntimeError("persisted authored TaskGraph fingerprint mismatch")
-        return graph
+        return run, graph
+
+    def load_graph(self, graph_run_id: str) -> TaskGraph:
+        """Fail closed for legacy graphs without full authored semantics."""
+        return self._load_authored_run(graph_run_id)[1]
+
+    def get_graph_definition(self, graph_run_id: str) -> dict[str, Any]:
+        """Return exact authored packets and dependencies without changing graph state."""
+        run, graph = self._load_authored_run(graph_run_id)
+        return {
+            "graph_run_id": run["graph_run_id"],
+            "revision": run["revision"],
+            "graph": graph.as_dict(),
+        }
 
     def get_retry_plans(self, graph_run_id: str) -> dict[str, dict[str, Any]]:
         run_id = _required_id(graph_run_id, "graph_run_id")
