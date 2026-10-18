@@ -24,6 +24,23 @@ MAX_REQUEST_CHARS = 100_000
 DECISIONS = {"direct", "targeted_discovery", "full_discovery", "blocked"}
 
 
+def _request_content_digest(row: sqlite3.Row) -> str:
+    """Hash all readiness inputs; numeric revision alone is not proof of equivalence."""
+    payload = {
+        "user_request": row["user_request"],
+        "sources": json.loads(row["sources_json"]),
+        "assessment": (
+            json.loads(row["assessment_json"])
+            if row["assessment_json"] is not None else None
+        ),
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _process_start_token(pid: int) -> str | None:
     """Linux process birth token prevents PID reuse from retaining stale claims.
 
@@ -160,6 +177,23 @@ class TaskRequestStore:
                     request_id TEXT NOT NULL,
                     request_revision INTEGER NOT NULL,
                     requirement_map_json TEXT NOT NULL
+                );
+                -- Older bindings have no baseline fingerprint and cannot be
+                -- safely re-bound after an intervening request mutation.
+                CREATE TABLE IF NOT EXISTS task_graph_binding_snapshots (
+                    graph_run_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    request_revision INTEGER NOT NULL,
+                    context_digest TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS task_graph_rebind_audit (
+                    graph_run_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    previous_revision INTEGER NOT NULL,
+                    new_revision INTEGER NOT NULL,
+                    graph_revision INTEGER NOT NULL,
+                    context_digest TEXT NOT NULL,
+                    created_at_ns INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS task_discoveries (
                     discovery_id TEXT PRIMARY KEY,
@@ -842,12 +876,21 @@ class TaskRequestStore:
         current = self.assert_ready(request_id, revision)
         self._check_map(current, node_ids, requirement_map)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            # A request may change between the readiness preflight and the write.
+            row = db.execute(
+                "SELECT user_request, sources_json, assessment_json, revision "
+                "FROM task_requests WHERE request_id=?", (request_id,),
+            ).fetchone()
+            if row is None or row["revision"] != revision:
+                raise RuntimeError("stale task context revision while binding graph")
+            digest = _request_content_digest(row)
             if replace:
-                row = db.execute(
+                bound = db.execute(
                     "SELECT request_id FROM task_graph_bindings WHERE graph_run_id=?",
                     (graph_run_id,),
                 ).fetchone()
-                if row is None or row["request_id"] != request_id:
+                if bound is None or bound["request_id"] != request_id:
                     raise ValueError("graph is not bound to this task request")
                 db.execute(
                     "UPDATE task_graph_bindings SET request_revision=?, "
@@ -859,6 +902,149 @@ class TaskRequestStore:
                     "INSERT INTO task_graph_bindings VALUES (?, ?, ?, ?)",
                     (graph_run_id, request_id, revision, json.dumps(requirement_map)),
                 )
+            # Capture the assessed intent at binding time, not at recovery time.
+            db.execute(
+                "INSERT INTO task_graph_binding_snapshots "
+                "(graph_run_id, request_id, request_revision, context_digest) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(graph_run_id) DO UPDATE SET "
+                "request_id=excluded.request_id, "
+                "request_revision=excluded.request_revision, "
+                "context_digest=excluded.context_digest",
+                (graph_run_id, request_id, revision, digest),
+            )
+
+    def rebind_graph(
+        self, graph_run_id: str, expected_graph_revision: int,
+        expected_request_revision: int,
+    ) -> dict[str, Any]:
+        """Advance ONLY a fully accepted graph's binding when intent is byte-equivalent.
+
+        All request content is fingerprinted at the original bind. A changed
+        source/assessment/requirement or an older, unanchored binding is NOT
+        eligible. This operation never edits graph/node state or dispatches work.
+        """
+        if (type(expected_graph_revision) is not int or
+                expected_graph_revision < 0):
+            raise ValueError("expected_graph_revision must be a non-negative integer")
+        if (type(expected_request_revision) is not int or
+                expected_request_revision < 1):
+            raise ValueError("expected_request_revision must be a positive integer")
+        binding = self.graph_binding(graph_run_id)
+        if binding is None:
+            raise ValueError("graph has no bound task request")
+        # Inspect external file-source freshness before acquiring a SQLite write lock.
+        self.assert_ready(binding["request_id"], expected_request_revision)
+
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            bound = db.execute(
+                "SELECT request_id, request_revision, requirement_map_json "
+                "FROM task_graph_bindings WHERE graph_run_id=?",
+                (graph_run_id,),
+            ).fetchone()
+            if bound is None or bound["request_id"] != binding["request_id"]:
+                raise RuntimeError("task request binding changed while rebinding")
+            baseline = db.execute(
+                "SELECT request_id, request_revision, context_digest "
+                "FROM task_graph_binding_snapshots WHERE graph_run_id=?",
+                (graph_run_id,),
+            ).fetchone()
+            if (baseline is None or baseline["request_id"] != bound["request_id"]
+                    or baseline["request_revision"] != bound["request_revision"]):
+                raise ValueError(
+                    "binding has no trustworthy baseline snapshot; "
+                    "legacy graph requires explicit recovery review"
+                )
+            request = db.execute(
+                "SELECT user_request, sources_json, assessment_json, revision "
+                "FROM task_requests WHERE request_id=?", (bound["request_id"],),
+            ).fetchone()
+            if request is None or request["revision"] != expected_request_revision:
+                raise RuntimeError("stale task context revision while rebinding")
+            if expected_request_revision <= bound["request_revision"]:
+                raise ValueError("rebind requires a newer task request revision")
+            if (request["assessment_json"] is None or
+                    _request_content_digest(request) != baseline["context_digest"]):
+                raise ValueError(
+                    "request content differs from bound snapshot; "
+                    "use a reviewed reconcile_graph instead"
+                )
+            assessment = json.loads(request["assessment_json"])
+            if assessment["decision"] != "direct" or assessment["blocking_unknowns"]:
+                raise ValueError("request is not directly ready")
+            graph_run = db.execute(
+                "SELECT revision, current_wave_id, graph_json, graph_fingerprint "
+                "FROM graph_runs WHERE graph_run_id=?", (graph_run_id,),
+            ).fetchone()
+            if graph_run is None or graph_run["revision"] != expected_graph_revision:
+                raise RuntimeError("stale graph revision while rebinding")
+            if graph_run["current_wave_id"] is not None:
+                raise ValueError("cannot rebind while a wave is active")
+            from qiqi_delegate.task_graph_store import (
+                _graph_fingerprint, _graph_from_json,
+            )
+            if not graph_run["graph_json"]:
+                raise ValueError("authored graph definition is unavailable")
+            authored = _graph_from_json(graph_run["graph_json"])
+            if _graph_fingerprint(authored) != graph_run["graph_fingerprint"]:
+                raise RuntimeError("persisted graph fingerprint mismatch")
+            node_ids = {node.node_id for node in authored.nodes}
+            mapping = json.loads(bound["requirement_map_json"])
+            requirement_ids = {item["id"] for item in assessment["requirements"]}
+            if (set(mapping) != node_ids or
+                    any(not refs or any(ref not in requirement_ids for ref in refs)
+                        for refs in mapping.values()) or
+                    {ref for refs in mapping.values() for ref in refs}
+                    != requirement_ids):
+                raise ValueError("bound requirement coverage is no longer valid")
+            states = db.execute(
+                "SELECT node_id, active, semantic_state, runtime_state, turn_id "
+                "FROM graph_node_states WHERE graph_run_id=?", (graph_run_id,),
+            ).fetchall()
+            active = {row["node_id"]: row for row in states if row["active"]}
+            if (set(active) != node_ids or
+                    any(row["semantic_state"] != "satisfied"
+                        or row["runtime_state"] == "running" or not row["turn_id"]
+                        for row in active.values())):
+                raise ValueError("rebind requires every graph node to be satisfied")
+            running = db.execute(
+                "SELECT 1 FROM graph_attempts WHERE graph_run_id=? "
+                "AND runtime_state='running' LIMIT 1", (graph_run_id,),
+            ).fetchone()
+            if running is not None:
+                raise ValueError("cannot rebind while attempts are running")
+            previous_revision = bound["request_revision"]
+            updated = db.execute(
+                "UPDATE task_graph_bindings SET request_revision=? "
+                "WHERE graph_run_id=? AND request_revision=?",
+                (expected_request_revision, graph_run_id, previous_revision),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("task request binding changed while rebinding")
+            db.execute(
+                "UPDATE task_graph_binding_snapshots SET request_revision=? "
+                "WHERE graph_run_id=? AND request_revision=?",
+                (expected_request_revision, graph_run_id, previous_revision),
+            )
+            db.execute(
+                "INSERT INTO task_graph_rebind_audit "
+                "(graph_run_id, request_id, previous_revision, new_revision, "
+                "graph_revision, context_digest, created_at_ns) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (graph_run_id, bound["request_id"], previous_revision,
+                 expected_request_revision, expected_graph_revision,
+                 baseline["context_digest"], time.time_ns()),
+            )
+        return {
+            "graph_run_id": graph_run_id,
+            "graph_revision": expected_graph_revision,
+            "task_request_id": bound["request_id"],
+            "previous_request_revision": previous_revision,
+            "request_revision": expected_request_revision,
+            "preserved_nodes": [node.node_id for node in authored.nodes],
+            "rebound": True,
+        }
 
     def graph_binding(self, graph_run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
