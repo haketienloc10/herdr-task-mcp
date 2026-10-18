@@ -6,7 +6,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from qiqi_delegate.core import build_task_packet
 from qiqi_delegate.task_graph import GraphNode, TaskGraph
@@ -685,8 +685,13 @@ class GraphRuntimeStore:
         *,
         expected_revision: int,
         reset_node_ids: set[str],
+        on_reconciled: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
-        """Atomically replace the active semantic graph while retaining execution history."""
+        """Atomically replace graph and any associated request binding.
+
+        The callback runs after graph/node updates, before COMMIT. A callback
+        rejection rolls back BOTH the graph mutation and its binding update.
+        """
 
         run_id = _required_id(graph_run_id, "graph_run_id")
         clean_expected_revision = _required_revision(expected_revision)
@@ -819,6 +824,8 @@ class GraphRuntimeStore:
             )
             if updated.rowcount != 1:
                 raise RuntimeError("graph run revision changed while reconciling graph")
+            if on_reconciled is not None:
+                on_reconciled(conn)
 
     def start_wave(
         self,
