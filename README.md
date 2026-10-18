@@ -575,13 +575,17 @@ Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó khô
      wave/attempt chạy.
   2. `expected_graph_revision` và `expected_request_revision` còn hiện hành.
   3. Request vẫn `direct`, không có blocking unknown hoặc source stale.
+     Để loại bỏ race với tiến trình ghi file ngoài SQLite, safe rebind **từ
+     chối mọi request có source `repo_file` hoặc `workspace_file`**, kể cả
+     khi hash hiện tại còn khớp. Cần snapshot bất biến có chứng cứ để hỗ trợ
+     trường hợp đó trong tương lai.
   4. Bản request hiện tại có **cùng digest chính xác** với nội dung đã
      snapshot lúc bind; toàn bộ requirement_map vẫn phủ đúng requirements.
   5. Graph persisted còn đầy đủ và fingerprint khớp; baseline snapshot
      của binding đã tồn tại.
 
   Ví dụ, nộp lại đúng y nguyên assessment chỉ làm tăng revision có thể được
-  rebind an toàn. **Thêm R1–R9, sửa requirement, thay source, thay rationale
+  rebind an toàn **nếu request không chứa nguồn file mutable**. **Thêm R1–R9, sửa requirement, thay source, thay rationale
   hoặc source đã drift** không được coi là tương đương tự động: tool từ chối.
   Khi ấy phải review thay đổi và dùng `reconcile_graph` phù hợp, hoặc nâng cấp
   quy trình amendment có chứng cứ; tuyệt đối không `UPDATE` revision trực tiếp.
