@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from test_final_evaluation import setup_graph
+from qiqi_delegate.task_graph_runtime import task_graph_from_payload
 
 
 def _binding_data(requests, graph_id):
@@ -166,3 +167,130 @@ def test_rebind_refuses_non_quiescent_or_incomplete_graph(tmp_path, change):
             updated["revision"],
         )
     assert requests.graph_binding(gid)["request_revision"] == updated["revision"] - 1
+
+
+def _graph_with_unreferenced_file_source(tmp_path):
+    runtime, requests, gr, _evaluator, gid = setup_graph(tmp_path, with_request=False)
+    source_file = runtime.repos()["backend"] / "contract.txt"
+    source_file.write_text("baseline contract", encoding="utf-8")
+    req = requests.create(
+        "Verify cross-repo contract",
+        sources=[{"kind": "repo_file", "repository": "backend",
+                  "path": "contract.txt"}],
+    )
+    assessed = requests.assess(req["request_id"], 1, {
+        "requirements": [
+            {"id": "R1", "text": "Check behavior",
+             "evidence_refs": ["request:current"]},
+        ],
+        "blocking_unknowns": [], "decision": "direct",
+        "rationale": "Request specifies verification",
+    })
+    requests.bind_graph(
+        gid, req["request_id"], assessed["revision"],
+        ["backend", "frontend"], {"backend": ["R1"], "frontend": ["R1"]},
+    )
+    return runtime, requests, gr, gid, source_file
+
+
+def test_rebind_rejects_unreferenced_stale_file_source(tmp_path):
+    runtime, requests, gr, gid, source_file = _graph_with_unreferenced_file_source(tmp_path)
+    updated = _revision_only_reassessment(requests, gid)
+    source_file.write_text("changed after review", encoding="utf-8")
+    assert requests.assert_ready(updated["request_id"])["stale_sources"]
+    before = _snapshot(runtime, gid)
+    with pytest.raises(ValueError, match="stale context sources"):
+        requests.rebind_graph(gid, gr.get_graph(gid)["revision"], updated["revision"])
+    assert _snapshot(runtime, gid) == before
+
+
+def test_rebind_rechecks_file_source_inside_write_transaction(tmp_path, monkeypatch):
+    runtime, requests, gr, gid, source_file = _graph_with_unreferenced_file_source(tmp_path)
+    updated = _revision_only_reassessment(requests, gid)
+    original = requests._stale_source_ids
+    checks = []
+
+    def changed_during_lock(sources):
+        checks.append(True)
+        source_file.write_text("changed after optimistic preflight", encoding="utf-8")
+        return original(sources)
+
+    monkeypatch.setattr(requests, "_stale_source_ids", changed_during_lock)
+    before = _snapshot(runtime, gid)
+    with pytest.raises(ValueError, match="stale context sources"):
+        requests.rebind_graph(gid, gr.get_graph(gid)["revision"], updated["revision"])
+    assert len(checks) == 1
+    assert _snapshot(runtime, gid) == before
+
+
+def _revised_graph(gr, gid):
+    original = gr._graph_for_run(gid).as_dict()
+    original["nodes"][0]["task_packet"]["objective"] = "Revised backend implementation"
+    return task_graph_from_payload(original)
+
+
+@pytest.mark.parametrize("failure", ["request_advanced", "wrong_bound_revision"])
+def test_reconciliation_rolls_back_graph_when_binding_fails(tmp_path, failure):
+    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    binding, req = _binding_data(requests, gid)
+    before = _snapshot(runtime, gid)
+    current_revision = gr.get_graph(gid)["revision"]
+    if failure == "request_advanced":
+        # Simulates a concurrent reassessment after server preflight but
+        # before the graph-store transaction's binding callback.
+        _revision_only_reassessment(requests, gid)
+    else:
+        assert req["revision"] == binding["request_revision"]
+
+    def commit_binding(conn):
+        requests.bind_graph(
+            gid, binding["request_id"], req["revision"],
+            ["backend", "frontend"], binding["requirement_map"],
+            replace=True, connection=conn,
+            expected_bound_revision=(
+                binding["request_revision"] + 1 if failure == "wrong_bound_revision"
+                else binding["request_revision"]
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="stale|binding changed"):
+        gr.reconcile_graph(
+            gid, _revised_graph(gr, gid),
+            repository_names=runtime.repos().keys(),
+            expected_revision=current_revision,
+            on_reconciled=commit_binding,
+        )
+    assert _snapshot(runtime, gid) == before
+    assert requests.graph_binding(gid) == binding
+
+
+def test_reconciliation_commits_graph_and_binding_atomically(tmp_path):
+    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    binding, req = _binding_data(requests, gid)
+    updated = _revision_only_reassessment(requests, gid)
+    current_revision = gr.get_graph(gid)["revision"]
+
+    def commit_binding(conn):
+        requests.bind_graph(
+            gid, binding["request_id"], updated["revision"],
+            ["backend", "frontend"], binding["requirement_map"],
+            replace=True, connection=conn,
+            expected_bound_revision=binding["request_revision"],
+        )
+
+    result = gr.reconcile_graph(
+        gid, _revised_graph(gr, gid),
+        repository_names=runtime.repos().keys(),
+        expected_revision=current_revision,
+        on_reconciled=commit_binding,
+    )
+    assert result["revision"] == current_revision + 1
+    assert "backend" in result["reconciliation"]["changed_nodes"]
+    assert requests.graph_binding(gid)["request_revision"] == updated["revision"]
+    assert result["nodes"][0]["semantic_state"] == "pending"
+    with sqlite3.connect(runtime.db) as db:
+        snapshot = db.execute(
+            "SELECT request_revision FROM task_graph_binding_snapshots "
+            "WHERE graph_run_id=?", (gid,),
+        ).fetchone()
+    assert snapshot == (updated["revision"],)
