@@ -45,7 +45,7 @@ def test_get_graph_definition_recovers_exact_authored_packets_after_restart(tmp_
     assert restored["graph"]["nodes"][1]["depends_on"] == ["backend"]
     assert restored["graph"]["nodes"][1]["task_packet"]["objective"] == "Display total"
     assert "scope" in restored["graph"]["nodes"][0]["task_packet"]
-    assert "context" in restored["graph"]["nodes"][0]["task_packet"]
+    assert restored["graph"]["nodes"][0]["task_packet"] == initial["nodes"][0]["task_packet"]
     assert _snapshot(runtime, gid) == before
 
     # A new process/store can read the persisted graph without chat context.
