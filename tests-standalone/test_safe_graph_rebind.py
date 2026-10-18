@@ -352,7 +352,7 @@ def test_bound_start_graph_rolls_back_graph_if_binding_preflight_becomes_stale(
             "acceptance_criteria": ["Tests pass"],
         },
     }]}
-    with pytest.raises(Exception, match="stale task context|stale context sources"):
+    with pytest.raises(Exception, match="stale (task context|assessment/context|context sources)"):
         asyncio.run(server.start_graph(
             server.Graph.model_validate(payload),
             req["request_id"], ready["revision"], {"retry": ["R1"]},
