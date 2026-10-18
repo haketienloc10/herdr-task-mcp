@@ -1399,16 +1399,21 @@ async def reconcile_graph(
                 )
     elif requirement_map is not None:
         raise ValueError("cannot attach requirement_map to legacy unassessed graph")
-    result = graph_runtime.reconcile_graph(
+    def bind_reconciled_graph(conn):
+        if binding is not None:
+            task_requests.bind_graph(
+                graph_run_id, binding["request_id"], current["revision"],
+                [node.node_id for node in authored.nodes], requirement_map,
+                replace=True, connection=conn,
+                expected_bound_revision=binding["request_revision"],
+            )
+
+    # One graph-store SQLite transaction owns both mutations. A rejected
+    # binding rolls back the graph JSON, node resets and revision increment.
+    return graph_runtime.reconcile_graph(
         graph_run_id, authored, repository_names=runtime.repos().keys(),
-        expected_revision=expected_revision,
+        expected_revision=expected_revision, on_reconciled=bind_reconciled_graph,
     )
-    if binding is not None:
-        task_requests.bind_graph(
-            graph_run_id, binding["request_id"], current["revision"],
-            [node.node_id for node in authored.nodes], requirement_map, replace=True,
-        )
-    return result
 
 def main():
     mcp.run()
