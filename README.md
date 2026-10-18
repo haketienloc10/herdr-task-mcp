@@ -552,6 +552,50 @@ Gọi `reconcile_graph` cùng `expected_revision` để áp dụng TaskGraph m�
 
 Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó không tương đương ACCEPT.** Lead phải đọc captured evidence trước khi quyết định.
 
+## Khôi phục TaskGraph sau `/clear` và rebind an toàn
+
+- `get_graph_definition(graph_run_id)` trả **toàn bộ authored DAG** từ
+  `graph_runs.graph_json`: `graph.nodes[]` gồm `objective`, `scope`,
+  `acceptance_criteria`, `constraints`, `context` (nếu có),
+  `depends_on`, `repository`, `route`, kèm graph `revision` và
+  `task_request_binding`. Tool chỉ đọc, không gọi Peer, không sửa node.
+  Không dựng lại TaskPacket từ review preview hoặc suy luận thứ tự chạy.
+
+- Khi bind graph mới (hoặc bind lại sau `reconcile_graph`), runtime ghi
+  fingerprint của **toàn bộ** nội dung user request, context sources và
+  assessment vào `task_graph_binding_snapshots`. Bảng này không làm thay đổi
+  dữ liệu của các graph cũ.
+
+- `rebind_graph(graph_run_id, expected_graph_revision, expected_request_revision)`
+  là recovery **fail-closed**, *không* thay DAG, TaskPacket, node ACCEPT, attempt
+  hay graph revision; không tự dispatch. Tool chỉ cập nhật
+  `task_graph_bindings.request_revision` và ghi audit trong một SQLite
+  transaction `BEGIN IMMEDIATE` nếu tất cả điều kiện cùng đúng:
+  1. Graph hoàn tất, mọi node `satisfied` và có captured turn, không còn
+     wave/attempt chạy.
+  2. `expected_graph_revision` và `expected_request_revision` còn hiện hành.
+  3. Request vẫn `direct`, không có blocking unknown hoặc source stale.
+  4. Bản request hiện tại có **cùng digest chính xác** với nội dung đã
+     snapshot lúc bind; toàn bộ requirement_map vẫn phủ đúng requirements.
+  5. Graph persisted còn đầy đủ và fingerprint khớp; baseline snapshot
+     của binding đã tồn tại.
+
+  Ví dụ, nộp lại đúng y nguyên assessment chỉ làm tăng revision có thể được
+  rebind an toàn. **Thêm R1–R9, sửa requirement, thay source, thay rationale
+  hoặc source đã drift** không được coi là tương đương tự động: tool từ chối.
+  Khi ấy phải review thay đổi và dùng `reconcile_graph` phù hợp, hoặc nâng cấp
+  quy trình amendment có chứng cứ; tuyệt đối không `UPDATE` revision trực tiếp.
+
+  Các graph được tạo **trước bản vá**, đã bị stale, không có snapshot baseline:
+  `rebind_graph` sẽ từ chối thay vì tự chấp thuận bằng revision/digest mới.
+  Vẫn có thể đọc packet gốc qua `get_graph_definition`, kiểm tra thủ công
+  và chọn workflow recovery riêng theo bằng chứng. Không tuyên bố đã bảo toàn
+  ACCEPT cho graph cũ khi thiếu proof.
+
+  Sau rebind thành công, phải chạy Final Evaluation mới (hoặc xác minh PASS
+  mới đã được lưu hợp lệ), rồi mới `finalize_graph`. PASS của request revision
+  cũ không tự trở thành PASS cho revision mới.
+
 ## Final Evaluation Gate — Issue #8
 
 A completed TaskGraph is NOT necessarily a verified final product. The Lead
