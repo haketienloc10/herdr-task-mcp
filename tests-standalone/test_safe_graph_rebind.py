@@ -1,10 +1,14 @@
 """Regression coverage for authored graph recovery and fail-closed safe rebind."""
+import asyncio
 import json
 import sqlite3
 
 import pytest
 
 from test_final_evaluation import setup_graph
+from test_task_readiness import assessment, workspace
+from qiqi_delegate.task_graph_runtime import GraphRuntime
+from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_graph_runtime import task_graph_from_payload
 
 
@@ -204,7 +208,7 @@ def test_rebind_rejects_unreferenced_stale_file_source(tmp_path):
     assert _snapshot(runtime, gid) == before
 
 
-def test_rebind_rechecks_file_source_inside_write_transaction(tmp_path, monkeypatch):
+def test_rebind_rejects_mutable_source_without_relying_on_last_hash(tmp_path, monkeypatch):
     runtime, requests, gr, gid, source_file = _graph_with_unreferenced_file_source(tmp_path)
     updated = _revision_only_reassessment(requests, gid)
     original = requests._stale_source_ids
@@ -217,9 +221,11 @@ def test_rebind_rechecks_file_source_inside_write_transaction(tmp_path, monkeypa
 
     monkeypatch.setattr(requests, "_stale_source_ids", changed_during_lock)
     before = _snapshot(runtime, gid)
-    with pytest.raises(ValueError, match="stale context sources"):
+    with pytest.raises(ValueError, match="immutable context sources"):
         requests.rebind_graph(gid, gr.get_graph(gid)["revision"], updated["revision"])
-    assert len(checks) == 1
+    # Mutable files cannot be made safe by another hash check in SQLite.
+    # The rebind always rejects them, so no late hash race is possible here.
+    assert checks == []
     assert _snapshot(runtime, gid) == before
 
 
@@ -294,3 +300,66 @@ def test_reconciliation_commits_graph_and_binding_atomically(tmp_path):
             "WHERE graph_run_id=?", (gid,),
         ).fetchone()
     assert snapshot == (updated["revision"],)
+
+
+def test_rebind_refuses_even_unchanged_file_source(tmp_path):
+    runtime, requests, gr, gid, _source = _graph_with_unreferenced_file_source(tmp_path)
+    updated = _revision_only_reassessment(requests, gid)
+    before = _snapshot(runtime, gid)
+    with pytest.raises(ValueError, match="immutable context sources"):
+        requests.rebind_graph(gid, gr.get_graph(gid)["revision"], updated["revision"])
+    assert _snapshot(runtime, gid) == before
+
+
+@pytest.mark.parametrize("race", ["revision", "source"])
+def test_bound_start_graph_rolls_back_graph_if_binding_preflight_becomes_stale(
+    tmp_path, monkeypatch, race,
+):
+    runtime, requests = workspace(tmp_path)
+    file_path = runtime.repos()["backend"] / "contract.txt"
+    file_path.write_text("original source", encoding="utf-8")
+    sources = (
+        [{"kind": "repo_file", "repository": "backend", "path": "contract.txt"}]
+        if race == "source" else []
+    )
+    req = requests.create("Retry 429 and 503 in backend", sources=sources)
+    ready = requests.assess(req["request_id"], 1, assessment())
+
+    import importlib
+    server = importlib.import_module("qiqi_delegate.server")
+    gr = GraphRuntime(
+        GraphRuntimeStore(runtime.db), readiness_guard=requests.assert_graph_ready,
+    )
+    monkeypatch.setattr(server, "runtime", runtime)
+    monkeypatch.setattr(server, "task_requests", requests)
+    monkeypatch.setattr(server, "graph_runtime", gr)
+
+    original_start = gr.start_graph
+    def mutate_after_preflight(graph, *, repository_names, on_created=None):
+        if race == "revision":
+            requests.assess(req["request_id"], ready["revision"], ready["assessment"])
+        else:
+            file_path.write_text("new source after preflight", encoding="utf-8")
+        return original_start(
+            graph, repository_names=repository_names, on_created=on_created,
+        )
+
+    monkeypatch.setattr(gr, "start_graph", mutate_after_preflight)
+    payload = {"nodes": [{
+        "node_id": "retry", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {
+            "objective": "Retry 429/503", "scope": ["src"],
+            "acceptance_criteria": ["Tests pass"],
+        },
+    }]}
+    with pytest.raises(Exception, match="stale task context|stale context sources"):
+        asyncio.run(server.start_graph(
+            server.Graph.model_validate(payload),
+            req["request_id"], ready["revision"], {"retry": ["R1"]},
+        ))
+    # Failed bound starts must not be misclassified as unassessed legacy graphs.
+    with sqlite3.connect(runtime.db) as db:
+        assert db.execute("SELECT count(*) FROM graph_runs").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM graph_node_states").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM task_graph_bindings").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM task_graph_binding_snapshots").fetchone()[0] == 0
