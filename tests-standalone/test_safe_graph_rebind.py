@@ -1,7 +1,11 @@
 """Regression coverage for authored graph recovery and fail-closed safe rebind."""
 import asyncio
+import copy
+import importlib
 import json
 import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -35,6 +39,88 @@ def _snapshot(runtime, graph_id):
             "FROM graph_node_states WHERE graph_run_id=? ORDER BY node_id",
             (graph_id,),
         ).fetchall()
+
+
+
+
+
+def test_mcp_definition_and_binding_are_read_together(tmp_path, monkeypatch):
+    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    binding = requests.graph_binding(gid)
+    authored = gr._graph_for_run(gid).as_dict()
+    graph_revision = gr.get_graph(gid)["revision"]
+    server = importlib.import_module("qiqi_delegate.server")
+    monkeypatch.setattr(server, "graph_runtime", gr)
+    monkeypatch.setattr(server, "task_requests", requests)
+
+    def forbid_separate_binding_lookup(*args, **kwargs):
+        raise AssertionError("recovery must not read request binding separately")
+
+    monkeypatch.setattr(requests, "graph_binding", forbid_separate_binding_lookup)
+    recovered = asyncio.run(server.get_graph_definition(gid))
+    assert recovered["graph_run_id"] == gid
+    assert recovered["graph"] == authored
+    assert recovered["task_request_binding"] == binding
+    assert recovered["revision"] == graph_revision
+
+
+def test_atomic_definition_returns_none_for_legacy_unbound_graph(tmp_path):
+    _runtime, _requests, gr, _eval, gid = setup_graph(tmp_path, with_request=False)
+    result = gr.store.get_graph_definition(gid, include_binding=True)
+    assert result["task_request_binding"] is None
+    assert result["graph"] == gr._graph_for_run(gid).as_dict()
+
+
+def test_graph_and_binding_snapshot_stays_consistent_under_concurrent_commits(tmp_path):
+    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    baseline = requests.graph_binding(gid)["request_revision"]
+    authored = gr._graph_for_run(gid).as_dict()
+    started = threading.Event()
+    errors = []
+
+    def writer():
+        try:
+            with sqlite3.connect(runtime.db, timeout=30) as db:
+                started.set()
+                for revision in range(1, 41):
+                    raw = copy.deepcopy(authored)
+                    raw["nodes"][0]["task_packet"]["objective"] = f"snapshot-{revision}"
+                    graph = task_graph_from_payload(raw)
+                    from qiqi_delegate.task_graph_store import _graph_fingerprint
+                    db.execute("BEGIN IMMEDIATE")
+                    db.execute(
+                        "UPDATE graph_runs SET revision=?, graph_json=?, "
+                        "graph_fingerprint=? WHERE graph_run_id=?",
+                        (revision, json.dumps(raw), _graph_fingerprint(graph), gid),
+                    )
+                    db.execute(
+                        "UPDATE task_graph_bindings SET request_revision=? "
+                        "WHERE graph_run_id=?",
+                        (baseline + revision, gid),
+                    )
+                    db.commit()
+                    time.sleep(0.001)
+        except Exception as exc:
+            errors.append(exc)
+            started.set()
+
+    worker = threading.Thread(target=writer, daemon=True)
+    worker.start()
+    assert started.wait(timeout=10)
+    try:
+        for _ in range(60):
+            result = gr.store.get_graph_definition(gid, include_binding=True)
+            revision = result["revision"]
+            bound = result["task_request_binding"]
+            assert bound["request_revision"] == baseline + revision
+            assert result["graph"]["nodes"][0]["task_packet"]["objective"] == (
+                "Implement total" if revision == 0 else f"snapshot-{revision}"
+            )
+            time.sleep(0.0005)
+    finally:
+        worker.join(timeout=20)
+    assert not worker.is_alive(), "writer thread failed to finish"
+    assert errors == []
 
 
 def test_get_graph_definition_recovers_exact_authored_packets_after_restart(tmp_path):
