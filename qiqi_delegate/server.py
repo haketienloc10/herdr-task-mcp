@@ -1171,9 +1171,7 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
 @_public_tool_errors
 async def get_graph_definition(graph_run_id: str) -> dict[str, Any]:
     """Read complete authored DAG/TaskPackets from SQLite, without dispatch or reset."""
-    result = graph_runtime.store.get_graph_definition(graph_run_id)
-    result["task_request_binding"] = task_requests.graph_binding(graph_run_id)
-    return result
+    return graph_runtime.store.get_graph_definition(graph_run_id, include_binding=True)
 
 
 @mcp.tool()
