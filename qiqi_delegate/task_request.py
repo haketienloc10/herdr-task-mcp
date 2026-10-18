@@ -918,7 +918,7 @@ class TaskRequestStore:
         self, graph_run_id: str, expected_graph_revision: int,
         expected_request_revision: int,
     ) -> dict[str, Any]:
-        """Advance ONLY a fully accepted graph's binding when intent is byte-equivalent.
+        """Advance ONLY a fully accepted graph's binding when intent is unchanged.
 
         All request content is fingerprinted at the original bind. A changed
         source/assessment/requirement or an older, unanchored binding is NOT
