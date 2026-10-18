@@ -719,6 +719,7 @@ class GraphRuntime:
         *,
         repository_names: Collection[str],
         expected_revision: int,
+        on_reconciled: Callable[[Any], None] | None = None,
     ) -> dict[str, Any]:
         """Replace the authored graph and reconcile runtime state by explicit materiality.
 
@@ -769,6 +770,7 @@ class GraphRuntime:
             next_snapshot,
             expected_revision=expected_revision,
             reset_node_ids=reset_ids,
+            on_reconciled=on_reconciled,
         )
         current = self.get_graph(graph_run_id)
         previous_order = [node.node_id for node in previous_graph.nodes]
