@@ -290,6 +290,7 @@ class GraphRuntimeStore:
         snapshot: GraphSnapshot,
         *,
         graph_run_id: str | None = None,
+        on_created: Callable[[sqlite3.Connection, str], None] | None = None,
     ) -> str:
         states = _validated_states(snapshot)
         if any(state.runtime_state != "idle" for state in states.values()):
@@ -324,6 +325,10 @@ class GraphRuntimeStore:
                         for state in snapshot.node_states
                     ],
                 )
+                # A bound graph must not exist without its readiness binding.
+                # Any failure in the callback rolls back graph + node rows.
+                if on_created is not None:
+                    on_created(conn, run_id)
         except sqlite3.IntegrityError as exc:
             raise RuntimeError(f"graph run already exists: {run_id!r}") from exc
         return run_id
