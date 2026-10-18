@@ -5,7 +5,6 @@ import sqlite3
 import pytest
 
 from test_final_evaluation import setup_graph
-from qiqi_delegate.task_request import TaskRequestStore
 
 
 def _binding_data(requests, graph_id):
@@ -146,7 +145,7 @@ def test_rebind_refuses_non_quiescent_or_incomplete_graph(tmp_path, change):
             )
     with pytest.raises((RuntimeError, ValueError), match="stale graph|wave is active|satisfied"):
         requests.rebind_graph(
-            gid, revision - 1 if change == "stale_graph_revision" else revision,
+            gid, revision + 1 if change == "stale_graph_revision" else revision,
             updated["revision"],
         )
     assert requests.graph_binding(gid)["request_revision"] == updated["revision"] - 1
