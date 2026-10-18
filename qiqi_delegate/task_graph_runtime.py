@@ -424,10 +424,11 @@ class GraphRuntime:
         graph: TaskGraph,
         *,
         repository_names: Collection[str],
+        on_created: Callable[[Any, str], None] | None = None,
     ) -> dict[str, Any]:
         validate_task_graph(graph, repository_names=repository_names)
         snapshot = initial_graph_snapshot(graph)
-        graph_run_id = self.store.create_run(snapshot)
+        graph_run_id = self.store.create_run(snapshot, on_created=on_created)
         return self.get_graph(graph_run_id)
 
     def _graph_for_run(self, graph_run_id: str) -> TaskGraph:
@@ -719,6 +720,7 @@ class GraphRuntime:
         *,
         repository_names: Collection[str],
         expected_revision: int,
+        on_reconciled: Callable[[Any], None] | None = None,
     ) -> dict[str, Any]:
         """Replace the authored graph and reconcile runtime state by explicit materiality.
 
@@ -769,6 +771,7 @@ class GraphRuntime:
             next_snapshot,
             expected_revision=expected_revision,
             reset_node_ids=reset_ids,
+            on_reconciled=on_reconciled,
         )
         current = self.get_graph(graph_run_id)
         previous_order = [node.node_id for node in previous_graph.nodes]

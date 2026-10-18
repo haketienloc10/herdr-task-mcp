@@ -6,7 +6,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from qiqi_delegate.core import build_task_packet
 from qiqi_delegate.task_graph import GraphNode, TaskGraph
@@ -290,6 +290,7 @@ class GraphRuntimeStore:
         snapshot: GraphSnapshot,
         *,
         graph_run_id: str | None = None,
+        on_created: Callable[[sqlite3.Connection, str], None] | None = None,
     ) -> str:
         states = _validated_states(snapshot)
         if any(state.runtime_state != "idle" for state in states.values()):
@@ -324,6 +325,10 @@ class GraphRuntimeStore:
                         for state in snapshot.node_states
                     ],
                 )
+                # A bound graph must not exist without its readiness binding.
+                # Any failure in the callback rolls back graph + node rows.
+                if on_created is not None:
+                    on_created(conn, run_id)
         except sqlite3.IntegrityError as exc:
             raise RuntimeError(f"graph run already exists: {run_id!r}") from exc
         return run_id
@@ -338,11 +343,9 @@ class GraphRuntimeStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def load_graph(self, graph_run_id: str) -> TaskGraph:
-        """Fail closed for pre-migration runs whose authored definition was never stored."""
-        run = self.get_run(graph_run_id)
-        if run is None:
-            raise RuntimeError(f"unknown graph_run_id: {graph_run_id!r}")
+    @staticmethod
+    def _authenticated_authored_graph(run: dict[str, Any] | sqlite3.Row) -> TaskGraph:
+        """Decode authored semantics and verify their persisted fingerprint."""
         encoded = run["graph_json"]
         if not isinstance(encoded, str) or not encoded:
             raise RuntimeError(
@@ -353,6 +356,66 @@ class GraphRuntimeStore:
         if _graph_fingerprint(graph) != run["graph_fingerprint"]:
             raise RuntimeError("persisted authored TaskGraph fingerprint mismatch")
         return graph
+
+    def _load_authored_run(self, graph_run_id: str) -> tuple[dict[str, Any], TaskGraph]:
+        """Read and authenticate one persisted authored-graph snapshot."""
+        run = self.get_run(graph_run_id)
+        if run is None:
+            raise RuntimeError(f"unknown graph_run_id: {graph_run_id!r}")
+        return run, self._authenticated_authored_graph(run)
+
+    def load_graph(self, graph_run_id: str) -> TaskGraph:
+        """Fail closed for legacy graphs without full authored semantics."""
+        return self._load_authored_run(graph_run_id)[1]
+
+    def get_graph_definition(
+        self, graph_run_id: str, *, include_binding: bool = False,
+    ) -> dict[str, Any]:
+        """Return exact authored packets, optionally with a SAME-SNAPSHOT binding.
+
+        Recovery callers must use include_binding=True; querying the TaskGraph
+        and its binding separately can combine states from opposite sides of
+        an atomic reconcile_graph commit. The JOIN is one SQLite statement,
+        so graph semantics and request mapping share a read snapshot.
+        """
+        if include_binding:
+            run_id = _required_id(graph_run_id, "graph_run_id")
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT g.graph_run_id, g.revision, g.graph_json, "
+                    "g.graph_fingerprint, b.request_id, b.request_revision, "
+                    "b.requirement_map_json "
+                    "FROM graph_runs AS g "
+                    "LEFT JOIN task_graph_bindings AS b "
+                    "ON b.graph_run_id = g.graph_run_id "
+                    "WHERE g.graph_run_id = ?",
+                    (run_id,),
+                ).fetchone()
+            if row is None:
+                raise RuntimeError(f"unknown graph_run_id: {run_id!r}")
+            graph = self._authenticated_authored_graph(row)
+            binding = (
+                {
+                    "graph_run_id": row["graph_run_id"],
+                    "request_id": row["request_id"],
+                    "request_revision": row["request_revision"],
+                    "requirement_map": json.loads(row["requirement_map_json"]),
+                }
+                if row["request_id"] is not None else None
+            )
+            return {
+                "graph_run_id": row["graph_run_id"],
+                "revision": row["revision"],
+                "graph": graph.as_dict(),
+                "task_request_binding": binding,
+            }
+
+        run, graph = self._load_authored_run(graph_run_id)
+        return {
+            "graph_run_id": run["graph_run_id"],
+            "revision": run["revision"],
+            "graph": graph.as_dict(),
+        }
 
     def get_retry_plans(self, graph_run_id: str) -> dict[str, dict[str, Any]]:
         run_id = _required_id(graph_run_id, "graph_run_id")
@@ -672,8 +735,13 @@ class GraphRuntimeStore:
         *,
         expected_revision: int,
         reset_node_ids: set[str],
+        on_reconciled: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
-        """Atomically replace the active semantic graph while retaining execution history."""
+        """Atomically replace graph and any associated request binding.
+
+        The callback runs after graph/node updates, before COMMIT. A callback
+        rejection rolls back BOTH the graph mutation and its binding update.
+        """
 
         run_id = _required_id(graph_run_id, "graph_run_id")
         clean_expected_revision = _required_revision(expected_revision)
@@ -806,6 +874,8 @@ class GraphRuntimeStore:
             )
             if updated.rowcount != 1:
                 raise RuntimeError("graph run revision changed while reconciling graph")
+            if on_reconciled is not None:
+                on_reconciled(conn)
 
     def start_wave(
         self,

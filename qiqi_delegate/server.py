@@ -1135,14 +1135,22 @@ async def start_graph(
         raise ValueError("task_request_id is required for context-bound graph")
     if task_request_id is not None:
         _preflight_bound_packets(authored, current, requirement_map)
+    def bind_created_graph(conn, graph_run_id):
+        if task_request_id is not None:
+            task_requests.bind_graph(
+                graph_run_id, task_request_id, current["revision"],
+                [node.node_id for node in authored.nodes], requirement_map,
+                connection=conn,
+            )
+
+    # Both the persisted graph and its readiness guard commit atomically.
+    # If revision/source validation fails after the preflight, the graph and
+    # all newly created node states are rolled back instead of left unbound.
     result = graph_runtime.start_graph(
         authored, repository_names=runtime.repos().keys(),
+        on_created=bind_created_graph if task_request_id is not None else None,
     )
     if task_request_id is not None:
-        task_requests.bind_graph(
-            result["graph_run_id"], task_request_id, current["revision"],
-            [node.node_id for node in authored.nodes], requirement_map,
-        )
         result["task_request_binding"] = task_requests.graph_binding(result["graph_run_id"])
     else:
         result["task_readiness_policy"] = "legacy_unassessed"
@@ -1158,6 +1166,29 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
         result["task_readiness_policy"] = "legacy_unassessed"
     result.update(final_evaluation.graph_status(graph_run_id))
     return result
+
+@mcp.tool()
+@_public_tool_errors
+async def get_graph_definition(graph_run_id: str) -> dict[str, Any]:
+    """Read complete authored DAG/TaskPackets from SQLite, without dispatch or reset."""
+    return graph_runtime.store.get_graph_definition(graph_run_id, include_binding=True)
+
+
+@mcp.tool()
+@_public_tool_errors
+async def rebind_graph(
+    graph_run_id: str, expected_graph_revision: int,
+    expected_request_revision: int,
+) -> dict[str, Any]:
+    """Preserve ACCEPT only for an exactly matching, snapshotted request context.
+
+    Rebind is not a substitute for reconcile_graph when any requirement, source,
+    user intent or assessment has changed. Older unanchored bindings fail closed.
+    """
+    return task_requests.rebind_graph(
+        graph_run_id, expected_graph_revision, expected_request_revision,
+    )
+
 
 @mcp.tool()
 @_public_tool_errors
@@ -1374,16 +1405,21 @@ async def reconcile_graph(
                 )
     elif requirement_map is not None:
         raise ValueError("cannot attach requirement_map to legacy unassessed graph")
-    result = graph_runtime.reconcile_graph(
+    def bind_reconciled_graph(conn):
+        if binding is not None:
+            task_requests.bind_graph(
+                graph_run_id, binding["request_id"], current["revision"],
+                [node.node_id for node in authored.nodes], requirement_map,
+                replace=True, connection=conn,
+                expected_bound_revision=binding["request_revision"],
+            )
+
+    # One graph-store SQLite transaction owns both mutations. A rejected
+    # binding rolls back the graph JSON, node resets and revision increment.
+    return graph_runtime.reconcile_graph(
         graph_run_id, authored, repository_names=runtime.repos().keys(),
-        expected_revision=expected_revision,
+        expected_revision=expected_revision, on_reconciled=bind_reconciled_graph,
     )
-    if binding is not None:
-        task_requests.bind_graph(
-            graph_run_id, binding["request_id"], current["revision"],
-            [node.node_id for node in authored.nodes], requirement_map, replace=True,
-        )
-    return result
 
 def main():
     mcp.run()
