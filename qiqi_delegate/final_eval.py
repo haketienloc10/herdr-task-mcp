@@ -221,8 +221,9 @@ class FinalEvaluationCoordinator:
                 "Every original requirement must be verified against actual final files.",
                 "Trace end-to-end cross-repository contracts and integrations.",
                 "Cite exact repository/path and sha256 for files, or an "
-                "explicit tracked-deletion tombstone, from the per-repo "
-                ".qiqi-evaluation-manifest.json files.",
+                "explicit tracked-deletion tombstone, from the "
+                + (".qiqi-evaluation-manifests.json file in evaluator CWD."
+                   if live else "per-repo .qiqi-evaluation-manifest.json files."),
                 "Return exactly one JSON object with keys verdict, requirement_results, "
                 "cross_repository_checks, verification_runs, findings, unknowns.",
                 "Use fail/inconclusive when evidence is missing, not asserted PASS.",
