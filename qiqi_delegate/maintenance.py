@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import tempfile
 import sys
 import time
@@ -241,6 +243,7 @@ def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
     if not cleanup:
         return
     temp_root = Path(tempfile.gettempdir()).resolve()
+    targets = []
     for key, prefix in (
         ("capture_sink", "qiqi-result-"),
         ("snapshot_root", "qiqi-final-eval-"),
@@ -254,6 +257,30 @@ def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
         if (not path.is_absolute() or path.parent.resolve() != temp_root or
                 not path.name.startswith(prefix) or path.is_symlink()):
             raise ValueError("unsafe retained evaluator cleanup path")
+        targets.append(path)
+
+    value = cleanup.get("evaluator_cwd")
+    if value:
+        if not isinstance(value, str):
+            raise ValueError("invalid retained evaluator CWD metadata")
+        configured = os.environ.get("QIQI_EVALUATOR_CWD")
+        if configured is not None and not configured.strip():
+            raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
+        trusted = (Path(configured).expanduser() if configured is not None
+                   else Path.home() / ".qiqi" / "evaluator-cwd")
+        if not trusted.is_absolute():
+            raise ValueError("QIQI_EVALUATOR_CWD must be an absolute path")
+        path = Path(value)
+        # The child path is generated from a UUID. Never delete arbitrary
+        # content under the operator's trusted ancestor.
+        if (not path.is_absolute() or path.is_symlink() or
+                path.parent.resolve() != trusted.resolve() / "runs" or
+                not re.fullmatch(r"turn-[0-9a-f]{32}", path.name)):
+            raise ValueError("unsafe retained evaluator CWD cleanup path")
+        targets.append(path)
+
+    # Validate every path before removing any subtree.
+    for path in targets:
         if path.exists():
             cleanup_temporary_tree(path)
 
