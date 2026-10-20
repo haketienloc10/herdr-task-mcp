@@ -53,25 +53,45 @@ def cleanup_temporary_tree(root: Path) -> None:
     shutil.rmtree(root, onerror=make_writable_and_retry)
 
 
-def _git(root: Path, *args: str) -> bytes:
+def _remaining_git_timeout(deadline: float | None) -> float:
+    if deadline is None:
+        return 30
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("live evaluation Git discovery exceeded scan deadline")
+    return min(30, remaining)
+
+
+def _git(
+    root: Path, *args: str, deadline: float | None = None,
+) -> bytes:
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args], stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=True, timeout=30,
+            stderr=subprocess.PIPE, check=True,
+            timeout=_remaining_git_timeout(deadline),
         ).stdout
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        if deadline is not None:
+            raise TimeoutError("live evaluation Git discovery timed out") from exc
+        raise RuntimeError("unable to produce verified Git evaluation snapshot") from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError("unable to produce verified Git evaluation snapshot") from exc
 
 
-def _git_paths(root: Path, *args: str) -> set[str]:
+def _git_paths(
+    root: Path, *args: str, deadline: float | None = None,
+) -> set[str]:
     return {
         part.decode("utf-8")
-        for part in _git(root, *args).split(b"\0")
+        for part in _git(root, *args, deadline=deadline).split(b"\0")
         if part
     }
 
 
-def _reject_gitlinks(root: Path, head: str | None) -> None:
+def _reject_gitlinks(
+    root: Path, head: str | None, *, deadline: float | None = None,
+) -> None:
     """Fail closed for Git submodules instead of interpreting dirs as deletions.
 
     Git records a submodule as mode 160000 (a gitlink). The submodule's
@@ -80,8 +100,8 @@ def _reject_gitlinks(root: Path, head: str | None) -> None:
     Check BOTH the index and HEAD so staged removal also fails closed.
     """
     for label, payload in [
-        ("index", _git(root, "ls-files", "--stage", "-z")),
-        ("HEAD", _git(root, "ls-tree", "-r", "-z", head) if head else b""),
+        ("index", _git(root, "ls-files", "--stage", "-z", deadline=deadline)),
+        ("HEAD", _git(root, "ls-tree", "-r", "-z", head, deadline=deadline) if head else b""),
     ]:
         for entry in payload.split(b"\0"):
             if not entry:
@@ -98,7 +118,9 @@ def _reject_gitlinks(root: Path, head: str | None) -> None:
                 )
 
 
-def _reject_sparse_checkout(root: Path) -> None:
+def _reject_sparse_checkout(
+    root: Path, *, deadline: float | None = None,
+) -> None:
     """Fail closed when tracked omissions cannot be distinguished from deletions.
 
     Sparse checkout intentionally excludes paths that are still part of the
@@ -114,9 +136,13 @@ def _reject_sparse_checkout(root: Path) -> None:
             ["git", "-C", str(root), "config", "--bool", "--get",
              "core.sparseCheckout"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            timeout=30,
+            timeout=_remaining_git_timeout(deadline),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        if deadline is not None:
+            raise TimeoutError("live evaluation sparse-checkout timed out") from exc
+        raise RuntimeError("unable to verify Git sparse-checkout state") from exc
+    except OSError as exc:
         raise RuntimeError("unable to verify Git sparse-checkout state") from exc
     if mode.returncode not in (0, 1):
         raise RuntimeError("unable to verify Git sparse-checkout configuration")
@@ -129,7 +155,7 @@ def _reject_sparse_checkout(root: Path) -> None:
             )
         if value != b"false":
             raise RuntimeError("unrecognized Git sparse-checkout configuration")
-    for record in _git(root, "ls-files", "-t", "-z").split(b"\0"):
+    for record in _git(root, "ls-files", "-t", "-z", deadline=deadline).split(b"\0"):
         if not record:
             continue
         if len(record) < 3 or record[1:2] != b" ":
@@ -143,6 +169,7 @@ def _reject_sparse_checkout(root: Path) -> None:
 
 def _files(
     root: Path, head: str | None, *, max_files: int = MAX_FILES,
+    deadline: float | None = None,
 ) -> tuple[list[str], set[str], set[str]]:
     """List current files *and* tracked paths removed from the worktree.
 
@@ -153,21 +180,24 @@ def _files(
     removed from the worktree) have no previous committed content and must
     never become trusted deletion evidence.
     """
-    _reject_gitlinks(root, head)
-    _reject_sparse_checkout(root)
-    tracked = _git_paths(root, "ls-files", "--cached", "-z")
+    _reject_gitlinks(root, head, deadline=deadline)
+    _reject_sparse_checkout(root, deadline=deadline)
+    tracked = _git_paths(root, "ls-files", "--cached", "-z", deadline=deadline)
     head_paths = (
-        _git_paths(root, "ls-tree", "-r", "--name-only", "-z", head)
+        _git_paths(root, "ls-tree", "-r", "--name-only", "-z", head, deadline=deadline)
         if head is not None else set()
     )
     tracked.update(head_paths)
     others = _git_paths(
         root, "ls-files", "--others", "--exclude-standard", "-z",
+        deadline=deadline,
     )
     names = sorted(tracked | others)
     if not names or len(names) > max_files:
         raise ValueError("evaluation snapshot has no files or exceeds file-count limit")
     for name in names:
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("live evaluation Git discovery exceeded scan deadline")
         parts = Path(name).parts
         if any(name == reserved or name.startswith(reserved + "/")
                for reserved in RESERVED_EVALUATION_PATHS):
@@ -349,12 +379,16 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
         if not root.is_dir() or root != root.resolve():
             raise ValueError("evaluation repository root must be canonical")
         try:
-            head = _git(root, "rev-parse", "--verify", "HEAD").decode().strip()
+            head = _git(
+                root, "rev-parse", "--verify", "HEAD", deadline=deadline,
+            ).decode().strip()
         except RuntimeError:
             head = None
         # Preserve Git tracking/ignore, sparse-checkout, submodule, sensitive
         # file and tombstone checks. The live mode has no copy-byte budget.
-        names, tracked, head_paths = _files(root, head, max_files=20000)
+        names, tracked, head_paths = _files(
+            root, head, max_files=20000, deadline=deadline,
+        )
         entries = []
         deleted_paths = []
         for relative in names:
