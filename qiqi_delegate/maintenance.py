@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -234,6 +236,28 @@ def show_final_evaluation(*, workspace: Path, evaluation_id: str) -> dict[str, A
     return FinalEvaluationStore(runtime.db).inspect_interrupted(evaluation_id)
 
 
+def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
+    """Remove only QiQi-generated temporary trees after verified worker exit."""
+    if not cleanup:
+        return
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    for key, prefix in (
+        ("capture_sink", "qiqi-result-"),
+        ("snapshot_root", "qiqi-final-eval-"),
+    ):
+        value = cleanup.get(key)
+        if not value:
+            continue
+        if not isinstance(value, str):
+            raise ValueError("invalid retained evaluator path metadata")
+        path = Path(value)
+        if (not path.is_absolute() or path.parent.resolve() != temp_root or
+                not path.name.startswith(prefix) or path.is_symlink()):
+            raise ValueError("unsafe retained evaluator cleanup path")
+        if path.exists():
+            shutil.rmtree(path)
+
+
 def recover_final_evaluation(
     *, workspace: Path, evaluation_id: str,
     worker_termination_confirmed: bool,
@@ -243,7 +267,14 @@ def recover_final_evaluation(
     if not workspace.is_dir():
         raise ValueError("workspace directory missing")
     runtime = DelegateRuntime(workspace)
-    return FinalEvaluationStore(runtime.db).release_interrupted(
+    store = FinalEvaluationStore(runtime.db)
+    previous = store.inspect_interrupted(evaluation_id)
+    if previous["status"] != "interrupted":
+        raise ValueError("only an interrupted evaluation can be released")
+    # Do not delete live source/capture files on restart or merely on status
+    # inspection. The operator must explicitly attest that Herdr has stopped.
+    _cleanup_retained_evaluation_paths(previous.get("cleanup"))
+    return store.release_interrupted(
         evaluation_id, worker_termination_confirmed=True,
     )
 
