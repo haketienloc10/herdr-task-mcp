@@ -1737,3 +1737,49 @@ def test_cancelled_final_evaluator_retains_only_when_worker_close_unconfirmed(
         )["claim_id"] is None
         assert not seen["snapshot"].exists()
 
+
+def test_evaluator_rejects_injected_runs_project_settings_after_previous_turn(
+    tmp_path, monkeypatch,
+):
+    import uuid
+    from qiqi_delegate.runtime import (
+        evaluator_run_directory, release_evaluator_run_lock,
+    )
+    from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
+
+    trust_root = tmp_path / "trusted"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trust_root))
+    repository = tmp_path / "repository"
+    snapshot = tmp_path / "snapshot"
+    repository.mkdir()
+    snapshot.mkdir()
+    repos, snapshots = {"backend": repository}, {"backend": snapshot}
+    first = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    runs = trust_root / "runs"
+    assert first.is_dir()
+    cleanup_temporary_tree(first)
+    release_evaluator_run_lock(first)
+
+    # The first evaluator can write to its parent under the same OS UID.
+    # Startup must fail closed rather than load those persistent settings.
+    settings = runs / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"hooks": {"Stop": []}}', encoding="utf-8")
+    with pytest.raises(ValueError, match="unexpected files"):
+        evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    assert not (runs / ".qiqi-active").exists()
+    cleanup_temporary_tree(settings.parent)
+
+    # No miscellaneous sibling directories are permitted either.
+    (runs / "untrusted-artifacts").mkdir()
+    with pytest.raises(ValueError, match="unexpected files"):
+        evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    cleanup_temporary_tree(runs / "untrusted-artifacts")
+
+    # A valid retained turn-* directory is allowed: successful startup
+    # creates a fresh distinct CWD with no inherited project settings.
+    second = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    assert first != second
+    assert list(second.iterdir()) == []
+    cleanup_temporary_tree(second)
+    release_evaluator_run_lock(second)
