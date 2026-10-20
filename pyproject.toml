@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10"]
+test = ["pytest>=8,<10", "pytest-timeout>=2,<3"]
 
 [project.scripts]
 qiqi-delegate-init = "qiqi_delegate.install:main"
@@ -28,3 +28,5 @@ packages = ["qiqi_delegate"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests-standalone"]
+timeout = 90
+
