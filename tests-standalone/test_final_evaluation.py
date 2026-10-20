@@ -519,7 +519,7 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
                 evaluation_id=eid,
             ))
         # Candidate CLAUDE.md/AGENTS.md must not be startup instructions.
-        assert captured["cwd"].endswith("/evaluator-neutral-cwd")
+        assert captured["cwd"] == str(Path.home() / ".qiqi" / "evaluator-cwd")
         assert captured["cwd"] not in {str(path) for path in snap.paths.values()}
         assert captured["cwd"] not in {str(path) for path in repos.values()}
         argv = captured["argv"]
@@ -1371,3 +1371,139 @@ def test_codex_evaluator_allows_regular_config_flags_without_session_resume(
                 evaluation_roots=snap.paths,
                 evaluation_id="unreserved-test-evaluation",
             ))
+
+
+def test_evaluator_cwd_is_stable_and_outside_candidate_roots(tmp_path, monkeypatch):
+    from qiqi_delegate.runtime import evaluator_working_directory
+
+    repos = {"backend": tmp_path / "backend"}
+    snapshot = {"backend": tmp_path / "snapshot"}
+    repos["backend"].mkdir()
+    snapshot["backend"].mkdir()
+    trusted = tmp_path / "trusted" / "cwd"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
+    first = evaluator_working_directory(repos, snapshot)
+    assert first == trusted.resolve()
+    assert evaluator_working_directory(repos, snapshot) == first
+    assert first.is_dir()
+
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(repos["backend"] / "nested"))
+    with pytest.raises(ValueError, match="outside registered"):
+        evaluator_working_directory(repos, snapshot)
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(tmp_path))
+    with pytest.raises(ValueError, match="outside registered"):
+        evaluator_working_directory(repos, snapshot)
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", "relative/evaluator")
+    with pytest.raises(ValueError, match="absolute path"):
+        evaluator_working_directory(repos, snapshot)
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", "")
+    with pytest.raises(ValueError, match="must not be empty"):
+        evaluator_working_directory(repos, snapshot)
+
+
+def test_blocked_final_evaluator_retains_snapshot_and_sink_until_verified_recovery(
+    tmp_path, monkeypatch,
+):
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.maintenance import (
+        recover_final_evaluation, release_stale_claim,
+    )
+    import qiqi_delegate.runtime as runtime_module
+
+    runtime, _reqs, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    trusted = tmp_path / "trusted-evaluator"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
+    monkeypatch.setattr(runtime_module.shutil, "which", lambda _: "/usr/bin/herdr")
+
+    async def ensure_server():
+        return None
+
+    async def create_workspace(*args, **kwargs):
+        assert args[:3] == ("workspace", "create", "--cwd")
+        assert args[3] == str(trusted)
+        return {
+            "workspace": {"workspace_id": "trust-workspace"},
+            "root_pane": {"pane_id": "trust-pane"},
+        }
+
+    async def blocked_start(pane_id, adapter, argv):
+        assert pane_id == "trust-pane"
+        assert adapter == "claude"
+        assert argv[argv.index("--permission-mode") + 1] == "auto"
+        raise AgentStartupBlocked("qiqi-trust-blocked", pane_id, "trust approval required")
+
+    async def no_close(*args, **kwargs):
+        raise AssertionError("blocked agent must not be closed before inspection")
+
+    monkeypatch.setattr(runtime, "_ensure_herdr_server", ensure_server)
+    monkeypatch.setattr(runtime, "_json", create_workspace)
+    monkeypatch.setattr(runtime, "_start_agent", blocked_start)
+    monkeypatch.setattr(runtime, "_run", no_close)
+    revision = graph_rt.get_graph(gid)["revision"]
+    with pytest.raises(AgentStartupBlocked, match="agent_not_ready"):
+        asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
+
+    row = coordinator.store.latest(gid)
+    assert row["status"] == "interrupted"
+    cleanup = row["cleanup"]
+    assert cleanup["cleanup_state"] == "agent_startup_blocked"
+    assert cleanup["workspace_id"] == "trust-workspace"
+    assert cleanup["write_claim_repository"] == "backend"
+    sink = Path(cleanup["capture_sink"])
+    snapshot = Path(cleanup["snapshot_root"])
+    assert sink.is_dir()
+    assert snapshot.is_dir()
+    assert len(list(snapshot.glob("repo-*/.qiqi-evaluation-manifest.json"))) == 2
+    assert trusted.is_dir()
+
+    # The worker must be confirmed stopped before either recovery step.
+    with pytest.raises(ValueError, match="termination"):
+        recover_final_evaluation(
+            workspace=runtime.root, evaluation_id=row["evaluation_id"],
+            worker_termination_confirmed=False,
+        )
+    assert sink.exists() and snapshot.exists()
+    release_stale_claim(
+        workspace=runtime.root, repository="backend",
+        claim_id=cleanup["write_claim_id"], worker_termination_confirmed=True,
+    )
+    recovered = recover_final_evaluation(
+        workspace=runtime.root, evaluation_id=row["evaluation_id"],
+        worker_termination_confirmed=True,
+    )
+    assert recovered["status"] == "errored"
+    assert not sink.exists() and not snapshot.exists()
+    assert trusted.is_dir()
+
+
+def test_unconfirmed_native_close_keeps_final_snapshot_for_recovery(
+    tmp_path, monkeypatch,
+):
+    from qiqi_delegate.maintenance import recover_final_evaluation
+
+    runtime, _reqs, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    async def incomplete_delegate(**kwargs):
+        return {
+            "state": "settled", "turn_id": "native-with-uncertain-close",
+            "agent_response": '{"verdict": "pass"}',
+            "cleanup_state": "workspace_close_unconfirmed",
+            "workspace_id": "uncertain-workspace",
+            "write_claim_id": "turn:native-with-uncertain-close",
+            "write_claim_repository": "backend",
+            "recovery_action": "Verify worker exit",
+        }
+
+    monkeypatch.setattr(runtime, "delegate", incomplete_delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    row = asyncio.run(coordinator.start(gid, "claude-evaluator", revision))
+    assert row["status"] == "interrupted"
+    snapshot = Path(row["cleanup"]["snapshot_root"])
+    assert snapshot.is_dir()
+    assert row["cleanup"]["workspace_id"] == "uncertain-workspace"
+
+    recovered = recover_final_evaluation(
+        workspace=runtime.root, evaluation_id=row["evaluation_id"],
+        worker_termination_confirmed=True,
+    )
+    assert recovered["status"] == "errored"
+    assert not snapshot.exists()
