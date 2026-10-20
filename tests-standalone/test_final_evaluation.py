@@ -1579,3 +1579,151 @@ def test_recovery_refuses_arbitrary_evaluator_cwd(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="unsafe retained evaluator CWD"):
         _cleanup_retained_evaluation_paths({"evaluator_cwd": str(victim)})
     assert (victim / "keep.txt").is_file()
+
+
+def test_evaluator_run_lease_serializes_while_first_worker_is_active(
+    tmp_path, monkeypatch,
+):
+    import uuid
+    from qiqi_delegate.runtime import (
+        evaluator_run_directory, release_evaluator_run_lock,
+    )
+    from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
+
+    trusted = tmp_path / "trusted"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
+    repo = tmp_path / "repo"
+    snapshot = tmp_path / "snapshot"
+    repo.mkdir()
+    snapshot.mkdir()
+    repos, snapshots = {"repo": repo}, {"repo": snapshot}
+
+    first = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    lease = trusted / "runs" / ".qiqi-active"
+    assert lease.read_text().strip() == first.name
+    with pytest.raises(RuntimeError, match="another evaluator is active"):
+        evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    assert first.is_dir() and lease.is_file()
+    cleanup_temporary_tree(first)
+    release_evaluator_run_lock(first)
+    second = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    assert second != first
+    assert list(second.iterdir()) == []
+    cleanup_temporary_tree(second)
+    release_evaluator_run_lock(second)
+    assert list((trusted / "runs").iterdir()) == []
+
+
+def test_evaluator_checks_all_ancestor_instructions(tmp_path, monkeypatch):
+    import uuid
+    from qiqi_delegate.runtime import evaluator_run_directory
+
+    ancestor = tmp_path / "trusted-parent"
+    ancestor.mkdir()
+    trusted = ancestor / "nested" / "evaluator-cwd"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
+    repo, snapshot = tmp_path / "repo", tmp_path / "snapshot"
+    repo.mkdir()
+    snapshot.mkdir()
+    malicious = ancestor / "CLAUDE.md"
+    malicious.write_text("injected instructions")
+    with pytest.raises(ValueError, match="ancestor contains startup instructions"):
+        evaluator_run_directory(
+            {"repo": repo}, {"repo": snapshot}, str(uuid.uuid4()),
+        )
+    malicious.unlink()
+    # The same bound applies to deeper custom path ancestors, not just the
+    # trust root itself.
+    ancestor_settings = ancestor / ".claude"
+    ancestor_settings.mkdir()
+    with pytest.raises(ValueError, match="ancestor contains project settings"):
+        evaluator_run_directory(
+            {"repo": repo}, {"repo": snapshot}, str(uuid.uuid4()),
+        )
+
+
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_cancelled_final_evaluator_retains_only_when_worker_close_unconfirmed(
+    tmp_path, monkeypatch, close_fails,
+):
+    import qiqi_delegate.runtime as runtime_module
+    from qiqi_delegate.maintenance import (
+        release_stale_claim, recover_final_evaluation,
+    )
+
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    trusted = tmp_path / "trusted-cancel"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
+    monkeypatch.setattr(runtime_module.shutil, "which", lambda _: "/usr/bin/herdr")
+    seen = {}
+
+    async def fake_server():
+        return None
+
+    async def fake_workspace(*argv, **_kw):
+        cwd = Path(argv[3])
+        seen["cwd"] = cwd
+        assert cwd.is_dir()
+        return {
+            "workspace": {"workspace_id": "cancelled-workspace"},
+            "root_pane": {"pane_id": "cancelled-pane"},
+        }
+
+    async def fake_start(*args):
+        return "cancelled-agent", {}
+
+    async def fake_prompt(*args):
+        raise asyncio.CancelledError()
+
+    async def fake_run(*argv, **_kw):
+        assert argv[:2] == ("workspace", "close")
+        if close_fails:
+            raise RuntimeError("close could not be confirmed")
+        return (0, "", "")
+
+    monkeypatch.setattr(runtime, "_ensure_herdr_server", fake_server)
+    monkeypatch.setattr(runtime, "_json", fake_workspace)
+    monkeypatch.setattr(runtime, "_start_agent", fake_start)
+    monkeypatch.setattr(runtime, "_prompt", fake_prompt)
+    monkeypatch.setattr(runtime, "_run", fake_run)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(coordinator.start(
+            gid, "claude-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    row = coordinator.store.latest(gid)
+    run_cwd = seen["cwd"]
+    lease = trusted / "runs" / ".qiqi-active"
+
+    if close_fails:
+        assert row["status"] == "interrupted"
+        cleanup = row["cleanup"]
+        assert cleanup["workspace_id"] == "cancelled-workspace"
+        assert cleanup["write_claim_repository"] == "backend"
+        assert cleanup["evaluator_cwd"] == str(run_cwd)
+        assert Path(cleanup["snapshot_root"]).is_dir()
+        assert Path(cleanup["capture_sink"]).is_dir()
+        assert run_cwd.is_dir() and lease.is_file()
+        release_stale_claim(
+            workspace=runtime.root, repository="backend",
+            claim_id=cleanup["write_claim_id"],
+            worker_termination_confirmed=True,
+        )
+        recovered = recover_final_evaluation(
+            workspace=runtime.root, evaluation_id=row["evaluation_id"],
+            worker_termination_confirmed=True,
+        )
+        assert recovered["status"] == "errored"
+        assert not Path(cleanup["snapshot_root"]).exists()
+        assert not Path(cleanup["capture_sink"]).exists()
+        assert not run_cwd.exists() and not lease.exists()
+    else:
+        assert row["status"] == "errored"
+        assert row["cleanup"] is None
+        assert not run_cwd.exists() and not lease.exists()
+        from qiqi_delegate.maintenance import show_claim
+        assert show_claim(
+            workspace=runtime.root, repository="backend",
+        )["claim_id"] is None
+        assert not list(tmp_path.glob("qiqi-final-eval-*"))
+
