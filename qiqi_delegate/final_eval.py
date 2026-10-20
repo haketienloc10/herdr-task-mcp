@@ -264,6 +264,13 @@ class FinalEvaluationCoordinator:
             ],
         )
 
+    @staticmethod
+    async def _scan_live(roots: dict[str, Path]) -> dict[str, Any]:
+        """Keep Git hashing off the MCP event loop and bound scan latency."""
+        return await asyncio.wait_for(
+            asyncio.to_thread(inspect_live_roots, roots), timeout=60,
+        )
+
     async def start(self, graph_run_id: str, route: str,
                     expected_revision: int) -> dict[str, Any]:
         graph, authored, binding, task, names, roots = self._eligible(
@@ -275,7 +282,11 @@ class FinalEvaluationCoordinator:
         if mode not in {"live", "snapshot"}:
             raise ValueError("QIQI_EVALUATION_MODE must be live or snapshot")
         live = mode == "live"
-        source_view = LiveEvaluationView(roots) if live else EvaluationSnapshot(roots)
+        live_manifest = await self._scan_live(roots) if live else None
+        source_view = (
+            LiveEvaluationView(roots, live_manifest) if live
+            else EvaluationSnapshot(roots)
+        )
         with source_view as snap:
             graph_context = self._graph_context(
                 graph, authored, binding, task, snap.digest,
@@ -325,7 +336,11 @@ class FinalEvaluationCoordinator:
             try:
                 # Re-check live input immediately before native execution.
                 inspector = inspect_live_roots if live else inspect_roots
-                if manifest_digest(inspector(roots)) != snap.digest:
+                current = (
+                    await self._scan_live(roots) if live
+                    else inspector(roots)
+                )
+                if manifest_digest(current) != snap.digest:
                     raise RuntimeError("evaluation source changed before dispatch")
                 response = await self.runtime.delegate(
                     repository=names[0], route=route, packet=packet,
@@ -413,10 +428,22 @@ class FinalEvaluationCoordinator:
                               "inconclusive": "inconclusive"}[report["verdict"]]
                 except (ValueError, TypeError, KeyError) as exc:
                     detail = "Invalid FinalEvaluationReport: " + str(exc)
-            if live and manifest_digest(inspect_live_roots(roots)) != snap.digest:
-                status = "inconclusive"
-                report = None
-                detail = "Registered source changed during live evaluation; rerun"
+            if live:
+                # Herdr is already closed here. A broken/slow Git scan must
+                # never strand the SQLite attempt in 'evaluating'.
+                try:
+                    current = await self._scan_live(roots)
+                    if manifest_digest(current) != snap.digest:
+                        status = "inconclusive"
+                        report = None
+                        detail = "Registered source changed during live evaluation; rerun"
+                except Exception as exc:
+                    status = "inconclusive"
+                    report = None
+                    detail = (
+                        "Could not verify live repository freshness after review: "
+                        + str(exc)
+                    )
             self.store.complete(
                 eid, raw_response=raw, report=report, status=status,
                 detail=detail, turn_id=response.get("turn_id"),
