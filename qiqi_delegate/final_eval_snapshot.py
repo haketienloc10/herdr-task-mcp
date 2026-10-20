@@ -140,7 +140,9 @@ def _reject_sparse_checkout(root: Path) -> None:
             )
 
 
-def _files(root: Path, head: str | None) -> tuple[list[str], set[str], set[str]]:
+def _files(
+    root: Path, head: str | None, *, max_files: int = MAX_FILES,
+) -> tuple[list[str], set[str], set[str]]:
     """List current files *and* tracked paths removed from the worktree.
 
     Git's cached index retains unstaged deletions, whereas staged deletions
@@ -162,7 +164,7 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str], set[str]]
         root, "ls-files", "--others", "--exclude-standard", "-z",
     )
     names = sorted(tracked | others)
-    if not names or len(names) > MAX_FILES:
+    if not names or len(names) > max_files:
         raise ValueError("evaluation snapshot has no files or exceeds file-count limit")
     for name in names:
         parts = Path(name).parts
@@ -285,6 +287,106 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
             "files": entries, "deleted_paths": deleted_paths,
         }
     return manifest
+
+
+def _hash_live_file(root: Path, relative: str) -> tuple[str, int, int]:
+    """Hash a live file in bounded memory without copying it or reading it all.
+
+    Includes unchanged binary dependencies (JAR/WAR/etc.) in freshness
+    checks, rather than applying the snapshot's 1 MB copy limit. Retain
+    symlink/inode/mtime checks to fail closed on concurrent modification.
+    """
+    path = root
+    for component in Path(relative).parts:
+        path = path / component
+        if stat.S_ISLNK(path.lstat().st_mode):
+            raise ValueError("evaluation refuses symlink: " + relative)
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("evaluation refuses non-regular file: " + relative)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError("evaluation file changed during hash: " + relative)
+        digest = hashlib.sha256()
+        length = 0
+        while True:
+            data = os.read(fd, 1024 * 1024)
+            if not data:
+                break
+            digest.update(data)
+            length += len(data)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if (length != before.st_size or
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+             before.st_ctime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+             after.st_ctime_ns)):
+        raise RuntimeError("evaluation file changed during hash: " + relative)
+    return digest.hexdigest(), length, stat.S_IMODE(after.st_mode)
+
+
+def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
+    """Read-only manifest of registered worktrees without snapshot copies.
+
+    File contents never enter a copied worktree. Large binary dependencies
+    are hashed in 1 MiB blocks, not rejected for exceeding 1 MiB.
+    """
+    if not roots:
+        raise ValueError("evaluation needs at least one repository")
+    manifest: dict[str, Any] = {}
+    for name, root in sorted(roots.items()):
+        if not root.is_dir() or root != root.resolve():
+            raise ValueError("evaluation repository root must be canonical")
+        try:
+            head = _git(root, "rev-parse", "--verify", "HEAD").decode().strip()
+        except RuntimeError:
+            head = None
+        # Preserve Git tracking/ignore, sparse-checkout, submodule, sensitive
+        # file and tombstone checks. The live mode has no copy-byte budget.
+        names, tracked, head_paths = _files(root, head, max_files=20000)
+        entries = []
+        deleted_paths = []
+        for relative in names:
+            if not _file_present(root, relative):
+                if relative not in tracked:
+                    raise RuntimeError("untracked evaluation file disappeared: " + relative)
+                if relative not in head_paths:
+                    raise ValueError(
+                        "evaluation refuses missing index-only path: " + relative
+                    )
+                deleted_paths.append(relative)
+                continue
+            sha, size, mode = _hash_live_file(root, relative)
+            entries.append({
+                "path": relative, "sha256": sha, "size": size, "mode": mode,
+            })
+        manifest[name] = {
+            "root": str(root), "head": head, "inspection_mode": "live",
+            "files": entries, "deleted_paths": deleted_paths,
+        }
+    return manifest
+
+
+class LiveEvaluationView:
+    """No repository copy; the evaluator reads original registered roots."""
+
+    def __init__(self, roots: dict[str, Path]):
+        self.paths = roots
+        self.manifest: dict[str, Any] = {}
+        self.digest = ""
+
+    def __enter__(self) -> "LiveEvaluationView":
+        self.manifest = inspect_live_roots(self.paths)
+        self.digest = manifest_digest(self.manifest)
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        pass
 
 
 def manifest_digest(manifest: dict[str, Any]) -> str:
