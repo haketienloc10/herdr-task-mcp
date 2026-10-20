@@ -625,8 +625,13 @@ including cross-module contracts, before delivery is finalized.
    settings và MCP config để tránh chạy hooks/MCP nằm trong code ứng viên;
    runtime chặn override của các flags bảo vệ và result hooks.
    Mặc định cài mới: Claude dùng `--permission-mode auto`.
-   Final Evaluator làm việc trên bản sao thư mục tạm để không cần dùng
-   live repository làm CWD. Mỗi bản sao được truyền qua `--add-dir`;
+   Final Evaluator khởi động trong CWD ổn định `~/.qiqi/evaluator-cwd`
+   (trên Windows được giải bằng `Path.home()`). Người dùng trust thư mục
+   này một lần thay vì trust `/tmp/qiqi-result-*` cho từng lượt.
+   Có thể đặt `QIQI_EVALUATOR_CWD` thành đường dẫn tuyệt đối ngoài
+   repository và snapshot. Runtime không tự xác nhận trust hoặc thay đổi
+   permission mode. Claude route mặc định dùng `--permission-mode auto`.
+   Source vẫn nằm trong bản sao tạm và được truyền qua `--add-dir`;
    đây chỉ là quyền truy cập thư mục, không phải filesystem sandbox.
    Hệ thống không yêu cầu Linux inotify hay kernel snapshot monitoring.
 4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
@@ -634,7 +639,7 @@ including cross-module contracts, before delivery is finalized.
    Không cần tạo riêng một route Claude có cùng model và effort.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
-   **one fresh native Evaluator session** in a neutral CWD, with every
+   **one fresh native Evaluator session** in the stable, neutral CWD, with every
    snapshot root passed via `--add-dir` and identified by absolute paths
    in the native prompt. This is a disposable working copy, not an
    immutable or read-only mount. Native Stop/StopFailure capture stays
@@ -758,16 +763,19 @@ runs inside a disposable snapshot, but its write claim records the stable
 canonical root registered under the primary repository in `repos.yaml`.
 This deliberate separation makes `show-claim --repository <primary-repo>`
 and `release-claim --repository <primary-repo> --claim-id 'turn:<id>'
---worker-termination-confirmed` usable even **after the snapshot directory
-has been deleted**. On `AgentStartupBlocked` or an unconfirmed workspace
-close, inspect/close the actual Herdr workspace, verify that the external
-worker stopped, then use the operator-only `show-claim` and exact-ID
-`release-claim` commands shown below. For an `interrupted` Final Evaluation,
-also use `show-final-evaluation` followed by `recover-final-evaluation
---evaluation-id <id> --worker-termination-confirmed`. Releasing the write
-claim alone does not clear an interrupted evaluation reservation; these
-are separate, audited recoveries. Never release a still-running worker's
-claim.
+--worker-termination-confirmed` usable even when snapshots are temporary.
+On `AgentStartupBlocked` or an unconfirmed workspace close, runtime
+**retains** both `qiqi-result-*` (native hook sink) and
+`qiqi-final-eval-*` (source snapshots). The interrupted evaluation's
+`cleanup` metadata records their paths. Inspect/close the Herdr workspace,
+verify the external worker stopped, then use the operator-only `show-claim`
+and exact-ID `release-claim` commands shown below. Next use
+`show-final-evaluation` and `recover-final-evaluation --evaluation-id <id>
+--worker-termination-confirmed`: recovery removes only the recorded QiQi
+temporary trees after termination confirmation. Releasing the write claim
+alone does not clear an interrupted evaluation reservation; these are
+separate, audited recoveries. Never release a still-running worker's claim.
+The stable `~/.qiqi/evaluator-cwd` is never removed by evaluation cleanup.
 
 Finalization checks graph/request revisions and the live multi-repository
 manifest digest. **After SQLite commits**, it reloads `repos.yaml`, resolves
