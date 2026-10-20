@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -11,7 +12,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from qiqi_delegate.runtime import DelegateRuntime, release_evaluator_run_lock
+from qiqi_delegate.runtime import (
+    DelegateRuntime, evaluator_lease_guard, release_evaluator_run_lock,
+)
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
@@ -238,7 +241,30 @@ def show_final_evaluation(*, workspace: Path, evaluation_id: str) -> dict[str, A
     return FinalEvaluationStore(runtime.db).inspect_interrupted(evaluation_id)
 
 
-def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
+def _recovery_lease_guard(cleanup: dict[str, Any] | None):
+    """Lock the exact trusted runs root before reading or mutating a lease."""
+    value = (cleanup or {}).get("evaluator_cwd")
+    if not value:
+        return contextlib.nullcontext()
+    if not isinstance(value, str):
+        raise ValueError("invalid evaluator CWD recovery metadata")
+    configured = os.environ.get("QIQI_EVALUATOR_CWD")
+    if configured is not None and not configured.strip():
+        raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
+    trusted = (Path(configured).expanduser() if configured is not None
+               else Path.home() / ".qiqi" / "evaluator-cwd")
+    path = Path(value)
+    if (not trusted.is_absolute() or not path.is_absolute()
+            or not re.fullmatch(r"turn-[0-9a-f]{32}", path.name)
+            or path.parent.resolve() != trusted.resolve() / "runs"
+            or path.is_symlink()):
+        raise ValueError("unsafe retained evaluator CWD cleanup path")
+    return evaluator_lease_guard(path.parent)
+
+
+def _cleanup_retained_evaluation_paths(
+    cleanup: dict[str, Any] | None, *, guard_held: bool = False,
+) -> None:
     """Remove only QiQi-generated temporary trees after verified worker exit."""
     if not cleanup:
         return
@@ -287,12 +313,17 @@ def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
         evaluator_cwd = path
         targets.append(path)
 
-    # Validate every path before removing any subtree.
+    # The caller's guard must encompass verification, every deletion, lease
+    # unlink, and the final SQLite transition. A second recovery cannot
+    # remove a newly created worker's lease between compare and unlink.
+    if evaluator_cwd is not None and not guard_held:
+        with _recovery_lease_guard(cleanup):
+            return _cleanup_retained_evaluation_paths(cleanup, guard_held=True)
     for path in targets:
         if path.exists():
             cleanup_temporary_tree(path)
     if evaluator_cwd is not None:
-        release_evaluator_run_lock(evaluator_cwd)
+        release_evaluator_run_lock(evaluator_cwd, guard_held=True)
 
 
 def recover_final_evaluation(
@@ -306,14 +337,18 @@ def recover_final_evaluation(
     runtime = DelegateRuntime(workspace)
     store = FinalEvaluationStore(runtime.db)
     previous = store.inspect_interrupted(evaluation_id)
-    if previous["status"] != "interrupted":
-        raise ValueError("only an interrupted evaluation can be released")
-    # Do not delete live source/capture files on restart or merely on status
-    # inspection. The operator must explicitly attest that Herdr has stopped.
-    _cleanup_retained_evaluation_paths(previous.get("cleanup"))
-    return store.release_interrupted(
-        evaluation_id, worker_termination_confirmed=True,
-    )
+    with _recovery_lease_guard(previous.get("cleanup")):
+        # Re-read inside the inter-process guard: a concurrent recovery may
+        # already have completed and a new evaluator may own the lease.
+        previous = store.inspect_interrupted(evaluation_id)
+        if previous["status"] != "interrupted":
+            raise ValueError("only an interrupted evaluation can be released")
+        _cleanup_retained_evaluation_paths(
+            previous.get("cleanup"), guard_held=True,
+        )
+        return store.release_interrupted(
+            evaluation_id, worker_termination_confirmed=True,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
