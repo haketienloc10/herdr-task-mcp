@@ -1614,7 +1614,7 @@ def test_evaluator_run_lease_serializes_while_first_worker_is_active(
     assert list(second.iterdir()) == []
     cleanup_temporary_tree(second)
     release_evaluator_run_lock(second)
-    assert list((trusted / "runs").iterdir()) == []
+    assert {item.name for item in (trusted / "runs").iterdir()} == {".qiqi-mutex"}
 
 
 def test_evaluator_checks_all_ancestor_instructions(tmp_path, monkeypatch):
@@ -1783,3 +1783,139 @@ def test_evaluator_rejects_injected_runs_project_settings_after_previous_turn(
     assert list(second.iterdir()) == []
     cleanup_temporary_tree(second)
     release_evaluator_run_lock(second)
+
+
+def test_sigkill_recovery_uses_durable_resource_checkpoints(tmp_path, monkeypatch):
+    """Model process death after native launch, before coordinator finally."""
+    import tempfile
+    import uuid
+    from qiqi_delegate.runtime import evaluator_run_directory
+    from qiqi_delegate.final_eval_store import FinalEvaluationStore
+    from qiqi_delegate.maintenance import recover_final_evaluation
+
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    trusted = tmp_path / "trusted-crash"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
+    repos = runtime.repos()
+    with EvaluationSnapshot(repos) as snap:
+        binding = requests.graph_binding(gid)
+        reserved, created = coordinator.store.reserve(
+            gid, graph_rt.get_graph(gid)["revision"],
+            binding["request_id"], binding["request_revision"],
+            "claude-evaluator", snap.manifest, snap.digest,
+        )
+        assert created
+        eid = reserved["evaluation_id"]
+        turn = str(uuid.uuid4())
+        coordinator.store.bind_turn(eid, turn)
+        sink = Path(tempfile.gettempdir()) / ("qiqi-result-" + uuid.UUID(turn).hex)
+        run = trusted / "runs" / ("turn-" + uuid.UUID(turn).hex)
+        coordinator.store.checkpoint_cleanup(
+            eid, snapshot_root=str(snap.temporary_root),
+            cleanup_state="dispatch_prepared",
+            capture_sink=str(sink),
+            evaluator_cwd=str(run),
+            write_claim_id="turn:" + turn,
+            write_claim_repository="backend",
+        )
+        sink.mkdir(mode=0o700)
+        created_run = evaluator_run_directory(repos, snap.paths, turn)
+        assert created_run == run
+        snapshot_path = snap.retain()
+
+    # Simulate SIGKILL by making the previous PID/start token permanently dead
+    # without running Python finally or coordinator.complete().
+    with sqlite3.connect(runtime.db) as db:
+        db.execute(
+            "UPDATE final_evaluations SET owner_pid=?, owner_start_token=? "
+            "WHERE evaluation_id=?",
+            (987654321, "dead-process", eid),
+        )
+    restarted = FinalEvaluationStore(runtime.db)
+    row = restarted.get(eid)
+    assert row["status"] == "interrupted"
+    assert row["cleanup"]["capture_sink"] == str(sink)
+    assert row["cleanup"]["snapshot_root"] == str(snapshot_path)
+    assert row["cleanup"]["evaluator_cwd"] == str(run)
+    assert (run.parent / ".qiqi-active").exists()
+    with pytest.raises(ValueError, match="termination"):
+        recover_final_evaluation(
+            workspace=runtime.root, evaluation_id=eid,
+            worker_termination_confirmed=False,
+        )
+    assert sink.is_dir() and snapshot_path.is_dir() and run.is_dir()
+    recovered = recover_final_evaluation(
+        workspace=runtime.root, evaluation_id=eid,
+        worker_termination_confirmed=True,
+    )
+    assert recovered["status"] == "errored"
+    assert not sink.exists() and not snapshot_path.exists() and not run.exists()
+    assert not (run.parent / ".qiqi-active").exists()
+
+
+def test_concurrent_recoveries_do_not_remove_replacement_evaluator_lease(
+    tmp_path, monkeypatch,
+):
+    """A recovery must re-read SQLite while holding the cross-process lease guard."""
+    import concurrent.futures
+    import threading
+    import uuid
+    from qiqi_delegate.runtime import (
+        evaluator_run_directory, release_evaluator_run_lock,
+    )
+    from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
+    from qiqi_delegate.maintenance import recover_final_evaluation
+
+    runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    trusted = tmp_path / "trusted-concurrent-recovery"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
+    repos = runtime.repos()
+    with EvaluationSnapshot(repos) as snap:
+        binding = requests.graph_binding(gid)
+        reserved, created = coordinator.store.reserve(
+            gid, graph_rt.get_graph(gid)["revision"],
+            binding["request_id"], binding["request_revision"],
+            "claude-evaluator", snap.manifest, snap.digest,
+        )
+        assert created
+        eid = reserved["evaluation_id"]
+        turn = str(uuid.uuid4())
+        coordinator.store.bind_turn(eid, turn)
+        previous_cwd = evaluator_run_directory(repos, snap.paths, turn)
+        coordinator.store.complete(
+            eid, raw_response=None, report=None, status="interrupted",
+            cleanup={"cleanup_state": "workspace_close_unconfirmed",
+                     "evaluator_cwd": str(previous_cwd)},
+        )
+    start = threading.Barrier(3)
+    def recover():
+        start.wait()
+        try:
+            return recover_final_evaluation(
+                workspace=runtime.root, evaluation_id=eid,
+                worker_termination_confirmed=True,
+            )["status"]
+        except ValueError as exc:
+            return str(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(recover)
+        second = pool.submit(recover)
+        start.wait()
+        answers = [first.result(timeout=20), second.result(timeout=20)]
+    assert answers.count("errored") == 1
+    assert sum("only an interrupted" in x for x in answers) == 1
+
+    # The old interrupted evaluation cannot remove this new native turn's
+    # lease even when recovery is requested again.
+    next_cwd = evaluator_run_directory(
+        repos, {"backend": tmp_path / "unrelated-snapshot"}, str(uuid.uuid4()),
+    )
+    with pytest.raises(ValueError, match="only an interrupted"):
+        recover_final_evaluation(
+            workspace=runtime.root, evaluation_id=eid,
+            worker_termination_confirmed=True,
+        )
+    assert (trusted / "runs" / ".qiqi-active").read_text().strip() == next_cwd.name
+    cleanup_temporary_tree(next_cwd)
+    release_evaluator_run_lock(next_cwd)
