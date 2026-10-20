@@ -9,3 +9,6 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_evaluator_trust_root(tmp_path, monkeypatch):
     monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(tmp_path / "evaluator-trust-root"))
+    # Legacy snapshot-specific regressions explicitly run the legacy mode.
+    # Production defaults to live review; new tests override this to live.
+    monkeypatch.setenv("QIQI_EVALUATION_MODE", "snapshot")
