@@ -1170,11 +1170,21 @@ class DelegateRuntime:
             tuple(evaluation_repositories) if evaluation_live
             else (repository,)
         )
+        claim_repositories_json = json.dumps(list(claimed_repositories))
         if evaluation_live:
+            # This must survive SIGKILL after multi-root claims commit but
+            # before CWD/sink allocation. A crashed worker may still hold
+            # write permissions on every exposed Git root.
+            FinalEvaluationStore(self.db).checkpoint_cleanup(
+                evaluation_id,
+                cleanup_state="claim_acquisition_prepared",
+                write_claim_id=claim_id,
+                write_claim_repository=repository,
+                write_claim_repositories=claim_repositories_json,
+            )
             self._claim_many(claimed_repositories, claim_id)
         else:
             self._claim(repository, claim_id, repository_root=claim_root)
-        claim_repositories_json = json.dumps(list(claimed_repositories))
         workspace_id = None
         sink: Path | None = None
         evaluator_cwd: Path | None = None
