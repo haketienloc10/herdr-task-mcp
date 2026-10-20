@@ -284,6 +284,11 @@ class FinalEvaluationCoordinator:
                         "status": reserved["status"], "already_active": True,
                         "turn_id": reserved["turn_id"]}
             eid = reserved["evaluation_id"]
+            # The copy predates dispatch and must be discoverable after a
+            # process crash. Ordinary completion still removes it.
+            self.store.checkpoint_cleanup(
+                eid, snapshot_root=str(snap.temporary_root),
+            )
             try:
                 # Re-check live input immediately before native execution.
                 if manifest_digest(inspect_roots(roots)) != snap.digest:
