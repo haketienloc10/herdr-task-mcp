@@ -632,7 +632,8 @@ including cross-module contracts, before delivery is finalized.
    đồng thời chỉ chấp nhận `runs/turn-<uuid>` và lease `.qiqi-active`
    trong thư mục `runs`; nếu xuất hiện `runs/.claude` hoặc thư mục lạ,
    evaluator sẽ từ chối khởi động để tránh nạp project settings/hook cũ.
-   Khóa độc quyền `runs/.qiqi-active` cho phép tối đa một Final Evaluator
+   Khóa độc quyền `runs/.qiqi-active` cùng mutex OS-backed
+   `runs/.qiqi-mutex` cho phép tối đa một Final Evaluator
    chạy trên cùng trust root, kể cả giữa các MCP process. Lượt thứ hai
    nhận lỗi rõ ràng nếu evaluator trước vẫn chạy hoặc chưa được recovery;
    không tự xóa khóa của worker có thể còn sống. Đây là tuần tự hóa
