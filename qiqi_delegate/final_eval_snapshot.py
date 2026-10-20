@@ -348,6 +348,13 @@ class EvaluationSnapshot:
             self.__exit__(None, None, None)
             raise
 
+    @property
+    def temporary_root(self) -> Path:
+        """Absolute location of this active snapshot, for crash recovery."""
+        if self._temp is None:
+            raise RuntimeError("evaluation snapshot is not active")
+        return self._temp
+
     def retain(self) -> Path:
         """Keep snapshot files when a native evaluator has not confirmed shutdown."""
         if self._temp is None:
