@@ -375,13 +375,17 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
 class LiveEvaluationView:
     """No repository copy; the evaluator reads original registered roots."""
 
-    def __init__(self, roots: dict[str, Path]):
+    def __init__(
+        self, roots: dict[str, Path],
+        precomputed: dict[str, Any] | None = None,
+    ):
         self.paths = roots
-        self.manifest: dict[str, Any] = {}
+        self.manifest: dict[str, Any] = precomputed or {}
         self.digest = ""
 
     def __enter__(self) -> "LiveEvaluationView":
-        self.manifest = inspect_live_roots(self.paths)
+        if not self.manifest:
+            self.manifest = inspect_live_roots(self.paths)
         self.digest = manifest_digest(self.manifest)
         return self
 
