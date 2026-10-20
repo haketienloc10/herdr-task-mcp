@@ -628,7 +628,10 @@ including cross-module contracts, before delivery is finalized.
    Final Evaluator dùng `~/.qiqi/evaluator-cwd` làm thư mục cha được trust
    (trên Windows giải bằng `Path.home()`). Mỗi lượt khởi động trong thư mục
    con sạch `runs/turn-<uuid>`, không tái sử dụng file từ lượt trước.
-   Runtime kiểm tra chỉ dẫn khởi động trong toàn bộ chuỗi thư mục cha.
+   Runtime kiểm tra chỉ dẫn khởi động trong toàn bộ chuỗi thư mục cha,
+   đồng thời chỉ chấp nhận `runs/turn-<uuid>` và lease `.qiqi-active`
+   trong thư mục `runs`; nếu xuất hiện `runs/.claude` hoặc thư mục lạ,
+   evaluator sẽ từ chối khởi động để tránh nạp project settings/hook cũ.
    Khóa độc quyền `runs/.qiqi-active` cho phép tối đa một Final Evaluator
    chạy trên cùng trust root, kể cả giữa các MCP process. Lượt thứ hai
    nhận lỗi rõ ràng nếu evaluator trước vẫn chạy hoặc chưa được recovery;
