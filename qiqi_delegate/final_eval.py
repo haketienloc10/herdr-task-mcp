@@ -322,10 +322,9 @@ class FinalEvaluationCoordinator:
                 graph, authored, binding, task, names, snap.digest,
                 source_material, live=live,
             )
-            # JSON-encoding thousands of live file entries and SQLite
-            # reservation must not block unrelated MCP requests.
-            reserved, created = await asyncio.to_thread(
-                self.store.reserve,
+            # Keep reservation synchronous until it has committed: cancelling
+            # a background INSERT could orphan a requested attempt.
+            reserved, created = self.store.reserve(
                 graph_run_id, graph["revision"], task["request_id"],
                 task["revision"], route, snap.manifest, snap.digest,
                 snapshot_root=None if live else snap.temporary_root,
