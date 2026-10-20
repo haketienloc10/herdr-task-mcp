@@ -269,23 +269,39 @@ class FinalEvaluationCoordinator:
             graph_run_id, expected_revision,
         )
         # The user controls evaluator CLI policy in agent-routing.yaml.
-        # Every evaluation still uses a fresh isolated source snapshot.
         self.runtime.route(route)
-        with EvaluationSnapshot(roots) as snap:
-            source_material = self._materialize_task_sources(
-                task, snap.paths[names[0]],
-                graph_context=self._graph_context(
-                    graph, authored, binding, task, snap.digest,
-                ),
+        mode = os.environ.get("QIQI_EVALUATION_MODE", "live").strip().lower()
+        if mode not in {"live", "snapshot"}:
+            raise ValueError("QIQI_EVALUATION_MODE must be live or snapshot")
+        live = mode == "live"
+        source_view = LiveEvaluationView(roots) if live else EvaluationSnapshot(roots)
+        with source_view as snap:
+            graph_context = self._graph_context(
+                graph, authored, binding, task, snap.digest,
             )
+            archive = None
+            if live:
+                def archive(cwd: Path) -> None:
+                    self._materialize_task_sources(
+                        task, cwd, graph_context=graph_context,
+                    )
+                source_material = {
+                    "index_path": ".qiqi-final-task-sources/index.json",
+                    "graph_path": ".qiqi-final-task-sources/task-graph.json",
+                    "source_count": len(task["sources"]),
+                }
+            else:
+                source_material = self._materialize_task_sources(
+                    task, snap.paths[names[0]], graph_context=graph_context,
+                )
             packet = self._packet(
                 graph, authored, binding, task, names, snap.digest,
-                source_material,
+                source_material, live=live,
             )
             reserved, created = self.store.reserve(
                 graph_run_id, graph["revision"], task["request_id"],
                 task["revision"], route, snap.manifest, snap.digest,
-                snapshot_root=snap.temporary_root,
+                snapshot_root=None if live else snap.temporary_root,
             )
             if not created:
                 # Reuse a current finalized PASS; never demote delivered state
@@ -307,12 +323,15 @@ class FinalEvaluationCoordinator:
             # Snapshot recovery locator was written atomically by reserve().
             try:
                 # Re-check live input immediately before native execution.
-                if manifest_digest(inspect_roots(roots)) != snap.digest:
+                inspector = inspect_live_roots if live else inspect_roots
+                if manifest_digest(inspector(roots)) != snap.digest:
                     raise RuntimeError("evaluation source changed before dispatch")
                 response = await self.runtime.delegate(
                     repository=names[0], route=route, packet=packet,
                     evaluation_repositories=names,
                     evaluation_roots=snap.paths, evaluation_id=eid,
+                    **({"evaluation_archive": archive,
+                        "evaluation_manifest": snap.manifest} if live else {}),
                 )
             except BaseException as exc:
                 # A Herdr worker blocked on trust/approval or an unconfirmed
@@ -333,7 +352,8 @@ class FinalEvaluationCoordinator:
                 if interrupted:
                     cleanup = dict(getattr(exc, "cleanup", None) or {})
                     cleanup.setdefault("cleanup_state", "dispatch_interrupted")
-                    cleanup["snapshot_root"] = str(snap.retain())
+                    if not live:
+                        cleanup["snapshot_root"] = str(snap.retain())
                 # Preserve the prebound turn; captured output alone never PASS.
                 self.store.complete(
                     eid, raw_response=None, report=None,
@@ -368,7 +388,8 @@ class FinalEvaluationCoordinator:
                     "interrupted evaluation ID before retry. "
                     "Captured PASS is NOT finalization authority."
                 )
-                cleanup["snapshot_root"] = str(snap.retain())
+                if not live:
+                    cleanup["snapshot_root"] = str(snap.retain())
                 self.store.complete(
                     eid, raw_response=raw if isinstance(raw, str) else None,
                     report=None, status="interrupted", detail=detail,
@@ -391,6 +412,10 @@ class FinalEvaluationCoordinator:
                               "inconclusive": "inconclusive"}[report["verdict"]]
                 except (ValueError, TypeError, KeyError) as exc:
                     detail = "Invalid FinalEvaluationReport: " + str(exc)
+            if live and manifest_digest(inspect_live_roots(roots)) != snap.digest:
+                status = "inconclusive"
+                report = None
+                detail = "Registered source changed during live evaluation; rerun"
             self.store.complete(
                 eid, raw_response=raw, report=report, status=status,
                 detail=detail, turn_id=response.get("turn_id"),
