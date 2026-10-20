@@ -64,7 +64,7 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     entry = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
     eid = entry["evaluation_id"]
     assert observed["cwd"] != str(originals["backend"])
-    assert __import__("pathlib").Path(observed["cwd"]).is_dir()
+    assert not __import__("pathlib").Path(observed["cwd"]).exists() if not close_unconfirmed else __import__("pathlib").Path(observed["cwd"]).is_dir()
     assert entry["raw_response"] is not None
     assert json.loads(entry["raw_response"])["verdict"] == "pass"
     assert entry["native_capture"]["state"] == "settled"
@@ -92,7 +92,9 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     from pathlib import Path
     retained_sink = Path(cleanup["capture_sink"])
     retained_snapshot = Path(cleanup["snapshot_root"])
+    retained_cwd = Path(cleanup["evaluator_cwd"])
     assert retained_sink.is_dir() and retained_snapshot.is_dir()
+    assert retained_cwd.is_dir()
     assert coordinator.graph_status(gid)["final_evaluation_status"] == "interrupted"
     assert coordinator.graph_status(gid)["delivery_status"] == "not_finalized"
 
@@ -130,7 +132,8 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     assert recovered["status"] == "errored"
     assert recovered["cleanup"] == entry["cleanup"]  # retained for audit
     assert not retained_sink.exists() and not retained_snapshot.exists()
-    assert Path(observed["cwd"]).is_dir()
+    assert not retained_cwd.exists()
+    assert Path(observed["cwd"]).parent.parent.is_dir()
     assert recovered["finalized_at_ns"] is None
     with sqlite3.connect(runtime.db) as db:
         assert db.execute(
