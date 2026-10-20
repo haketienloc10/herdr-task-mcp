@@ -683,7 +683,7 @@ def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loa
         async def fake_json(*args, **kw):
             assert args[:3] == ("workspace", "create", "--cwd")
             neutral = Path(args[3])
-            assert neutral.name == "evaluator-neutral-cwd"
+            assert neutral.name == "evaluator-cwd"
             assert neutral.is_dir()
             assert neutral not in snap.paths.values()
             assert not (neutral / "CLAUDE.md").exists()
