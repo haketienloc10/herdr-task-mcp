@@ -49,6 +49,16 @@ def _fake_native(runtime, coordinator, gid, monkeypatch, *, mutate=None):
         assert contents["backend"]["inspection_mode"] == "live"
         assert contents["backend"]["root"] == str(runtime.repos()["backend"])
         assert contents["frontend"]["root"] == str(runtime.repos()["frontend"])
+        # All exposed registered Git roots must be atomically claimed.
+        with runtime._connect() as db:
+            claims = {
+                row["repository"]: row["claim_id"]
+                for row in db.execute(
+                    "SELECT repository, claim_id FROM write_claims"
+                )
+            }
+        assert set(claims) == {"backend", "frontend"}
+        assert len(set(claims.values())) == 1
         assert len(json.loads(graph_archive.read_text())["task_graph"]) == 2
         assert "Display prices correctly" in json.loads(
             source_index.read_text()
@@ -152,3 +162,77 @@ def test_live_manifest_hashes_unchanged_binary_and_detects_changes(
     jar.write_bytes(original + b"next-build")
     second = inspect_live_roots(runtime.repos())
     assert manifest_digest(second) != manifest_digest(first)
+
+
+def test_multi_root_claim_acquisition_is_atomic(tmp_path, monkeypatch):
+    from qiqi_delegate.maintenance import show_claim
+
+    runtime, *_ = setup_graph(tmp_path)
+    runtime._claim("frontend", "turn:peer")
+    with pytest.raises(RuntimeError, match="busy"):
+        runtime._claim_many(("backend", "frontend"), "turn:review")
+    assert show_claim(
+        workspace=runtime.root, repository="backend",
+    )["claim_id"] is None
+    assert show_claim(
+        workspace=runtime.root, repository="frontend",
+    )["claim_id"] == "turn:peer"
+    runtime.release_claim("frontend", "turn:peer")
+
+    runtime._claim_many(("backend", "frontend"), "turn:review")
+    for name in ("backend", "frontend"):
+        assert show_claim(
+            workspace=runtime.root, repository=name,
+        )["claim_id"] == "turn:review"
+    runtime._release_claims(("backend", "frontend"), "turn:review")
+    for name in ("backend", "frontend"):
+        assert show_claim(
+            workspace=runtime.root, repository=name,
+        )["claim_id"] is None
+
+
+def test_post_review_live_inspection_error_completes_attempt(
+    tmp_path, monkeypatch,
+):
+    import qiqi_delegate.final_eval as evaluation_module
+
+    monkeypatch.setenv("QIQI_EVALUATION_MODE", "live")
+    runtime, _requests, graphs, coordinator, gid = setup_graph(tmp_path)
+    _fake_native(runtime, coordinator, gid, monkeypatch)
+    real_inspect = evaluation_module.inspect_live_roots
+    scans = {"count": 0}
+
+    def scan_with_late_failure(roots):
+        scans["count"] += 1
+        if scans["count"] == 3:
+            raise ValueError("simulated symlink appeared after native review")
+        return real_inspect(roots)
+
+    monkeypatch.setattr(
+        evaluation_module, "inspect_live_roots", scan_with_late_failure,
+    )
+    revision = graphs.get_graph(gid)["revision"]
+    attempt = asyncio.run(asyncio.wait_for(
+        coordinator.start(gid, "codex-evaluator", revision), timeout=15,
+    ))
+    assert attempt["status"] == "inconclusive"
+    assert "Could not verify live repository freshness" in attempt["detail"]
+    assert attempt["report"] is None
+    assert coordinator.store.latest(gid)["status"] == "inconclusive"
+
+
+def test_native_prompt_labels_roots_as_live_not_isolated_copies():
+    from qiqi_delegate.core import build_task_packet, render_task_prompt
+
+    packet = build_task_packet(
+        objective="Review two modules", scope=["backend", "frontend"],
+        acceptance_criteria=["Check integration"],
+    )
+    text = render_task_prompt(
+        packet, evaluation_repositories=("backend", "frontend"),
+        evaluation_live=True,
+    )
+    assert "live registered Git roots" in text
+    assert "REAL original working trees" in text
+    assert "isolated copies" not in text
+    assert "Do not write" in text
