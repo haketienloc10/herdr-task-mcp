@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import tempfile
 import sys
 import time
@@ -14,6 +13,7 @@ from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
+from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
 
 
 def _validated_runtime(
@@ -255,7 +255,7 @@ def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
                 not path.name.startswith(prefix) or path.is_symlink()):
             raise ValueError("unsafe retained evaluator cleanup path")
         if path.exists():
-            shutil.rmtree(path)
+            cleanup_temporary_tree(path)
 
 
 def recover_final_evaluation(
