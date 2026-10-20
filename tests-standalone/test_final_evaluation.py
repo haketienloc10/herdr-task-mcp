@@ -1562,7 +1562,7 @@ def test_evaluator_refuses_poisoned_trusted_ancestors(tmp_path, monkeypatch):
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     (root / "CLAUDE.md").write_text("poisoned")
-    with pytest.raises(ValueError, match="only the runs directory"):
+    with pytest.raises(ValueError, match="ancestor contains startup instructions"):
         evaluator_run_directory({"repo": repo}, {"repo": snapshot}, str(uuid.uuid4()))
     (root / "CLAUDE.md").unlink()
     (root / "runs").mkdir()
