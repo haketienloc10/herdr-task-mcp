@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
+import re
+import tempfile
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from qiqi_delegate.runtime import DelegateRuntime
+from qiqi_delegate.runtime import (
+    DelegateRuntime, evaluator_lease_guard, release_evaluator_run_lock,
+)
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
+from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
 
 
 def _validated_runtime(
@@ -234,6 +241,91 @@ def show_final_evaluation(*, workspace: Path, evaluation_id: str) -> dict[str, A
     return FinalEvaluationStore(runtime.db).inspect_interrupted(evaluation_id)
 
 
+def _recovery_lease_guard(cleanup: dict[str, Any] | None):
+    """Lock the exact trusted runs root before reading or mutating a lease."""
+    value = (cleanup or {}).get("evaluator_cwd")
+    if not value:
+        return contextlib.nullcontext()
+    if not isinstance(value, str):
+        raise ValueError("invalid evaluator CWD recovery metadata")
+    configured = os.environ.get("QIQI_EVALUATOR_CWD")
+    if configured is not None and not configured.strip():
+        raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
+    trusted = (Path(configured).expanduser() if configured is not None
+               else Path.home() / ".qiqi" / "evaluator-cwd")
+    path = Path(value)
+    if (not trusted.is_absolute() or not path.is_absolute()
+            or not re.fullmatch(r"turn-[0-9a-f]{32}", path.name)
+            or path.parent.resolve() != trusted.resolve() / "runs"
+            or path.is_symlink()):
+        raise ValueError("unsafe retained evaluator CWD cleanup path")
+    return evaluator_lease_guard(path.parent)
+
+
+def _cleanup_retained_evaluation_paths(
+    cleanup: dict[str, Any] | None, *, guard_held: bool = False,
+) -> None:
+    """Remove only QiQi-generated temporary trees after verified worker exit."""
+    if not cleanup:
+        return
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    targets = []
+    for key, prefix in (
+        ("capture_sink", "qiqi-result-"),
+        ("snapshot_root", "qiqi-final-eval-"),
+    ):
+        value = cleanup.get(key)
+        if not value:
+            continue
+        if not isinstance(value, str):
+            raise ValueError("invalid retained evaluator path metadata")
+        path = Path(value)
+        if (not path.is_absolute() or path.parent.resolve() != temp_root or
+                not path.name.startswith(prefix) or path.is_symlink()):
+            raise ValueError("unsafe retained evaluator cleanup path")
+        targets.append(path)
+
+    evaluator_cwd = None
+    value = cleanup.get("evaluator_cwd")
+    if value:
+        if not isinstance(value, str):
+            raise ValueError("invalid retained evaluator CWD metadata")
+        configured = os.environ.get("QIQI_EVALUATOR_CWD")
+        if configured is not None and not configured.strip():
+            raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
+        trusted = (Path(configured).expanduser() if configured is not None
+                   else Path.home() / ".qiqi" / "evaluator-cwd")
+        if not trusted.is_absolute():
+            raise ValueError("QIQI_EVALUATOR_CWD must be an absolute path")
+        path = Path(value)
+        # The child path is generated from a UUID. Never delete arbitrary
+        # content under the operator's trusted ancestor.
+        if (not path.is_absolute() or path.is_symlink() or
+                path.parent.resolve() != trusted.resolve() / "runs" or
+                not re.fullmatch(r"turn-[0-9a-f]{32}", path.name)):
+            raise ValueError("unsafe retained evaluator CWD cleanup path")
+        # This run's active lease must never belong to another evaluator.
+        lease = path.parent / ".qiqi-active"
+        if lease.is_symlink():
+            raise ValueError("unsafe evaluator lease symlink")
+        if lease.exists() and lease.read_text(encoding="utf-8").strip() != path.name:
+            raise ValueError("evaluator lease belongs to another active worker")
+        evaluator_cwd = path
+        targets.append(path)
+
+    # The caller's guard must encompass verification, every deletion, lease
+    # unlink, and the final SQLite transition. A second recovery cannot
+    # remove a newly created worker's lease between compare and unlink.
+    if evaluator_cwd is not None and not guard_held:
+        with _recovery_lease_guard(cleanup):
+            return _cleanup_retained_evaluation_paths(cleanup, guard_held=True)
+    for path in targets:
+        if path.exists():
+            cleanup_temporary_tree(path)
+    if evaluator_cwd is not None:
+        release_evaluator_run_lock(evaluator_cwd, guard_held=True)
+
+
 def recover_final_evaluation(
     *, workspace: Path, evaluation_id: str,
     worker_termination_confirmed: bool,
@@ -243,9 +335,20 @@ def recover_final_evaluation(
     if not workspace.is_dir():
         raise ValueError("workspace directory missing")
     runtime = DelegateRuntime(workspace)
-    return FinalEvaluationStore(runtime.db).release_interrupted(
-        evaluation_id, worker_termination_confirmed=True,
-    )
+    store = FinalEvaluationStore(runtime.db)
+    previous = store.inspect_interrupted(evaluation_id)
+    with _recovery_lease_guard(previous.get("cleanup")):
+        # Re-read inside the inter-process guard: a concurrent recovery may
+        # already have completed and a new evaluator may own the lease.
+        previous = store.inspect_interrupted(evaluation_id)
+        if previous["status"] != "interrupted":
+            raise ValueError("only an interrupted evaluation can be released")
+        _cleanup_retained_evaluation_paths(
+            previous.get("cleanup"), guard_held=True,
+        )
+        return store.release_interrupted(
+            evaluation_id, worker_termination_confirmed=True,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

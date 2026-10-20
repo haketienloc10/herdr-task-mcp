@@ -233,6 +233,7 @@ class FinalEvaluationStore:
         self, graph_run_id: str, graph_revision: int, request_id: str,
         request_revision: int, route: str,
         manifest: dict[str, Any], digest: str,
+        *, snapshot_root: Path | None = None,
     ) -> tuple[dict[str, Any], bool]:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -306,14 +307,47 @@ class FinalEvaluationStore:
                     "INSERT INTO final_evaluations "
                     "(evaluation_id,graph_run_id,graph_revision,request_id,"
                     "request_revision,route,manifest_json,manifest_digest,"
-                    "status,owner_pid,owner_start_token,created_at_ns,updated_at_ns) "
-                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?)",
+                    "status,cleanup_json,owner_pid,owner_start_token,"
+                    "created_at_ns,updated_at_ns) "
+                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?,?)",
                     (return_id, graph_run_id, graph_revision, request_id,
                      request_revision, route, json.dumps(manifest, sort_keys=True),
-                     digest, os.getpid(), _process_start_token(os.getpid()), now, now),
+                     digest, json.dumps(
+                         {"snapshot_root": str(snapshot_root)}, sort_keys=True
+                     ) if snapshot_root is not None else None,
+                     os.getpid(), _process_start_token(os.getpid()), now, now),
                 )
                 created = True
         return self.get(return_id), created
+
+    def checkpoint_cleanup(self, evaluation_id: str, **fields: str) -> None:
+        """Durably record resource locators before launching native workers.
+
+        These fields remain on orphaned 'evaluating' attempts after SIGKILL.
+        Normal completion clears provisional cleanup_json unless interrupted.
+        """
+        if not fields or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            or not value for key, value in fields.items()
+        ):
+            raise ValueError("invalid evaluator recovery checkpoint")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status, cleanup_json FROM final_evaluations "
+                "WHERE evaluation_id=?", (evaluation_id,),
+            ).fetchone()
+            if row is None or row["status"] not in ACTIVE:
+                raise RuntimeError("cannot checkpoint an inactive evaluation")
+            current = json.loads(row["cleanup_json"]) if row["cleanup_json"] else {}
+            current.update(fields)
+            updated = db.execute(
+                "UPDATE final_evaluations SET cleanup_json=?, updated_at_ns=? "
+                "WHERE evaluation_id=? AND status IN ('requested','evaluating')",
+                (json.dumps(current, sort_keys=True), time.time_ns(), evaluation_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("concurrent evaluator checkpoint transition")
 
     def bind_turn(self, evaluation_id: str, turn_id: str) -> None:
         with self._connect() as db:

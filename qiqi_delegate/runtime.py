@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -17,6 +18,8 @@ from typing import Any
 import yaml
 
 from qiqi_delegate.task_request import copy_workspace_snapshot
+from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
+from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from qiqi_delegate.core import (
     TaskPacket, render_task_prompt, codex_stop_hook_hash,
     codex_session_hook_key, load_capture_events, resolve_capture_events,
@@ -195,6 +198,166 @@ def _resolve_evaluator_claude_path_args(args: list[str], route_root: Path) -> li
                 resolved[index] = absolute(args[index])
         index += 1
     return resolved
+
+
+def evaluator_working_directory(
+    repositories: dict[str, Path], snapshots: dict[str, Path],
+) -> Path:
+    """Stable operator-trusted CWD; never a candidate repository or snapshot."""
+    configured = os.environ.get("QIQI_EVALUATOR_CWD")
+    if configured is not None and not configured.strip():
+        raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
+    path = (Path(configured).expanduser() if configured is not None
+            else Path.home() / ".qiqi" / "evaluator-cwd")
+    if not path.is_absolute():
+        raise ValueError("QIQI_EVALUATOR_CWD must be an absolute path")
+    candidate = path.resolve()
+    # Native agents may discover startup instructions from any CWD ancestor.
+    # Refuse a custom trust root beneath a directory containing project
+    # instructions; the user's ~/.claude settings remain operator-managed.
+    home = Path.home().resolve()
+    for ancestor in (candidate, *candidate.parents):
+        for instruction in ("CLAUDE.md", "AGENTS.md", ".mcp.json"):
+            if (ancestor / instruction).exists() or (ancestor / instruction).is_symlink():
+                raise ValueError(
+                    f"evaluator CWD ancestor contains startup instructions: "
+                    f"{ancestor / instruction}"
+                )
+        if ancestor != home and (ancestor / ".claude").exists():
+            raise ValueError(
+                f"evaluator CWD ancestor contains project settings: "
+                f"{ancestor / '.claude'}"
+            )
+    for root in (*repositories.values(), *snapshots.values()):
+        canonical = root.resolve()
+        if (candidate == canonical or candidate in canonical.parents or
+                canonical in candidate.parents):
+            raise ValueError(
+                "evaluator working directory must be outside registered "
+                "repositories and evaluation snapshots"
+            )
+    # The trust anchor must contain no project instructions/configuration.
+    # Individual turns run in fresh child directories instead of sharing a
+    # writable startup workspace; no trust is granted programmatically.
+    if path.is_symlink():
+        raise ValueError("evaluator trust root must not be a symlink")
+    candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not candidate.is_dir():
+        raise ValueError("evaluator working directory is not a directory")
+    unexpected = [item.name for item in candidate.iterdir()
+                  if item.name != "runs"]
+    if unexpected:
+        raise ValueError("evaluator trust root must contain only the runs directory")
+    runs = candidate / "runs"
+    if runs.is_symlink():
+        raise ValueError("evaluator runs directory must not be a symlink")
+    runs.mkdir(mode=0o700, exist_ok=True)
+    # The native CWD is runs/turn-<uuid>. Claude can also load project
+    # settings from *runs* itself, so arbitrary sibling directories must
+    # never be treated as harmless. In particular runs/.claude would inject
+    # hooks and project settings into every subsequent evaluator session.
+    def approved_run_entry(item: Path) -> bool:
+        if item.is_symlink():
+            return False
+        if item.name in (".qiqi-active", ".qiqi-mutex"):
+            return item.is_file()
+        return (
+            len(item.name) == len("turn-") + 32
+            and item.name.startswith("turn-")
+            and all(c in "0123456789abcdef" for c in item.name[5:])
+            and item.is_dir()
+        )
+
+    if not runs.is_dir() or not all(
+        approved_run_entry(item) for item in runs.iterdir()
+    ):
+        raise ValueError("evaluator runs directory contains unexpected files")
+    return candidate
+
+
+def _evaluator_lock_path(run_cwd: Path) -> Path:
+    return run_cwd.parent / ".qiqi-active"
+
+
+@contextlib.contextmanager
+def evaluator_lease_guard(runs: Path):
+    """Crash-released cross-process mutex for *all* lease mutations."""
+    gate = runs / ".qiqi-mutex"
+    if gate.is_symlink():
+        raise RuntimeError("refusing symlinked evaluator mutex")
+    fd = os.open(str(gate), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def release_evaluator_run_lock(run_cwd: Path, *, guard_held: bool = False) -> None:
+    """Release only the confirmed-stopped turn's lease, atomically."""
+    if not guard_held:
+        with evaluator_lease_guard(run_cwd.parent):
+            release_evaluator_run_lock(run_cwd, guard_held=True)
+        return
+    lock = _evaluator_lock_path(run_cwd)
+    if lock.is_symlink():
+        raise RuntimeError("refusing to release symlinked evaluator lease")
+    if not lock.exists():
+        return
+    if lock.read_text(encoding="utf-8").strip() != run_cwd.name:
+        raise RuntimeError("evaluator lease belongs to a different turn")
+    lock.unlink()
+
+
+def evaluator_run_directory(
+    repositories: dict[str, Path], snapshots: dict[str, Path], turn_id: str,
+) -> Path:
+    """Fresh per-turn native CWD below a stable operator-trusted ancestor."""
+    trusted = evaluator_working_directory(repositories, snapshots)
+    run = trusted / "runs" / ("turn-" + uuid.UUID(turn_id).hex)
+    lock = _evaluator_lock_path(run)
+    # The guard serializes creation against recovery's compare + unlink.
+    with evaluator_lease_guard(run.parent):
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise RuntimeError(
+                "another evaluator is active or requires operator recovery; "
+                f"inspect the lease at {lock}"
+            ) from exc
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(run.name + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            run.mkdir(mode=0o700)  # never reuse a previous turn's content
+        except BaseException:
+            release_evaluator_run_lock(run, guard_held=True)
+            raise
+    return run
+
+
+class EvaluatorCleanupUnconfirmed(RuntimeError):
+    """An evaluator may still be running; retain its capture and source snapshots."""
+
+    def __init__(self, detail: str, cleanup: dict[str, str]):
+        super().__init__(detail)
+        self.cleanup = cleanup
 
 
 class AgentStartupBlocked(RuntimeError):
@@ -948,12 +1111,50 @@ class DelegateRuntime:
         claim_root = repos[repository] if evaluation_id is not None else execution_root
         self._claim(repository, claim_id, repository_root=claim_root)
         workspace_id = None
+        sink: Path | None = None
+        evaluator_cwd: Path | None = None
+        planned_run: Path | None = None
+        workspace_label: str | None = None
+        workspace_create_attempted = False
         closed = False
         preserve_startup = False
         result = None
         was_cancelled = False
+        original_cancel: asyncio.CancelledError | None = None
         try:
-            with tempfile.TemporaryDirectory(prefix="qiqi-result-") as td:
+            # Peers keep their existing TemporaryDirectory lifecycle. Only
+            # Final Evaluation needs persistent sink paths on blocked startup.
+            if evaluation_id is not None:
+                # Predeclare deterministic resource locators durably before
+                # creating a sink, lease, or native workspace. SIGKILL cannot
+                # bypass this checkpoint once the native worker can run.
+                sink_path = Path(tempfile.gettempdir()) / (
+                    "qiqi-result-" + uuid.UUID(turn_id).hex
+                )
+                trusted = evaluator_working_directory(repos, evaluation_roots)
+                planned_run = trusted / "runs" / (
+                    "turn-" + uuid.UUID(turn_id).hex
+                )
+                # Herdr assigns workspace_id. Persist a unique label before
+                # workspace create so an orphan is discoverable even if this
+                # process dies while waiting for Herdr's response.
+                workspace_label = "qiqi:evaluator:" + turn_id
+                FinalEvaluationStore(self.db).checkpoint_cleanup(
+                    evaluation_id,
+                    cleanup_state="dispatch_prepared",
+                    capture_sink=str(sink_path),
+                    evaluator_cwd=str(planned_run),
+                    write_claim_id=claim_id,
+                    write_claim_repository=repository,
+                    workspace_label=workspace_label,
+                )
+                sink_path.mkdir(mode=0o700)  # no reuse of previous captures
+                sink_context = contextlib.nullcontext(str(sink_path))
+            else:
+                sink_context = tempfile.TemporaryDirectory(
+                    prefix="qiqi-result-"
+                )
+            with sink_context as td:
                 sink = Path(td)
                 os.chmod(sink, 0o700)
                 nonce = uuid.uuid4().hex
@@ -973,12 +1174,22 @@ class DelegateRuntime:
                 # inheriting candidate repository startup instructions.
                 native_cwd = execution_root
                 if evaluation_id is not None:
-                    native_cwd = sink / "evaluator-neutral-cwd"
-                    native_cwd.mkdir(mode=0o700)
+                    evaluator_cwd = evaluator_run_directory(
+                        repos, evaluation_roots, turn_id,
+                    )
+                    native_cwd = evaluator_cwd
                 await self._ensure_herdr_server()
+                label = (workspace_label if evaluation_id is not None else
+                         f"qiqi:{repository}:{turn_id[:8]}")
+                workspace_create_attempted = True
                 top = await self._json("workspace", "create", "--cwd", str(native_cwd),
-                                       "--label", f"qiqi:{repository}:{turn_id[:8]}", "--no-focus")
+                                       "--label", label, "--no-focus")
                 workspace_id = top["workspace"]["workspace_id"]
+                if evaluation_id is not None:
+                    FinalEvaluationStore(self.db).checkpoint_cleanup(
+                        evaluation_id, workspace_id=str(workspace_id),
+                        cleanup_state="native_workspace_created",
+                    )
                 pane_id = top["root_pane"]["pane_id"]
                 agent_args = self._hook_args(adapter, sink, nonce) + args
                 if mounted_sources:
@@ -1079,7 +1290,7 @@ class DelegateRuntime:
                 f"repository={repository}; inspect: {target} agent explain "
                 f"{exc.agent_name} --json; startup_evidence={exc}"
             )
-            raise AgentStartupBlocked(
+            blocked = AgentStartupBlocked(
                 exc.agent_name, exc.pane_id,
                 f"workspace_id={workspace_id}; write_claim_id={claim_id}; "
                 f"repository={repository}; "
@@ -1092,11 +1303,23 @@ class DelegateRuntime:
                 f"delegated task prompt to the blocked agent manually. {exc}",
                 recovery_command=recovery,
                 public_context=public_context,
-            ) from exc
-        except asyncio.CancelledError:
-            # Task.cancelling() is only available on newer Python releases;
-            # record the original cancellation explicitly for Python 3.10.
+            )
+            if evaluation_id is not None:
+                blocked.cleanup = {
+                    "cleanup_state": "agent_startup_blocked",
+                    "workspace_label": workspace_label or "",
+                    "workspace_id": str(workspace_id),
+                    "write_claim_id": claim_id,
+                    "write_claim_repository": repository,
+                    "capture_sink": str(sink) if sink is not None else "",
+                    "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
+                }
+            raise blocked from exc
+        except asyncio.CancelledError as exc:
+            # Keep a reference so finally can attach the actual worker-close
+            # result to the original exception before it reaches the coordinator.
             was_cancelled = True
+            original_cancel = exc
             raise
         finally:
             error = None
@@ -1123,23 +1346,111 @@ class DelegateRuntime:
                 error = close_task.result()
                 closed = error is None
             else:
-                closed = True
+                # A failed/aborted create request may have succeeded in Herdr
+                # despite never returning its assigned workspace_id. Do not
+                # delete resources or lease on such an ambiguous outcome.
+                closed = not (
+                    evaluation_id is not None and workspace_create_attempted
+                )
             if closed:
-                self.release_claim(repository, claim_id)
+                try:
+                    self.release_claim(repository, claim_id)
+                    if sink is not None and evaluation_id is not None:
+                        cleanup_temporary_tree(sink)
+                    if evaluator_cwd is not None:
+                        # Do not release the lease on a failed deletion.
+                        cleanup_temporary_tree(evaluator_cwd)
+                        release_evaluator_run_lock(evaluator_cwd)
+                except Exception as cleanup_exc:
+                    if evaluation_id is not None:
+                        raise EvaluatorCleanupUnconfirmed(
+                            "Herdr workspace closed, but local cleanup failed: "
+                            + str(cleanup_exc),
+                            {
+                                "cleanup_state": "local_cleanup_failed",
+                                "workspace_id": str(workspace_id or ""),
+                                "workspace_label": workspace_label or "",
+                                "write_claim_id": claim_id,
+                                "write_claim_repository": repository,
+                                "capture_sink": str(sink) if sink is not None else "",
+                                "evaluator_cwd": str(
+                                    evaluator_cwd or planned_run or ""
+                                ),
+                            },
+                        ) from cleanup_exc
+                    raise
+                if original_cancel is not None:
+                    original_cancel.evaluator_worker_closed = True
+            if (not closed and workspace_id is None and
+                    workspace_create_attempted and evaluation_id is not None):
+                uncertain = {
+                    "cleanup_state": "workspace_create_unconfirmed",
+                    "workspace_label": workspace_label or "",
+                    "workspace_id": "",
+                    "write_claim_id": claim_id,
+                    "write_claim_repository": repository,
+                    "capture_sink": str(sink) if sink is not None else "",
+                    "evaluator_cwd": str(evaluator_cwd or planned_run or ""),
+                }
+                if original_cancel is not None:
+                    original_cancel.cleanup = uncertain
+                else:
+                    raise EvaluatorCleanupUnconfirmed(
+                        "Herdr workspace create outcome unknown; inspect "
+                        "workspace list for exact label and CWD before "
+                        "confirming worker shutdown: " + (workspace_label or ""),
+                        uncertain,
+                    )
+            if not closed and original_cancel is not None and evaluation_id is not None and workspace_id:
+                original_cancel.cleanup = {
+                    "cleanup_state": "workspace_close_unconfirmed",
+                    "workspace_label": workspace_label or "",
+                    "workspace_id": str(workspace_id),
+                    "write_claim_id": claim_id,
+                    "write_claim_repository": repository,
+                    "capture_sink": str(sink) if sink is not None else "",
+                    "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
+                }
             if error:
                 if result is None and not (was_cancelled or cancelled_during_close):
-                    raise RuntimeError(
-                        f"workspace close unconfirmed; workspace={workspace_id}; "
-                        f"claim={claim_id}; {error}"
-                    )
+                    detail = (f"workspace close unconfirmed; workspace={workspace_id}; "
+                              f"claim={claim_id}; {error}")
+                    if evaluation_id is not None:
+                        raise EvaluatorCleanupUnconfirmed(detail, {
+                            "cleanup_state": "workspace_close_unconfirmed",
+                            "workspace_label": workspace_label or "",
+                            "workspace_id": str(workspace_id),
+                            "write_claim_id": claim_id,
+                            "write_claim_repository": repository,
+                            "capture_sink": str(sink) if sink is not None else "",
+                            "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
+                        })
+                    raise RuntimeError(detail)
                 if result is not None:
                     result.update({"cleanup_state": "workspace_close_unconfirmed",
+                                   "workspace_label": workspace_label or "",
                                    "write_claim_id": claim_id, "write_claim_repository": repository,
                                    "workspace_id": workspace_id,
+                                   "capture_sink": str(sink) if sink is not None else "",
+                                   "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                                    "recovery_action": "Verify worker has stopped; then release claim"})
             if cancelled_during_close:
                 # A second cancel must be propagated *after* the close task
                 # succeeds or fails, never while it can still leave live agents.
-                raise asyncio.CancelledError()
+                cancelled = asyncio.CancelledError()
+                if evaluation_id is not None:
+                    if closed:
+                        cancelled.evaluator_worker_closed = True
+                    else:
+                        cancelled.cleanup = {
+                            "cleanup_state": "workspace_close_unconfirmed",
+                            "workspace_label": workspace_label or "",
+                            "workspace_id": str(workspace_id),
+                            "write_claim_id": claim_id,
+                            "write_claim_repository": repository,
+                            "capture_sink": str(sink) if sink is not None else "",
+                            "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
+                        }
+                raise cancelled
         assert result is not None
         return result

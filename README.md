@@ -625,8 +625,26 @@ including cross-module contracts, before delivery is finalized.
    settings và MCP config để tránh chạy hooks/MCP nằm trong code ứng viên;
    runtime chặn override của các flags bảo vệ và result hooks.
    Mặc định cài mới: Claude dùng `--permission-mode auto`.
-   Final Evaluator làm việc trên bản sao thư mục tạm để không cần dùng
-   live repository làm CWD. Mỗi bản sao được truyền qua `--add-dir`;
+   Final Evaluator dùng `~/.qiqi/evaluator-cwd` làm thư mục cha được trust
+   (trên Windows giải bằng `Path.home()`). Mỗi lượt khởi động trong thư mục
+   con sạch `runs/turn-<uuid>`, không tái sử dụng file từ lượt trước.
+   Runtime kiểm tra chỉ dẫn khởi động trong toàn bộ chuỗi thư mục cha,
+   đồng thời chỉ chấp nhận `runs/turn-<uuid>` và lease `.qiqi-active`
+   trong thư mục `runs`; nếu xuất hiện `runs/.claude` hoặc thư mục lạ,
+   evaluator sẽ từ chối khởi động để tránh nạp project settings/hook cũ.
+   Khóa độc quyền `runs/.qiqi-active` cùng mutex OS-backed
+   `runs/.qiqi-mutex` cho phép tối đa một Final Evaluator
+   chạy trên cùng trust root, kể cả giữa các MCP process. Lượt thứ hai
+   nhận lỗi rõ ràng nếu evaluator trước vẫn chạy hoặc chưa được recovery;
+   không tự xóa khóa của worker có thể còn sống. Đây là tuần tự hóa
+   có phối hợp, không phải OS sandbox đối với tiến trình cố tình ghi đè
+   dữ liệu khi chạy cùng UID.
+   Claude interactive thường kế thừa trust của thư mục cha không thuộc Git;
+   không tự chỉnh trạng thái trust và cần kiểm chứng với CLI thực tế.
+   Có thể đặt `QIQI_EVALUATOR_CWD` thành đường dẫn tuyệt đối ngoài
+   repository và snapshot. Runtime không tự xác nhận trust hoặc thay đổi
+   permission mode. Claude route mặc định dùng `--permission-mode auto`.
+   Source vẫn nằm trong bản sao tạm và được truyền qua `--add-dir`;
    đây chỉ là quyền truy cập thư mục, không phải filesystem sandbox.
    Hệ thống không yêu cầu Linux inotify hay kernel snapshot monitoring.
 4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
@@ -634,7 +652,8 @@ including cross-module contracts, before delivery is finalized.
    Không cần tạo riêng một route Claude có cùng model và effort.
    The Coordinator snapshots **all** repositories in the active TaskGraph
    (including staged, unstaged and non-ignored untracked files), then launches
-   **one fresh native Evaluator session** in a neutral CWD, with every
+   **one fresh native Evaluator session** in a fresh per-turn subdirectory
+   of the stable, trusted neutral parent CWD, with every
    snapshot root passed via `--add-dir` and identified by absolute paths
    in the native prompt. This is a disposable working copy, not an
    immutable or read-only mount. Native Stop/StopFailure capture stays
@@ -758,16 +777,40 @@ runs inside a disposable snapshot, but its write claim records the stable
 canonical root registered under the primary repository in `repos.yaml`.
 This deliberate separation makes `show-claim --repository <primary-repo>`
 and `release-claim --repository <primary-repo> --claim-id 'turn:<id>'
---worker-termination-confirmed` usable even **after the snapshot directory
-has been deleted**. On `AgentStartupBlocked` or an unconfirmed workspace
-close, inspect/close the actual Herdr workspace, verify that the external
-worker stopped, then use the operator-only `show-claim` and exact-ID
-`release-claim` commands shown below. For an `interrupted` Final Evaluation,
-also use `show-final-evaluation` followed by `recover-final-evaluation
---evaluation-id <id> --worker-termination-confirmed`. Releasing the write
-claim alone does not clear an interrupted evaluation reservation; these
-are separate, audited recoveries. Never release a still-running worker's
-claim.
+--worker-termination-confirmed` usable even when snapshots are temporary.
+On `AgentStartupBlocked` or an unconfirmed workspace close, runtime
+**retains** `qiqi-result-*` (native hook sink),
+`qiqi-final-eval-*` (source snapshots), and the per-turn native CWD. The
+interrupted evaluation's `cleanup` metadata records their paths. Inspect/close the Herdr workspace,
+verify the external worker stopped, then use the operator-only `show-claim`
+and exact-ID `release-claim` commands shown below. Next use
+`show-final-evaluation` and `recover-final-evaluation --evaluation-id <id>
+--worker-termination-confirmed`: recovery removes only the recorded QiQi
+temporary trees after termination confirmation. Releasing the write claim
+alone does not clear an interrupted evaluation reservation; these are
+separate, audited recoveries. Never release a still-running worker's claim.
+Crash/recovery details: `snapshot_root` is committed atomically with the
+Final Evaluation reservation. Before `herdr workspace create`, the runtime
+persists a unique `workspace_label` of the form
+`qiqi:evaluator:<full-turn-uuid>` together with `evaluator_cwd`,
+`capture_sink` and the write claim. Herdr assigns `workspace_id`, so a
+crash or lost response during creation may leave that ID unknown. Use
+`herdr workspace list` to find the **exact recorded label and CWD**;
+inspect/close the corresponding workspace (if present), verify external
+worker termination, then run the operator-only recovery commands.
+Never infer from a missing workspace ID that creation failed. A local
+filesystem cleanup error after successful Herdr close also keeps the
+attempt `interrupted`, its lease and all recovery locators until explicit
+verified recovery.
+
+The trusted parent `~/.qiqi/evaluator-cwd` is never removed by cleanup;
+each completed per-turn CWD is removed, and its exclusive lease is released.
+If a request is cancelled and Herdr **confirms** workspace closure, the
+snapshot, hook sink and per-turn CWD are removed; the attempt is marked
+errored and may be retried without additional operator recovery. If
+closure is unconfirmed, metadata retains all recovery paths and the
+lease blocks later Evaluators until verified recovery.
+Peers/Discovery keep their original auto-cleaned `TemporaryDirectory` hook sinks.
 
 Finalization checks graph/request revisions and the live multi-repository
 manifest digest. **After SQLite commits**, it reloads `repos.yaml`, resolves

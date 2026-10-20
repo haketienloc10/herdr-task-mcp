@@ -32,6 +32,26 @@ RESERVED_EVALUATION_PATHS = {
 }
 
 
+def cleanup_temporary_tree(root: Path) -> None:
+    """Remove QiQi temporary trees, including intentionally read-only sources."""
+    def make_writable_and_retry(func: Any, name: str, _exc: Any) -> None:
+        target = Path(name)
+        if target != root and root not in target.parents:
+            raise RuntimeError("refusing to change permissions outside temporary tree")
+        # Source staging removes owner write bits. Never chmod the tree's
+        # parent (often /tmp), even if deleting the top-level tree fails.
+        parent = target.parent
+        if (parent == root or root in parent.parents) and (
+            parent.is_dir() and not parent.is_symlink()
+        ):
+            parent.chmod(0o700)
+        if target.exists() and not target.is_symlink():
+            target.chmod(0o700 if target.is_dir() else 0o600)
+        func(name)
+
+    shutil.rmtree(root, onerror=make_writable_and_retry)
+
+
 def _git(root: Path, *args: str) -> bytes:
     try:
         return subprocess.run(
@@ -279,15 +299,16 @@ class EvaluationSnapshot:
 
     def __init__(self, roots: dict[str, Path]):
         self.roots = roots
-        self._temp: tempfile.TemporaryDirectory[str] | None = None
+        self._temp: Path | None = None
+        self._retained = False
         self.paths: dict[str, Path] = {}
         self.manifest: dict[str, Any] = {}
         self.digest = ""
     def __enter__(self) -> "EvaluationSnapshot":
         first = inspect_roots(self.roots)
-        self._temp = tempfile.TemporaryDirectory(prefix="qiqi-final-eval-")
+        self._temp = Path(tempfile.mkdtemp(prefix="qiqi-final-eval-"))
         try:
-            base = Path(self._temp.name)
+            base = self._temp
             for name, info in sorted(first.items()):
                 # Registered repository names may contain filesystem separators.
                 # Never derive a destination directory from untrusted names.
@@ -327,9 +348,23 @@ class EvaluationSnapshot:
             self.__exit__(None, None, None)
             raise
 
+    @property
+    def temporary_root(self) -> Path:
+        """Absolute location of this active snapshot, for crash recovery."""
+        if self._temp is None:
+            raise RuntimeError("evaluation snapshot is not active")
+        return self._temp
+
+    def retain(self) -> Path:
+        """Keep snapshot files when a native evaluator has not confirmed shutdown."""
+        if self._temp is None:
+            raise RuntimeError("evaluation snapshot is not active")
+        self._retained = True
+        return self._temp
+
     def __exit__(self, *_args: Any) -> None:
-        if self._temp:
-            self._temp.cleanup()
+        if self._temp is not None and not self._retained:
+            cleanup_temporary_tree(self._temp)
         self._temp = None
         self.paths = {}
 
