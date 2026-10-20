@@ -471,6 +471,8 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
     from qiqi_delegate.core import build_task_packet
 
     runtime, requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    trusted = tmp_path / "evaluator-trusted-cwd"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(trusted))
     repos = runtime.repos()
     binding = requests.graph_binding(gid)
     graph_revision = graph_rt.get_graph(gid)["revision"]
@@ -519,7 +521,8 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
                 evaluation_id=eid,
             ))
         # Candidate CLAUDE.md/AGENTS.md must not be startup instructions.
-        assert captured["cwd"] == str(Path.home() / ".qiqi" / "evaluator-cwd")
+        assert captured["cwd"] == str(trusted)
+        assert trusted.is_dir()
         assert captured["cwd"] not in {str(path) for path in snap.paths.values()}
         assert captured["cwd"] not in {str(path) for path in repos.values()}
         argv = captured["argv"]
