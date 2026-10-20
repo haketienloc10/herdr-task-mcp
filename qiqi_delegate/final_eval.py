@@ -320,7 +320,9 @@ class FinalEvaluationCoordinator:
                 # by dispatching an unnecessary second Evaluator. The store
                 # makes this check under the reservation transaction.
                 if reserved["finalized_at_ns"] is not None:
-                    previous = self.read(graph_run_id, reserved["evaluation_id"])
+                    previous = await asyncio.to_thread(
+                        self.read, graph_run_id, reserved["evaluation_id"],
+                    )
                     if not previous.get("is_current"):
                         raise RuntimeError(
                             "previous finalization no longer matches current inputs"
@@ -417,7 +419,7 @@ class FinalEvaluationCoordinator:
                     report=None, status="interrupted", detail=detail,
                     turn_id=response.get("turn_id"), cleanup=cleanup,
                 )
-                return self.read(graph_run_id, eid)
+                return await asyncio.to_thread(self.read, graph_run_id, eid)
             report = None
             status = "inconclusive"
             detail = None
@@ -467,7 +469,7 @@ class FinalEvaluationCoordinator:
             # A Task Request may change DURING the native evaluation, even
             # when repository sources did not. Use the full eligibility and
             # revision-aware read path, not only the repository manifest.
-            return self.read(graph_run_id, eid)
+            return await asyncio.to_thread(self.read, graph_run_id, eid)
 
     @staticmethod
     def _inspect_for_row(roots: dict[str, Path], row: dict[str, Any]):
