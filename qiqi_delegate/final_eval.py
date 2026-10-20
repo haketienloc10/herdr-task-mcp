@@ -332,7 +332,9 @@ class FinalEvaluationCoordinator:
                         "status": reserved["status"], "already_active": True,
                         "turn_id": reserved["turn_id"]}
             eid = reserved["evaluation_id"]
-            # Snapshot recovery locator was written atomically by reserve().
+            # Distinguish cancellation before native dispatch (no worker,
+            # lease, claim or hook sink) from uncertain native termination.
+            dispatch_started = False
             try:
                 # Re-check live input immediately before native execution.
                 inspector = inspect_live_roots if live else inspect_roots
@@ -342,6 +344,7 @@ class FinalEvaluationCoordinator:
                 )
                 if manifest_digest(current) != snap.digest:
                     raise RuntimeError("evaluation source changed before dispatch")
+                dispatch_started = True
                 response = await self.runtime.delegate(
                     repository=names[0], route=route, packet=packet,
                     evaluation_repositories=names,
@@ -360,10 +363,12 @@ class FinalEvaluationCoordinator:
                     isinstance(exc, asyncio.CancelledError)
                     and getattr(exc, "evaluator_worker_closed", False) is True
                 )
-                interrupted = (not worker_closed and isinstance(
-                    exc, (asyncio.CancelledError, AgentStartupBlocked,
-                          EvaluatorCleanupUnconfirmed),
-                ))
+                interrupted = (
+                    not worker_closed and (
+                        isinstance(exc, (AgentStartupBlocked, EvaluatorCleanupUnconfirmed))
+                        or (dispatch_started and isinstance(exc, asyncio.CancelledError))
+                    )
+                )
                 cleanup = None
                 if interrupted:
                     cleanup = dict(getattr(exc, "cleanup", None) or {})
