@@ -505,12 +505,19 @@ class FinalEvaluationCoordinator:
         return row
 
     def graph_status(self, graph_run_id: str) -> dict[str, Any]:
-        row = self.read(graph_run_id)
-        # Do not take the newest finalized row by timestamp. After A→B→A
-        # the historical finalized A is authoritative again even though B
-        # was finalized more recently. Compute current identity from LIVE
-        # registered worktrees and query for that exact graph/request/digest.
-        # If eligibility/inspection fails, fail closed to not_finalized.
+        """One repository scan per status call; no nested read() scans."""
+        row = self.store.latest(graph_run_id)
+        if row is None:
+            return {
+                "final_evaluation_status": "not_started",
+                "final_evaluation_id": None,
+                "delivery_status": "not_finalized",
+                "evaluation_is_current": False,
+            }
+        row["is_current"] = False
+        row["effective_status"] = (
+            "stale" if row["status"] == "passed" else row["status"]
+        )
         try:
             graph, _authored, _binding, task, _names, roots = self._eligible(
                 graph_run_id,
@@ -518,24 +525,36 @@ class FinalEvaluationCoordinator:
             mode = os.environ.get("QIQI_EVALUATION_MODE", "live").lower()
             inspector = inspect_live_roots if mode == "live" else inspect_roots
             digest = manifest_digest(inspector(roots))
+
+            def is_current(candidate: dict[str, Any]) -> bool:
+                return (
+                    candidate["graph_revision"] == graph["revision"]
+                    and candidate["request_id"] == task["request_id"]
+                    and candidate["request_revision"] == task["revision"]
+                    and candidate["manifest_digest"] == digest
+                )
+
+            if is_current(row):
+                row["is_current"] = True
+                row["effective_status"] = row["status"]
             finalized = self.store.matching_finalized(
                 graph_run_id, graph["revision"], task["request_id"],
                 task["revision"], digest,
             )
-            if finalized is not None:
-                verified = self.read(graph_run_id, finalized["evaluation_id"])
-                if verified.get("is_current"):
-                    row = verified
+            if finalized is not None and is_current(finalized):
+                finalized["is_current"] = True
+                finalized["effective_status"] = finalized["status"]
+                row = finalized
         except (RuntimeError, ValueError, OSError):
             pass
         return {
-            "final_evaluation_status": row.get("effective_status", row["status"]),
+            "final_evaluation_status": row["effective_status"],
             "final_evaluation_id": row.get("evaluation_id"),
             "delivery_status": (
-                "finalized" if row.get("finalized_at_ns") and row.get("is_current")
+                "finalized" if row.get("finalized_at_ns") and row["is_current"]
                 else "not_finalized"
             ),
-            "evaluation_is_current": row.get("is_current", False),
+            "evaluation_is_current": row["is_current"],
         }
 
     def finalize(self, graph_run_id: str, evaluation_id: str,
