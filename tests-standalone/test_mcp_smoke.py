@@ -595,6 +595,14 @@ def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, mon
         "routes:\n  codex-balanced:\n    agent: codex\n    args: []\n"
     )
     rt = DelegateRuntime(tmp_path)
+    recorded_sinks = []
+    original_hook_args = rt._hook_args
+
+    def capture_sink(adapter, sink, nonce):
+        recorded_sinks.append(sink)
+        return original_hook_args(adapter, sink, nonce)
+
+    monkeypatch.setattr(rt, "_hook_args", capture_sink)
     monkeypatch.setattr("qiqi_delegate.runtime.shutil.which", lambda _: "/bin/true")
     async def ready():
         return None
@@ -642,6 +650,10 @@ def test_blocked_startup_preserves_workspace_claim_and_diagnostics(tmp_path, mon
     assert claim is not None and claim[0] in error
     assert f"--claim-id {shlex.quote(claim[0])}" in error
     assert exc.value.recovery_command in exc.value.actionable_detail()
+    # Normal Peer/Discovery delegates keep the original managed temporary
+    # hook lifecycle and do not leak a sink that has no recovery operation.
+    assert len(recorded_sinks) == 1
+    assert not recorded_sinks[0].exists()
 
 
 def test_long_recovery_command_survives_public_mcp_error(tmp_path, monkeypatch):
