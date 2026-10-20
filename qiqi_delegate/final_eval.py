@@ -297,10 +297,17 @@ class FinalEvaluationCoordinator:
                 # A Herdr worker blocked on trust/approval or an unconfirmed
                 # close can still read these copies. Preserve them until the
                 # operator confirms termination, including on cancellation.
-                interrupted = isinstance(
+                # A cancelled request is not proof that the external worker
+                # survived. Runtime marks cancellation after successful Herdr
+                # close, so retain a snapshot only if shutdown is uncertain.
+                worker_closed = (
+                    isinstance(exc, asyncio.CancelledError)
+                    and getattr(exc, "evaluator_worker_closed", False) is True
+                )
+                interrupted = (not worker_closed and isinstance(
                     exc, (asyncio.CancelledError, AgentStartupBlocked,
                           EvaluatorCleanupUnconfirmed),
-                )
+                ))
                 cleanup = None
                 if interrupted:
                     cleanup = dict(getattr(exc, "cleanup", None) or {})
@@ -310,7 +317,10 @@ class FinalEvaluationCoordinator:
                 self.store.complete(
                     eid, raw_response=None, report=None,
                     status="interrupted" if interrupted else "errored",
-                    detail=str(exc), cleanup=cleanup,
+                    detail=str(exc) or (
+                        "Native request cancelled after confirmed worker shutdown"
+                        if worker_closed else type(exc).__name__
+                    ), cleanup=cleanup,
                 )
                 raise
             raw = response.get("agent_response")
