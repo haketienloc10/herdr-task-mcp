@@ -425,6 +425,15 @@ class FinalEvaluationCoordinator:
             # revision-aware read path, not only the repository manifest.
             return self.read(graph_run_id, eid)
 
+    @staticmethod
+    def _inspect_for_row(roots: dict[str, Path], row: dict[str, Any]):
+        return (
+            inspect_live_roots(roots)
+            if any(entry.get("inspection_mode") == "live"
+                   for entry in row["manifest"].values())
+            else inspect_roots(roots)
+        )
+
     def read(self, graph_run_id: str, evaluation_id: str | None = None):
         row = (self.store.get(evaluation_id) if evaluation_id
                else self.store.latest(graph_run_id))
@@ -438,7 +447,9 @@ class FinalEvaluationCoordinator:
                 graph["revision"] == row["graph_revision"] and
                 task["request_id"] == row["request_id"] and
                 task["revision"] == row["request_revision"] and
-                manifest_digest(inspect_roots(roots)) == row["manifest_digest"]
+                manifest_digest(
+                    self._inspect_for_row(roots, row)
+                ) == row["manifest_digest"]
             )
         except (RuntimeError, ValueError, OSError):
             current = False
@@ -460,7 +471,9 @@ class FinalEvaluationCoordinator:
             graph, _authored, _binding, task, _names, roots = self._eligible(
                 graph_run_id,
             )
-            digest = manifest_digest(inspect_roots(roots))
+            mode = os.environ.get("QIQI_EVALUATION_MODE", "live").lower()
+            inspector = inspect_live_roots if mode == "live" else inspect_roots
+            digest = manifest_digest(inspector(roots))
             finalized = self.store.matching_finalized(
                 graph_run_id, graph["revision"], task["request_id"],
                 task["revision"], digest,
@@ -490,7 +503,7 @@ class FinalEvaluationCoordinator:
         if (entry.get("status") != "passed" or not entry.get("is_current")
                 or entry.get("finalized_at_ns")):
             raise ValueError("current independent final evaluation PASS is required")
-        current_digest = manifest_digest(inspect_roots(roots))
+        current_digest = manifest_digest(self._inspect_for_row(roots, entry))
         persisted = self.store.finalize(
             evaluation_id, graph["revision"], task["revision"], current_digest,
         )
@@ -508,7 +521,9 @@ class FinalEvaluationCoordinator:
                 and fresh_task["revision"] == task["revision"]
                 and fresh_names == _names
                 and fresh_roots == roots
-                and manifest_digest(inspect_roots(fresh_roots)) == current_digest
+                and manifest_digest(
+                    self._inspect_for_row(fresh_roots, entry)
+                ) == current_digest
             )
         except Exception:
             # Missing/invalid repos.yaml, registry remaps, unavailable Git
