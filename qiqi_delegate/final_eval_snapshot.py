@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -289,7 +290,9 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
     return manifest
 
 
-def _hash_live_file(root: Path, relative: str) -> tuple[str, int, int]:
+def _hash_live_file(
+    root: Path, relative: str, *, deadline: float | None = None,
+) -> tuple[str, int, int]:
     """Hash a live file in bounded memory without copying it or reading it all.
 
     Includes unchanged binary dependencies (JAR/WAR/etc.) in freshness
@@ -313,6 +316,8 @@ def _hash_live_file(root: Path, relative: str) -> tuple[str, int, int]:
         digest = hashlib.sha256()
         length = 0
         while True:
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("live evaluation hash exceeded scan deadline")
             data = os.read(fd, 1024 * 1024)
             if not data:
                 break
@@ -339,6 +344,7 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
     if not roots:
         raise ValueError("evaluation needs at least one repository")
     manifest: dict[str, Any] = {}
+    deadline = time.monotonic() + 55
     for name, root in sorted(roots.items()):
         if not root.is_dir() or root != root.resolve():
             raise ValueError("evaluation repository root must be canonical")
@@ -352,6 +358,8 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
         entries = []
         deleted_paths = []
         for relative in names:
+            if time.monotonic() > deadline:
+                raise TimeoutError("live evaluation scan exceeded 55 seconds")
             if not _file_present(root, relative):
                 if relative not in tracked:
                     raise RuntimeError("untracked evaluation file disappeared: " + relative)
@@ -361,7 +369,9 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
                     )
                 deleted_paths.append(relative)
                 continue
-            sha, size, mode = _hash_live_file(root, relative)
+            sha, size, mode = _hash_live_file(
+                root, relative, deadline=deadline,
+            )
             entries.append({
                 "path": relative, "sha256": sha, "size": size, "mode": mode,
             })
