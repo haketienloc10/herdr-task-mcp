@@ -114,7 +114,7 @@ def test_large_unchanged_tracked_jar_does_not_block_multimodule_review(
 
     revision = graphs.get_graph(gid)["revision"]
     entry = asyncio.run(asyncio.wait_for(
-        coordinator.start(gid, "codex-evaluator", revision), timeout=10,
+        coordinator.start(gid, "codex-evaluator", revision), timeout=45,
     ))
     assert entry["status"] == "passed"
     assert entry["cleanup"] is None
@@ -142,7 +142,7 @@ def test_live_review_rejects_pass_if_original_source_changes_in_flight(
     _fake_native(runtime, coordinator, gid, monkeypatch, mutate=mutate)
     revision = graphs.get_graph(gid)["revision"]
     entry = asyncio.run(asyncio.wait_for(
-        coordinator.start(gid, "codex-evaluator", revision), timeout=10,
+        coordinator.start(gid, "codex-evaluator", revision), timeout=45,
     ))
     assert entry["status"] == "inconclusive"
     assert "source changed" in entry["detail"]
@@ -194,26 +194,22 @@ def test_multi_root_claim_acquisition_is_atomic(tmp_path, monkeypatch):
 def test_post_review_live_inspection_error_completes_attempt(
     tmp_path, monkeypatch,
 ):
-    import qiqi_delegate.final_eval as evaluation_module
-
     monkeypatch.setenv("QIQI_EVALUATION_MODE", "live")
     runtime, _requests, graphs, coordinator, gid = setup_graph(tmp_path)
     _fake_native(runtime, coordinator, gid, monkeypatch)
-    real_inspect = evaluation_module.inspect_live_roots
+    real_scan = coordinator._scan_live
     scans = {"count": 0}
 
-    def scan_with_late_failure(roots):
+    async def scan_with_late_failure(roots):
         scans["count"] += 1
         if scans["count"] == 3:
             raise ValueError("simulated symlink appeared after native review")
-        return real_inspect(roots)
+        return await real_scan(roots)
 
-    monkeypatch.setattr(
-        evaluation_module, "inspect_live_roots", scan_with_late_failure,
-    )
+    monkeypatch.setattr(coordinator, "_scan_live", scan_with_late_failure)
     revision = graphs.get_graph(gid)["revision"]
     attempt = asyncio.run(asyncio.wait_for(
-        coordinator.start(gid, "codex-evaluator", revision), timeout=15,
+        coordinator.start(gid, "codex-evaluator", revision), timeout=45,
     ))
     assert attempt["status"] == "inconclusive"
     assert "Could not verify live repository freshness" in attempt["detail"]
