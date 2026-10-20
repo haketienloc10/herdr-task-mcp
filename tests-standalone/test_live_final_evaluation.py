@@ -21,7 +21,7 @@ def _add_tracked_large_jar(runtime):
     binary.write_bytes(payload)
     subprocess.run(
         ["git", "-C", str(root), "add", "-f", "web/WEB-INF/lib/axis-1.3.jar"],
-        check=True,
+        check=True, timeout=10,
     )
     return binary, payload
 
@@ -103,7 +103,9 @@ def test_large_unchanged_tracked_jar_does_not_block_multimodule_review(
     monkeypatch.setattr(EvaluationSnapshot, "__enter__", refuse_snapshot)
 
     revision = graphs.get_graph(gid)["revision"]
-    entry = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
+    entry = asyncio.run(asyncio.wait_for(
+        coordinator.start(gid, "codex-evaluator", revision), timeout=10,
+    ))
     assert entry["status"] == "passed"
     assert entry["cleanup"] is None
     assert entry["manifest"]["backend"]["inspection_mode"] == "live"
@@ -129,7 +131,9 @@ def test_live_review_rejects_pass_if_original_source_changes_in_flight(
 
     _fake_native(runtime, coordinator, gid, monkeypatch, mutate=mutate)
     revision = graphs.get_graph(gid)["revision"]
-    entry = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
+    entry = asyncio.run(asyncio.wait_for(
+        coordinator.start(gid, "codex-evaluator", revision), timeout=10,
+    ))
     assert entry["status"] == "inconclusive"
     assert "source changed" in entry["detail"]
     assert entry["report"] is None
