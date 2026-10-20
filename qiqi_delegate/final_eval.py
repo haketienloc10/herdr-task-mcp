@@ -390,7 +390,8 @@ class FinalEvaluationCoordinator:
                 cleanup = {
                     key: value for key in (
                         "cleanup_state", "workspace_id", "workspace_label",
-                        "write_claim_id", "write_claim_repository", "recovery_action",
+                        "write_claim_id", "write_claim_repository",
+                        "write_claim_repositories", "recovery_action",
                         "capture_sink", "evaluator_cwd",
                     )
                     if isinstance((value := response.get(key)), str)
