@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from qiqi_delegate.task_request import copy_workspace_snapshot
+from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
 from qiqi_delegate.core import (
     TaskPacket, render_task_prompt, codex_stop_hook_hash,
     codex_session_hook_key, load_capture_events, resolve_capture_events,
@@ -1172,7 +1173,7 @@ class DelegateRuntime:
             if closed:
                 self.release_claim(repository, claim_id)
                 if sink is not None:
-                    shutil.rmtree(sink)
+                    cleanup_temporary_tree(sink)
             if error:
                 if result is None and not (was_cancelled or cancelled_during_close):
                     detail = (f"workspace close unconfirmed; workspace={workspace_id}; "
