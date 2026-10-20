@@ -233,6 +233,7 @@ class FinalEvaluationStore:
         self, graph_run_id: str, graph_revision: int, request_id: str,
         request_revision: int, route: str,
         manifest: dict[str, Any], digest: str,
+        *, snapshot_root: Path | None = None,
     ) -> tuple[dict[str, Any], bool]:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -306,11 +307,15 @@ class FinalEvaluationStore:
                     "INSERT INTO final_evaluations "
                     "(evaluation_id,graph_run_id,graph_revision,request_id,"
                     "request_revision,route,manifest_json,manifest_digest,"
-                    "status,owner_pid,owner_start_token,created_at_ns,updated_at_ns) "
-                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?)",
+                    "status,cleanup_json,owner_pid,owner_start_token,"
+                    "created_at_ns,updated_at_ns) "
+                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?,?)",
                     (return_id, graph_run_id, graph_revision, request_id,
                      request_revision, route, json.dumps(manifest, sort_keys=True),
-                     digest, os.getpid(), _process_start_token(os.getpid()), now, now),
+                     digest, json.dumps(
+                         {"snapshot_root": str(snapshot_root)}, sort_keys=True
+                     ) if snapshot_root is not None else None,
+                     os.getpid(), _process_start_token(os.getpid()), now, now),
                 )
                 created = True
         return self.get(return_id), created
