@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -195,6 +196,40 @@ def _resolve_evaluator_claude_path_args(args: list[str], route_root: Path) -> li
                 resolved[index] = absolute(args[index])
         index += 1
     return resolved
+
+
+def evaluator_working_directory(
+    repositories: dict[str, Path], snapshots: dict[str, Path],
+) -> Path:
+    """Stable operator-trusted CWD; never a candidate repository or snapshot."""
+    configured = os.environ.get("QIQI_EVALUATOR_CWD")
+    if configured is not None and not configured.strip():
+        raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
+    path = (Path(configured).expanduser() if configured is not None
+            else Path.home() / ".qiqi" / "evaluator-cwd")
+    if not path.is_absolute():
+        raise ValueError("QIQI_EVALUATOR_CWD must be an absolute path")
+    candidate = path.resolve()
+    for root in (*repositories.values(), *snapshots.values()):
+        canonical = root.resolve()
+        if (candidate == canonical or candidate in canonical.parents or
+                canonical in candidate.parents):
+            raise ValueError(
+                "evaluator working directory must be outside registered "
+                "repositories and evaluation snapshots"
+            )
+    candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not candidate.is_dir():
+        raise ValueError("evaluator working directory is not a directory")
+    return candidate
+
+
+class EvaluatorCleanupUnconfirmed(RuntimeError):
+    """An evaluator may still be running; retain its capture and source snapshots."""
+
+    def __init__(self, detail: str, cleanup: dict[str, str]):
+        super().__init__(detail)
+        self.cleanup = cleanup
 
 
 class AgentStartupBlocked(RuntimeError):
@@ -948,12 +983,15 @@ class DelegateRuntime:
         claim_root = repos[repository] if evaluation_id is not None else execution_root
         self._claim(repository, claim_id, repository_root=claim_root)
         workspace_id = None
+        sink: Path | None = None
         closed = False
         preserve_startup = False
         result = None
         was_cancelled = False
         try:
-            with tempfile.TemporaryDirectory(prefix="qiqi-result-") as td:
+            # A blocked/uncertain worker must not lose its active hook sink.
+            # Cleanup is explicit after Herdr confirms workspace closure.
+            with contextlib.nullcontext(tempfile.mkdtemp(prefix="qiqi-result-")) as td:
                 sink = Path(td)
                 os.chmod(sink, 0o700)
                 nonce = uuid.uuid4().hex
@@ -973,8 +1011,7 @@ class DelegateRuntime:
                 # inheriting candidate repository startup instructions.
                 native_cwd = execution_root
                 if evaluation_id is not None:
-                    native_cwd = sink / "evaluator-neutral-cwd"
-                    native_cwd.mkdir(mode=0o700)
+                    native_cwd = evaluator_working_directory(repos, evaluation_roots)
                 await self._ensure_herdr_server()
                 top = await self._json("workspace", "create", "--cwd", str(native_cwd),
                                        "--label", f"qiqi:{repository}:{turn_id[:8]}", "--no-focus")
@@ -1079,7 +1116,7 @@ class DelegateRuntime:
                 f"repository={repository}; inspect: {target} agent explain "
                 f"{exc.agent_name} --json; startup_evidence={exc}"
             )
-            raise AgentStartupBlocked(
+            blocked = AgentStartupBlocked(
                 exc.agent_name, exc.pane_id,
                 f"workspace_id={workspace_id}; write_claim_id={claim_id}; "
                 f"repository={repository}; "
@@ -1092,7 +1129,15 @@ class DelegateRuntime:
                 f"delegated task prompt to the blocked agent manually. {exc}",
                 recovery_command=recovery,
                 public_context=public_context,
-            ) from exc
+            )
+            blocked.cleanup = {
+                "cleanup_state": "agent_startup_blocked",
+                "workspace_id": str(workspace_id),
+                "write_claim_id": claim_id,
+                "write_claim_repository": repository,
+                "capture_sink": str(sink) if sink is not None else "",
+            }
+            raise blocked from exc
         except asyncio.CancelledError:
             # Task.cancelling() is only available on newer Python releases;
             # record the original cancellation explicitly for Python 3.10.
@@ -1126,20 +1171,39 @@ class DelegateRuntime:
                 closed = True
             if closed:
                 self.release_claim(repository, claim_id)
+                if sink is not None:
+                    shutil.rmtree(sink)
             if error:
                 if result is None and not (was_cancelled or cancelled_during_close):
-                    raise RuntimeError(
-                        f"workspace close unconfirmed; workspace={workspace_id}; "
-                        f"claim={claim_id}; {error}"
-                    )
+                    detail = (f"workspace close unconfirmed; workspace={workspace_id}; "
+                              f"claim={claim_id}; {error}")
+                    if evaluation_id is not None:
+                        raise EvaluatorCleanupUnconfirmed(detail, {
+                            "cleanup_state": "workspace_close_unconfirmed",
+                            "workspace_id": str(workspace_id),
+                            "write_claim_id": claim_id,
+                            "write_claim_repository": repository,
+                            "capture_sink": str(sink) if sink is not None else "",
+                        })
+                    raise RuntimeError(detail)
                 if result is not None:
                     result.update({"cleanup_state": "workspace_close_unconfirmed",
                                    "write_claim_id": claim_id, "write_claim_repository": repository,
                                    "workspace_id": workspace_id,
+                                   "capture_sink": str(sink) if sink is not None else "",
                                    "recovery_action": "Verify worker has stopped; then release claim"})
             if cancelled_during_close:
                 # A second cancel must be propagated *after* the close task
                 # succeeds or fails, never while it can still leave live agents.
-                raise asyncio.CancelledError()
+                cancelled = asyncio.CancelledError()
+                if not closed and evaluation_id is not None:
+                    cancelled.cleanup = {
+                        "cleanup_state": "workspace_close_unconfirmed",
+                        "workspace_id": str(workspace_id),
+                        "write_claim_id": claim_id,
+                        "write_claim_repository": repository,
+                        "capture_sink": str(sink) if sink is not None else "",
+                    }
+                raise cancelled
         assert result is not None
         return result
