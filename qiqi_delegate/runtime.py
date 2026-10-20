@@ -964,15 +964,20 @@ class DelegateRuntime:
                        evaluation_repositories: tuple[str, ...] | None = None,
                        evaluation_roots: dict[str, Path] | None = None,
                        evaluation_id: str | None = None,
+                       evaluation_archive: Any | None = None,
+                       evaluation_manifest: dict[str, Any] | None = None,
                        workspace_sources: tuple[dict[str, Any], ...] = ()) -> dict:
         if evaluation_id is not None and workspace_sources:
-            raise ValueError("evaluator sources are staged in its temporary working copy")
+            raise ValueError("evaluator sources use an owned task-context archive")
         if len({source["id"] for source in workspace_sources}) != len(workspace_sources):
             raise ValueError("duplicate workspace source ID")
         repos = self.repos()
         if repository not in repos:
             raise ValueError(f"unknown repository: {repository}; available: {', '.join(repos)}")
         adapter, args = self.route(route)
+        evaluation_live = evaluation_archive is not None
+        if evaluation_live and (evaluation_id is None or evaluation_manifest is None):
+            raise ValueError("live evaluator requires bound ID and manifest")
         if evaluation_id is not None:
             if (discovery_repositories is not None or discovery_id is not None
                     or evaluation_repositories is None or evaluation_roots is None
@@ -984,9 +989,18 @@ class DelegateRuntime:
                     repository not in evaluation_repositories or
                     any(name not in repos for name in evaluation_repositories)):
                 raise ValueError("evaluation roots must match registered graph repositories")
-            if any(not root.is_dir() or root.resolve() != root or
-                   root.resolve() in repos.values()
-                   for root in evaluation_roots.values()):
+            if evaluation_live:
+                if any(
+                    not root.is_dir() or root.resolve() != root
+                    or root != repos[name]
+                    for name, root in evaluation_roots.items()
+                ):
+                    raise ValueError("live evaluator roots must be registered Git roots")
+                if set(evaluation_manifest) != set(evaluation_roots):
+                    raise ValueError("live evaluation manifest/root mismatch")
+            elif any(not root.is_dir() or root.resolve() != root or
+                     root.resolve() in repos.values()
+                     for root in evaluation_roots.values()):
                 raise ValueError("unsafe evaluation snapshot root")
             # Preserve user-chosen model, effort and permissions. Avoid
             # inheriting candidate project startup settings.
@@ -1178,6 +1192,17 @@ class DelegateRuntime:
                         repos, evaluation_roots, turn_id,
                     )
                     native_cwd = evaluator_cwd
+                    if evaluation_live:
+                        # Stage only the request/graph text and a small JSON
+                        # hash manifest; never copy the source repositories.
+                        # This remains inside the existing per-turn neutral CWD.
+                        evaluation_archive(evaluator_cwd)
+                        manifest_file = evaluator_cwd / ".qiqi-evaluation-manifests.json"
+                        manifest_file.write_text(json.dumps(
+                            {"repositories": evaluation_manifest},
+                            sort_keys=True, ensure_ascii=False,
+                        ), encoding="utf-8")
+                        manifest_file.chmod(0o400)
                 await self._ensure_herdr_server()
                 label = (workspace_label if evaluation_id is not None else
                          f"qiqi:{repository}:{turn_id[:8]}")
