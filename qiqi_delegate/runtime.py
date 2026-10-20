@@ -219,10 +219,36 @@ def evaluator_working_directory(
                 "evaluator working directory must be outside registered "
                 "repositories and evaluation snapshots"
             )
+    # The trust anchor must contain no project instructions/configuration.
+    # Individual turns run in fresh child directories instead of sharing a
+    # writable startup workspace; no trust is granted programmatically.
+    if path.is_symlink():
+        raise ValueError("evaluator trust root must not be a symlink")
     candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not candidate.is_dir():
         raise ValueError("evaluator working directory is not a directory")
+    unexpected = [item.name for item in candidate.iterdir()
+                  if item.name != "runs"]
+    if unexpected:
+        raise ValueError("evaluator trust root must contain only the runs directory")
+    runs = candidate / "runs"
+    if runs.is_symlink():
+        raise ValueError("evaluator runs directory must not be a symlink")
+    runs.mkdir(mode=0o700, exist_ok=True)
+    if not runs.is_dir() or any(not item.is_dir() or item.is_symlink()
+                                for item in runs.iterdir()):
+        raise ValueError("evaluator runs directory contains unexpected files")
     return candidate
+
+
+def evaluator_run_directory(
+    repositories: dict[str, Path], snapshots: dict[str, Path], turn_id: str,
+) -> Path:
+    """Fresh per-turn native CWD below a stable operator-trusted ancestor."""
+    trusted = evaluator_working_directory(repositories, snapshots)
+    run = trusted / "runs" / ("turn-" + uuid.UUID(turn_id).hex)
+    run.mkdir(mode=0o700)  # never reuse a previous turn's content
+    return run
 
 
 class EvaluatorCleanupUnconfirmed(RuntimeError):
@@ -985,14 +1011,20 @@ class DelegateRuntime:
         self._claim(repository, claim_id, repository_root=claim_root)
         workspace_id = None
         sink: Path | None = None
+        evaluator_cwd: Path | None = None
         closed = False
         preserve_startup = False
         result = None
         was_cancelled = False
         try:
-            # A blocked/uncertain worker must not lose its active hook sink.
-            # Cleanup is explicit after Herdr confirms workspace closure.
-            with contextlib.nullcontext(tempfile.mkdtemp(prefix="qiqi-result-")) as td:
+            # Peers keep their existing TemporaryDirectory lifecycle. Only
+            # Final Evaluation needs persistent sink paths on blocked startup.
+            sink_context = (
+                contextlib.nullcontext(tempfile.mkdtemp(prefix="qiqi-result-"))
+                if evaluation_id is not None else
+                tempfile.TemporaryDirectory(prefix="qiqi-result-")
+            )
+            with sink_context as td:
                 sink = Path(td)
                 os.chmod(sink, 0o700)
                 nonce = uuid.uuid4().hex
@@ -1012,7 +1044,10 @@ class DelegateRuntime:
                 # inheriting candidate repository startup instructions.
                 native_cwd = execution_root
                 if evaluation_id is not None:
-                    native_cwd = evaluator_working_directory(repos, evaluation_roots)
+                    evaluator_cwd = evaluator_run_directory(
+                        repos, evaluation_roots, turn_id,
+                    )
+                    native_cwd = evaluator_cwd
                 await self._ensure_herdr_server()
                 top = await self._json("workspace", "create", "--cwd", str(native_cwd),
                                        "--label", f"qiqi:{repository}:{turn_id[:8]}", "--no-focus")
@@ -1131,13 +1166,15 @@ class DelegateRuntime:
                 recovery_command=recovery,
                 public_context=public_context,
             )
-            blocked.cleanup = {
-                "cleanup_state": "agent_startup_blocked",
-                "workspace_id": str(workspace_id),
-                "write_claim_id": claim_id,
-                "write_claim_repository": repository,
-                "capture_sink": str(sink) if sink is not None else "",
-            }
+            if evaluation_id is not None:
+                blocked.cleanup = {
+                    "cleanup_state": "agent_startup_blocked",
+                    "workspace_id": str(workspace_id),
+                    "write_claim_id": claim_id,
+                    "write_claim_repository": repository,
+                    "capture_sink": str(sink) if sink is not None else "",
+                    "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
+                }
             raise blocked from exc
         except asyncio.CancelledError:
             # Task.cancelling() is only available on newer Python releases;
@@ -1172,8 +1209,10 @@ class DelegateRuntime:
                 closed = True
             if closed:
                 self.release_claim(repository, claim_id)
-                if sink is not None:
+                if sink is not None and evaluation_id is not None:
                     cleanup_temporary_tree(sink)
+                if evaluator_cwd is not None:
+                    cleanup_temporary_tree(evaluator_cwd)
             if error:
                 if result is None and not (was_cancelled or cancelled_during_close):
                     detail = (f"workspace close unconfirmed; workspace={workspace_id}; "
@@ -1185,6 +1224,7 @@ class DelegateRuntime:
                             "write_claim_id": claim_id,
                             "write_claim_repository": repository,
                             "capture_sink": str(sink) if sink is not None else "",
+                            "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                         })
                     raise RuntimeError(detail)
                 if result is not None:
@@ -1192,6 +1232,7 @@ class DelegateRuntime:
                                    "write_claim_id": claim_id, "write_claim_repository": repository,
                                    "workspace_id": workspace_id,
                                    "capture_sink": str(sink) if sink is not None else "",
+                                   "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                                    "recovery_action": "Verify worker has stopped; then release claim"})
             if cancelled_during_close:
                 # A second cancel must be propagated *after* the close task
@@ -1204,6 +1245,7 @@ class DelegateRuntime:
                         "write_claim_id": claim_id,
                         "write_claim_repository": repository,
                         "capture_sink": str(sink) if sink is not None else "",
+                        "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                     }
                 raise cancelled
         assert result is not None
