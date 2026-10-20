@@ -32,6 +32,22 @@ RESERVED_EVALUATION_PATHS = {
 }
 
 
+def cleanup_temporary_tree(root: Path) -> None:
+    """Remove QiQi temporary trees, including intentionally read-only sources."""
+    def make_writable_and_retry(func: Any, name: str, _exc: Any) -> None:
+        target = Path(name)
+        # Source staging deliberately removes owner write bits; standard
+        # shutil.rmtree cannot unlink children of these directories on POSIX.
+        parent = target.parent
+        if parent.is_dir() and not parent.is_symlink():
+            parent.chmod(0o700)
+        if target.exists() and not target.is_symlink():
+            target.chmod(0o700 if target.is_dir() else 0o600)
+        func(name)
+
+    shutil.rmtree(root, onerror=make_writable_and_retry)
+
+
 def _git(root: Path, *args: str) -> bytes:
     try:
         return subprocess.run(
@@ -337,7 +353,7 @@ class EvaluationSnapshot:
 
     def __exit__(self, *_args: Any) -> None:
         if self._temp is not None and not self._retained:
-            shutil.rmtree(self._temp)
+            cleanup_temporary_tree(self._temp)
         self._temp = None
         self.paths = {}
 
