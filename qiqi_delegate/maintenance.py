@@ -259,6 +259,7 @@ def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
             raise ValueError("unsafe retained evaluator cleanup path")
         targets.append(path)
 
+    evaluator_cwd = None
     value = cleanup.get("evaluator_cwd")
     if value:
         if not isinstance(value, str):
@@ -277,12 +278,21 @@ def _cleanup_retained_evaluation_paths(cleanup: dict[str, Any] | None) -> None:
                 path.parent.resolve() != trusted.resolve() / "runs" or
                 not re.fullmatch(r"turn-[0-9a-f]{32}", path.name)):
             raise ValueError("unsafe retained evaluator CWD cleanup path")
+        # This run's active lease must never belong to another evaluator.
+        lease = path.parent / ".qiqi-active"
+        if lease.is_symlink():
+            raise ValueError("unsafe evaluator lease symlink")
+        if lease.exists() and lease.read_text(encoding="utf-8").strip() != path.name:
+            raise ValueError("evaluator lease belongs to another active worker")
+        evaluator_cwd = path
         targets.append(path)
 
     # Validate every path before removing any subtree.
     for path in targets:
         if path.exists():
             cleanup_temporary_tree(path)
+    if evaluator_cwd is not None:
+        release_evaluator_run_lock(evaluator_cwd)
 
 
 def recover_final_evaluation(
