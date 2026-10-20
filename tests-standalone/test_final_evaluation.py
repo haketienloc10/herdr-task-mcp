@@ -1524,7 +1524,7 @@ def test_unconfirmed_native_close_keeps_final_snapshot_for_recovery(
 
 def test_per_turn_native_cwd_does_not_inherit_previous_run_artifacts(tmp_path, monkeypatch):
     import uuid
-    from qiqi_delegate.runtime import evaluator_run_directory
+    from qiqi_delegate.runtime import evaluator_run_directory, release_evaluator_run_lock
     from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
 
     root = tmp_path / "trusted"
@@ -1538,12 +1538,15 @@ def test_per_turn_native_cwd_does_not_inherit_previous_run_artifacts(tmp_path, m
     first = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
     (first / "CLAUDE.md").write_text("untrusted first-turn content")
     (first / "AGENTS.md").write_text("untrusted first-turn content")
+    with pytest.raises(RuntimeError, match="another evaluator is active"):
+        evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    cleanup_temporary_tree(first)
+    release_evaluator_run_lock(first)
     second = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
     assert first != second and first.parent == second.parent == root / "runs"
     assert list(second.iterdir()) == []
-    assert (first / "CLAUDE.md").is_file()
-    cleanup_temporary_tree(first)
     cleanup_temporary_tree(second)
+    release_evaluator_run_lock(second)
     assert root.is_dir()
 
 
@@ -1673,6 +1676,12 @@ def test_cancelled_final_evaluator_retains_only_when_worker_close_unconfirmed(
         return "cancelled-agent", {}
 
     async def fake_prompt(*args):
+        prompt = args[1]
+        primary = next(
+            line.partition(": ")[2] for line in prompt.splitlines()
+            if line.startswith("Primary task index: ")
+        )
+        seen["snapshot"] = Path(primary).parents[2]
         raise asyncio.CancelledError()
 
     async def fake_run(*argv, **_kw):
@@ -1702,6 +1711,7 @@ def test_cancelled_final_evaluator_retains_only_when_worker_close_unconfirmed(
         assert cleanup["write_claim_repository"] == "backend"
         assert cleanup["evaluator_cwd"] == str(run_cwd)
         assert Path(cleanup["snapshot_root"]).is_dir()
+        assert Path(cleanup["snapshot_root"]) == seen["snapshot"]
         assert Path(cleanup["capture_sink"]).is_dir()
         assert run_cwd.is_dir() and lease.is_file()
         release_stale_claim(
@@ -1725,5 +1735,5 @@ def test_cancelled_final_evaluator_retains_only_when_worker_close_unconfirmed(
         assert show_claim(
             workspace=runtime.root, repository="backend",
         )["claim_id"] is None
-        assert not list(tmp_path.glob("qiqi-final-eval-*"))
+        assert not seen["snapshot"].exists()
 
