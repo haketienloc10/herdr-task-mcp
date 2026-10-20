@@ -19,6 +19,7 @@ import yaml
 
 from qiqi_delegate.task_request import copy_workspace_snapshot
 from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
+from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from qiqi_delegate.core import (
     TaskPacket, render_task_prompt, codex_stop_hook_hash,
     codex_session_hook_key, load_capture_events, resolve_capture_events,
@@ -258,7 +259,7 @@ def evaluator_working_directory(
     def approved_run_entry(item: Path) -> bool:
         if item.is_symlink():
             return False
-        if item.name == ".qiqi-active":
+        if item.name in (".qiqi-active", ".qiqi-mutex"):
             return item.is_file()
         return (
             len(item.name) == len("turn-") + 32
@@ -278,8 +279,41 @@ def _evaluator_lock_path(run_cwd: Path) -> Path:
     return run_cwd.parent / ".qiqi-active"
 
 
-def release_evaluator_run_lock(run_cwd: Path) -> None:
-    """Release only the lease belonging to a confirmed-stopped turn."""
+@contextlib.contextmanager
+def evaluator_lease_guard(runs: Path):
+    """Crash-released cross-process mutex for *all* lease mutations."""
+    gate = runs / ".qiqi-mutex"
+    if gate.is_symlink():
+        raise RuntimeError("refusing symlinked evaluator mutex")
+    fd = os.open(str(gate), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def release_evaluator_run_lock(run_cwd: Path, *, guard_held: bool = False) -> None:
+    """Release only the confirmed-stopped turn's lease, atomically."""
+    if not guard_held:
+        with evaluator_lease_guard(run_cwd.parent):
+            release_evaluator_run_lock(run_cwd, guard_held=True)
+        return
     lock = _evaluator_lock_path(run_cwd)
     if lock.is_symlink():
         raise RuntimeError("refusing to release symlinked evaluator lease")
@@ -297,25 +331,24 @@ def evaluator_run_directory(
     trusted = evaluator_working_directory(repositories, snapshots)
     run = trusted / "runs" / ("turn-" + uuid.UUID(turn_id).hex)
     lock = _evaluator_lock_path(run)
-    # Exclusive creation serializes evaluators across independent MCP
-    # processes; a blocked or unconfirmed worker keeps the lease until
-    # exact operator recovery. Never overwrite an existing lease.
-    try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise RuntimeError(
-            "another evaluator is active or requires operator recovery; "
-            f"inspect the lease at {lock}"
-        ) from exc
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(run.name + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        run.mkdir(mode=0o700)  # never reuse a previous turn's content
-    except BaseException:
-        release_evaluator_run_lock(run)
-        raise
+    # The guard serializes creation against recovery's compare + unlink.
+    with evaluator_lease_guard(run.parent):
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise RuntimeError(
+                "another evaluator is active or requires operator recovery; "
+                f"inspect the lease at {lock}"
+            ) from exc
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(run.name + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            run.mkdir(mode=0o700)  # never reuse a previous turn's content
+        except BaseException:
+            release_evaluator_run_lock(run, guard_held=True)
+            raise
     return run
 
 
@@ -1088,11 +1121,31 @@ class DelegateRuntime:
         try:
             # Peers keep their existing TemporaryDirectory lifecycle. Only
             # Final Evaluation needs persistent sink paths on blocked startup.
-            sink_context = (
-                contextlib.nullcontext(tempfile.mkdtemp(prefix="qiqi-result-"))
-                if evaluation_id is not None else
-                tempfile.TemporaryDirectory(prefix="qiqi-result-")
-            )
+            if evaluation_id is not None:
+                # Predeclare deterministic resource locators durably before
+                # creating a sink, lease, or native workspace. SIGKILL cannot
+                # bypass this checkpoint once the native worker can run.
+                sink_path = Path(tempfile.gettempdir()) / (
+                    "qiqi-result-" + uuid.UUID(turn_id).hex
+                )
+                trusted = evaluator_working_directory(repos, evaluation_roots)
+                planned_run = trusted / "runs" / (
+                    "turn-" + uuid.UUID(turn_id).hex
+                )
+                FinalEvaluationStore(self.db).checkpoint_cleanup(
+                    evaluation_id,
+                    cleanup_state="dispatch_prepared",
+                    capture_sink=str(sink_path),
+                    evaluator_cwd=str(planned_run),
+                    write_claim_id=claim_id,
+                    write_claim_repository=repository,
+                )
+                sink_path.mkdir(mode=0o700)  # no reuse of previous captures
+                sink_context = contextlib.nullcontext(str(sink_path))
+            else:
+                sink_context = tempfile.TemporaryDirectory(
+                    prefix="qiqi-result-"
+                )
             with sink_context as td:
                 sink = Path(td)
                 os.chmod(sink, 0o700)
@@ -1121,6 +1174,11 @@ class DelegateRuntime:
                 top = await self._json("workspace", "create", "--cwd", str(native_cwd),
                                        "--label", f"qiqi:{repository}:{turn_id[:8]}", "--no-focus")
                 workspace_id = top["workspace"]["workspace_id"]
+                if evaluation_id is not None:
+                    FinalEvaluationStore(self.db).checkpoint_cleanup(
+                        evaluation_id, workspace_id=str(workspace_id),
+                        cleanup_state="native_workspace_created",
+                    )
                 pane_id = top["root_pane"]["pane_id"]
                 agent_args = self._hook_args(adapter, sink, nonce) + args
                 if mounted_sources:
