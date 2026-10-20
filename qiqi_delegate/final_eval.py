@@ -15,7 +15,7 @@ from qiqi_delegate.core import build_task_packet
 from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot, inspect_roots, manifest_digest
 from qiqi_delegate.task_request import copy_workspace_snapshot
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
-from qiqi_delegate.runtime import AgentStartupBlocked
+from qiqi_delegate.runtime import AgentStartupBlocked, EvaluatorCleanupUnconfirmed
 
 
 class FinalEvaluationCoordinator:
@@ -294,12 +294,24 @@ class FinalEvaluationCoordinator:
                     evaluation_roots=snap.paths, evaluation_id=eid,
                 )
             except BaseException as exc:
-                # Preserve the prebound native turn, including any capture that
-                # was committed before cancellation during workspace cleanup.
-                self.store.complete(eid, raw_response=None, report=None,
-                                    status="interrupted" if isinstance(
-                                        exc, (asyncio.CancelledError, AgentStartupBlocked)
-                                    ) else "errored", detail=str(exc))
+                # A Herdr worker blocked on trust/approval or an unconfirmed
+                # close can still read these copies. Preserve them until the
+                # operator confirms termination, including on cancellation.
+                interrupted = isinstance(
+                    exc, (asyncio.CancelledError, AgentStartupBlocked,
+                          EvaluatorCleanupUnconfirmed),
+                )
+                cleanup = None
+                if interrupted:
+                    cleanup = dict(getattr(exc, "cleanup", None) or {})
+                    cleanup.setdefault("cleanup_state", "dispatch_interrupted")
+                    cleanup["snapshot_root"] = str(snap.retain())
+                # Preserve the prebound turn; captured output alone never PASS.
+                self.store.complete(
+                    eid, raw_response=None, report=None,
+                    status="interrupted" if interrupted else "errored",
+                    detail=str(exc), cleanup=cleanup,
+                )
                 raise
             raw = response.get("agent_response")
             # Herdr may finish native capture but fail to confirm workspace
@@ -312,6 +324,7 @@ class FinalEvaluationCoordinator:
                     key: value for key in (
                         "cleanup_state", "workspace_id", "write_claim_id",
                         "write_claim_repository", "recovery_action",
+                        "capture_sink",
                     )
                     if isinstance((value := response.get(key)), str)
                 }
@@ -324,12 +337,11 @@ class FinalEvaluationCoordinator:
                     "interrupted evaluation ID before retry. "
                     "Captured PASS is NOT finalization authority."
                 )
+                cleanup["snapshot_root"] = str(snap.retain())
                 self.store.complete(
                     eid, raw_response=raw if isinstance(raw, str) else None,
                     report=None, status="interrupted", detail=detail,
-                    turn_id=response.get("turn_id"), cleanup=cleanup or {
-                        "cleanup_state": "unknown_unconfirmed_cleanup",
-                    },
+                    turn_id=response.get("turn_id"), cleanup=cleanup,
                 )
                 return self.read(graph_run_id, eid)
             report = None
