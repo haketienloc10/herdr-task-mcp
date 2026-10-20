@@ -65,11 +65,13 @@ def _remaining_git_timeout(deadline: float | None) -> float:
 def _git(
     root: Path, *args: str, deadline: float | None = None,
 ) -> bytes:
+    # Calculate the deadline outside the try/except: TimeoutError inherits
+    # OSError and must not be misreported as an ordinary Git failure.
+    timeout = _remaining_git_timeout(deadline)
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args], stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=True,
-            timeout=_remaining_git_timeout(deadline),
+            stderr=subprocess.PIPE, check=True, timeout=timeout,
         ).stdout
     except subprocess.TimeoutExpired as exc:
         if deadline is not None:
@@ -131,12 +133,13 @@ def _reject_sparse_checkout(
     and sparse mode may hide an entire sparse-index directory or a staged
     deletion may have removed an entry from the index.
     """
+    timeout = _remaining_git_timeout(deadline)
     try:
         mode = subprocess.run(
             ["git", "-C", str(root), "config", "--bool", "--get",
              "core.sparseCheckout"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            timeout=_remaining_git_timeout(deadline),
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         if deadline is not None:
