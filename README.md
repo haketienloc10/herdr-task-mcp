@@ -628,6 +628,13 @@ including cross-module contracts, before delivery is finalized.
    Final Evaluator dùng `~/.qiqi/evaluator-cwd` làm thư mục cha được trust
    (trên Windows giải bằng `Path.home()`). Mỗi lượt khởi động trong thư mục
    con sạch `runs/turn-<uuid>`, không tái sử dụng file từ lượt trước.
+   Runtime kiểm tra chỉ dẫn khởi động trong toàn bộ chuỗi thư mục cha.
+   Khóa độc quyền `runs/.qiqi-active` cho phép tối đa một Final Evaluator
+   chạy trên cùng trust root, kể cả giữa các MCP process. Lượt thứ hai
+   nhận lỗi rõ ràng nếu evaluator trước vẫn chạy hoặc chưa được recovery;
+   không tự xóa khóa của worker có thể còn sống. Đây là tuần tự hóa
+   có phối hợp, không phải OS sandbox đối với tiến trình cố tình ghi đè
+   dữ liệu khi chạy cùng UID.
    Claude interactive thường kế thừa trust của thư mục cha không thuộc Git;
    không tự chỉnh trạng thái trust và cần kiểm chứng với CLI thực tế.
    Có thể đặt `QIQI_EVALUATOR_CWD` thành đường dẫn tuyệt đối ngoài
@@ -779,8 +786,13 @@ temporary trees after termination confirmation. Releasing the write claim
 alone does not clear an interrupted evaluation reservation; these are
 separate, audited recoveries. Never release a still-running worker's claim.
 The trusted parent `~/.qiqi/evaluator-cwd` is never removed by cleanup;
-each completed per-turn CWD is removed. Peers/Discovery keep their original
-auto-cleaned `TemporaryDirectory` hook sinks.
+each completed per-turn CWD is removed, and its exclusive lease is released.
+If a request is cancelled and Herdr **confirms** workspace closure, the
+snapshot, hook sink and per-turn CWD are removed; the attempt is marked
+errored and may be retried without additional operator recovery. If
+closure is unconfirmed, metadata retains all recovery paths and the
+lease blocks later Evaluators until verified recovery.
+Peers/Discovery keep their original auto-cleaned `TemporaryDirectory` hook sinks.
 
 Finalization checks graph/request revisions and the live multi-repository
 manifest digest. **After SQLite commits**, it reloads `repos.yaml`, resolves
