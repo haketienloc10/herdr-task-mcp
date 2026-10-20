@@ -1803,16 +1803,17 @@ def test_sigkill_recovery_uses_durable_resource_checkpoints(tmp_path, monkeypatc
             gid, graph_rt.get_graph(gid)["revision"],
             binding["request_id"], binding["request_revision"],
             "claude-evaluator", snap.manifest, snap.digest,
+            snapshot_root=snap.temporary_root,
         )
         assert created
         eid = reserved["evaluation_id"]
+        assert reserved["cleanup"] == {"snapshot_root": str(snap.temporary_root)}
         turn = str(uuid.uuid4())
         coordinator.store.bind_turn(eid, turn)
         sink = Path(tempfile.gettempdir()) / ("qiqi-result-" + uuid.UUID(turn).hex)
         run = trusted / "runs" / ("turn-" + uuid.UUID(turn).hex)
         coordinator.store.checkpoint_cleanup(
-            eid, snapshot_root=str(snap.temporary_root),
-            cleanup_state="dispatch_prepared",
+            eid, cleanup_state="dispatch_prepared",
             capture_sink=str(sink),
             evaluator_cwd=str(run),
             write_claim_id="turn:" + turn,
