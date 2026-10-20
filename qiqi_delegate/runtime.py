@@ -1459,7 +1459,7 @@ class DelegateRuntime:
                                 "workspace_label": workspace_label or "",
                                 "write_claim_id": claim_id,
                                 "write_claim_repository": repository,
-                    "write_claim_repositories": claim_repositories_json,
+                                "write_claim_repositories": claim_repositories_json,
                                 "capture_sink": str(sink) if sink is not None else "",
                                 "evaluator_cwd": str(
                                     evaluator_cwd or planned_run or ""
@@ -1512,7 +1512,7 @@ class DelegateRuntime:
                             "workspace_id": str(workspace_id),
                             "write_claim_id": claim_id,
                             "write_claim_repository": repository,
-                    "write_claim_repositories": claim_repositories_json,
+                            "write_claim_repositories": claim_repositories_json,
                             "capture_sink": str(sink) if sink is not None else "",
                             "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                         })
@@ -1522,7 +1522,6 @@ class DelegateRuntime:
                                    "workspace_label": workspace_label or "",
                                    "write_claim_id": claim_id, "write_claim_repository": repository,
                                    "write_claim_repositories": claim_repositories_json,
-                    "write_claim_repositories": claim_repositories_json,
                                    "workspace_id": workspace_id,
                                    "capture_sink": str(sink) if sink is not None else "",
                                    "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
@@ -1541,7 +1540,7 @@ class DelegateRuntime:
                             "workspace_id": str(workspace_id),
                             "write_claim_id": claim_id,
                             "write_claim_repository": repository,
-                    "write_claim_repositories": claim_repositories_json,
+                            "write_claim_repositories": claim_repositories_json,
                             "capture_sink": str(sink) if sink is not None else "",
                             "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                         }
