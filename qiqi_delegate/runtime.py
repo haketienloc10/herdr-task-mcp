@@ -677,6 +677,49 @@ class DelegateRuntime:
                 "recover stale claim explicitly"
             ) from exc
 
+    def _claim_many(self, repositories: tuple[str, ...], claim_id: str) -> None:
+        """Atomically claim every live module before granting agent access."""
+        if not repositories or len(repositories) != len(set(repositories)):
+            raise ValueError("live evaluation requires unique Git roots")
+        roots = self.repos()
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                unknown = db.execute(
+                    "SELECT repository FROM write_claims "
+                    "WHERE repository_root IS NULL LIMIT 1"
+                ).fetchone()
+                if unknown is not None:
+                    raise RuntimeError(
+                        "unmapped legacy write claim active; recover before evaluation"
+                    )
+                for name in repositories:
+                    db.execute(
+                        "INSERT INTO write_claims("
+                        "repository,claim_id,created_at_ns,repository_root"
+                        ") VALUES (?,?,?,?)",
+                        (name, claim_id, time.time_ns(), str(roots[name].resolve())),
+                    )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeError(
+                "one or more live evaluation repositories are busy; "
+                "no partial claims were retained"
+            ) from exc
+
+    def _release_claims(self, repositories: tuple[str, ...], claim_id: str) -> None:
+        """Release the exact live evaluator claim set as one transaction."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for name in repositories:
+                result = db.execute(
+                    "DELETE FROM write_claims WHERE repository=? AND claim_id=?",
+                    (name, claim_id),
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError(
+                        f"evaluator write claim mismatch or missing: {name}"
+                    )
+
     def release_claim(self, repository: str, claim_id: str) -> bool:
         with self._connect() as db:
             result = db.execute(
@@ -1123,7 +1166,15 @@ class DelegateRuntime:
         # do not allow an evaluator's preserved claim to become unrecoverable
         # and permanently block subsequent delegation.
         claim_root = repos[repository] if evaluation_id is not None else execution_root
-        self._claim(repository, claim_id, repository_root=claim_root)
+        claimed_repositories = (
+            tuple(evaluation_repositories) if evaluation_live
+            else (repository,)
+        )
+        if evaluation_live:
+            self._claim_many(claimed_repositories, claim_id)
+        else:
+            self._claim(repository, claim_id, repository_root=claim_root)
+        claim_repositories_json = json.dumps(list(claimed_repositories))
         workspace_id = None
         sink: Path | None = None
         evaluator_cwd: Path | None = None
@@ -1160,6 +1211,7 @@ class DelegateRuntime:
                     evaluator_cwd=str(planned_run),
                     write_claim_id=claim_id,
                     write_claim_repository=repository,
+                    write_claim_repositories=claim_repositories_json,
                     workspace_label=workspace_label,
                 )
                 sink_path.mkdir(mode=0o700)  # no reuse of previous captures
@@ -1342,6 +1394,7 @@ class DelegateRuntime:
                     "workspace_id": str(workspace_id),
                     "write_claim_id": claim_id,
                     "write_claim_repository": repository,
+                    "write_claim_repositories": claim_repositories_json,
                     "capture_sink": str(sink) if sink is not None else "",
                     "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                 }
@@ -1385,7 +1438,10 @@ class DelegateRuntime:
                 )
             if closed:
                 try:
-                    self.release_claim(repository, claim_id)
+                    if evaluation_live:
+                        self._release_claims(claimed_repositories, claim_id)
+                    else:
+                        self.release_claim(repository, claim_id)
                     if sink is not None and evaluation_id is not None:
                         cleanup_temporary_tree(sink)
                     if evaluator_cwd is not None:
@@ -1403,6 +1459,7 @@ class DelegateRuntime:
                                 "workspace_label": workspace_label or "",
                                 "write_claim_id": claim_id,
                                 "write_claim_repository": repository,
+                    "write_claim_repositories": claim_repositories_json,
                                 "capture_sink": str(sink) if sink is not None else "",
                                 "evaluator_cwd": str(
                                     evaluator_cwd or planned_run or ""
@@ -1420,6 +1477,7 @@ class DelegateRuntime:
                     "workspace_id": "",
                     "write_claim_id": claim_id,
                     "write_claim_repository": repository,
+                    "write_claim_repositories": claim_repositories_json,
                     "capture_sink": str(sink) if sink is not None else "",
                     "evaluator_cwd": str(evaluator_cwd or planned_run or ""),
                 }
@@ -1439,6 +1497,7 @@ class DelegateRuntime:
                     "workspace_id": str(workspace_id),
                     "write_claim_id": claim_id,
                     "write_claim_repository": repository,
+                    "write_claim_repositories": claim_repositories_json,
                     "capture_sink": str(sink) if sink is not None else "",
                     "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                 }
@@ -1453,6 +1512,7 @@ class DelegateRuntime:
                             "workspace_id": str(workspace_id),
                             "write_claim_id": claim_id,
                             "write_claim_repository": repository,
+                    "write_claim_repositories": claim_repositories_json,
                             "capture_sink": str(sink) if sink is not None else "",
                             "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                         })
@@ -1461,6 +1521,8 @@ class DelegateRuntime:
                     result.update({"cleanup_state": "workspace_close_unconfirmed",
                                    "workspace_label": workspace_label or "",
                                    "write_claim_id": claim_id, "write_claim_repository": repository,
+                                   "write_claim_repositories": claim_repositories_json,
+                    "write_claim_repositories": claim_repositories_json,
                                    "workspace_id": workspace_id,
                                    "capture_sink": str(sink) if sink is not None else "",
                                    "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
@@ -1479,6 +1541,7 @@ class DelegateRuntime:
                             "workspace_id": str(workspace_id),
                             "write_claim_id": claim_id,
                             "write_claim_repository": repository,
+                    "write_claim_repositories": claim_repositories_json,
                             "capture_sink": str(sink) if sink is not None else "",
                             "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                         }
