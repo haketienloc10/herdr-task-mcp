@@ -324,7 +324,7 @@ class FinalEvaluationCoordinator:
                     key: value for key in (
                         "cleanup_state", "workspace_id", "write_claim_id",
                         "write_claim_repository", "recovery_action",
-                        "capture_sink",
+                        "capture_sink", "evaluator_cwd",
                     )
                     if isinstance((value := response.get(key)), str)
                 }
