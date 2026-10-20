@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import asyncio
 from functools import wraps
 from typing import Any, Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
@@ -1164,7 +1165,10 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
     result["task_request_binding"] = task_requests.graph_binding(graph_run_id)
     if result["task_request_binding"] is None:
         result["task_readiness_policy"] = "legacy_unassessed"
-    result.update(final_evaluation.graph_status(graph_run_id))
+    # Live source checks may hash large JARs/Git trees: never block MCP.
+    result.update(await asyncio.to_thread(
+        final_evaluation.graph_status, graph_run_id,
+    ))
     return result
 
 @mcp.tool()
@@ -1195,7 +1199,7 @@ async def rebind_graph(
 async def start_final_evaluation(
     graph_run_id: str, route: str, expected_revision: int,
 ) -> dict[str, Any]:
-    """One fresh, configurable Codex/Claude Evaluator over TaskGraph snapshots.
+    """One fresh, configurable Codex/Claude Evaluator over TaskGraph modules.
 
     Evaluator CLI policy comes from agent-routing.yaml. A permissive CLI
     is not a read-only sandbox; original Git roots are never evaluator cwd.
@@ -1209,7 +1213,9 @@ async def get_final_evaluation(
     graph_run_id: str, evaluation_id: str | None = None,
 ) -> dict[str, Any]:
     """Inspect complete independent evaluator evidence and stale/finalized status."""
-    return final_evaluation.read(graph_run_id, evaluation_id)
+    return await asyncio.to_thread(
+        final_evaluation.read, graph_run_id, evaluation_id,
+    )
 
 
 @mcp.tool()
@@ -1218,7 +1224,11 @@ async def finalize_graph(
     graph_run_id: str, evaluation_id: str, expected_revision: int,
 ) -> dict[str, Any]:
     """Explicitly close delivery ONLY after current independent graph-level PASS."""
-    return final_evaluation.finalize(
+    # Keep the native SQLite commit/revocation checks in the same worker
+    # thread. Avoid wait_for around finalization: the transaction must not
+    # silently continue after a timeout is reported to the caller.
+    return await asyncio.to_thread(
+        final_evaluation.finalize,
         graph_run_id, evaluation_id, expected_revision,
     )
 
