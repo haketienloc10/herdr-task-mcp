@@ -251,10 +251,24 @@ def evaluator_working_directory(
     if runs.is_symlink():
         raise ValueError("evaluator runs directory must not be a symlink")
     runs.mkdir(mode=0o700, exist_ok=True)
-    if not runs.is_dir() or any(
-        (item.is_symlink() or not item.is_file()) if item.name == ".qiqi-active"
-        else (not item.is_dir() or item.is_symlink())
-        for item in runs.iterdir()
+    # The native CWD is runs/turn-<uuid>. Claude can also load project
+    # settings from *runs* itself, so arbitrary sibling directories must
+    # never be treated as harmless. In particular runs/.claude would inject
+    # hooks and project settings into every subsequent evaluator session.
+    def approved_run_entry(item: Path) -> bool:
+        if item.is_symlink():
+            return False
+        if item.name == ".qiqi-active":
+            return item.is_file()
+        return (
+            len(item.name) == len("turn-") + 32
+            and item.name.startswith("turn-")
+            and all(c in "0123456789abcdef" for c in item.name[5:])
+            and item.is_dir()
+        )
+
+    if not runs.is_dir() or not all(
+        approved_run_entry(item) for item in runs.iterdir()
     ):
         raise ValueError("evaluator runs directory contains unexpected files")
     return candidate
