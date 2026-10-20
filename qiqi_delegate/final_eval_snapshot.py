@@ -436,7 +436,7 @@ def _live_scan_worker(roots: dict[str, Path], sink: Any) -> None:
 
 def scan_live_roots_bounded(
     roots: dict[str, Path], *, cancel_event: Any = None,
-    timeout: float = 65,
+    timeout: float = 65, _worker: Any = None,
 ) -> tuple[dict[str, Any], str]:
     """Hard-limit an entire live scan, INCLUDING blocking os.read().
 
@@ -448,7 +448,9 @@ def scan_live_roots_bounded(
     """
     ctx = multiprocessing.get_context("spawn")
     reader, writer = ctx.Pipe(duplex=False)
-    process = ctx.Process(target=_live_scan_worker, args=(roots, writer))
+    process = ctx.Process(
+        target=_worker or _live_scan_worker, args=(roots, writer),
+    )
     try:
         process.start()
         writer.close()
