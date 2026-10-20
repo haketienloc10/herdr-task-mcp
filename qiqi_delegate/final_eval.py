@@ -9,13 +9,14 @@ import asyncio
 import hashlib
 import os
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.core import build_task_packet
 from qiqi_delegate.final_eval_snapshot import (
     EvaluationSnapshot, LiveEvaluationView, inspect_roots,
-    inspect_live_roots, manifest_digest,
+    inspect_live_roots, scan_live_roots_bounded, manifest_digest,
 )
 from qiqi_delegate.task_request import copy_workspace_snapshot
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
@@ -265,11 +266,22 @@ class FinalEvaluationCoordinator:
         )
 
     @staticmethod
-    async def _scan_live(roots: dict[str, Path]) -> dict[str, Any]:
-        """Keep Git hashing off the MCP event loop and bound scan latency."""
-        return await asyncio.wait_for(
-            asyncio.to_thread(inspect_live_roots, roots), timeout=60,
-        )
+    async def _scan_live(
+        roots: dict[str, Path],
+    ) -> tuple[dict[str, Any], str]:
+        """Scan and hash in one killable process, without blocking MCP."""
+        cancelled = threading.Event()
+        try:
+            # The child scan has a 55s internal deadline; the outer process
+            # watchdog is 65s and can terminate a blocking NFS/FUSE read.
+            return await asyncio.to_thread(
+                scan_live_roots_bounded, roots,
+                cancel_event=cancelled, timeout=65,
+            )
+        except asyncio.CancelledError:
+            cancelled.set()  # parent worker terminates its scan subprocess
+            raise
+
 
     async def start(self, graph_run_id: str, route: str,
                     expected_revision: int) -> dict[str, Any]:
@@ -282,9 +294,9 @@ class FinalEvaluationCoordinator:
         if mode not in {"live", "snapshot"}:
             raise ValueError("QIQI_EVALUATION_MODE must be live or snapshot")
         live = mode == "live"
-        live_manifest = await self._scan_live(roots) if live else None
+        live_data = await self._scan_live(roots) if live else None
         source_view = (
-            LiveEvaluationView(roots, live_manifest) if live
+            LiveEvaluationView(roots, live_data[0], live_data[1]) if live
             else EvaluationSnapshot(roots)
         )
         with source_view as snap:
@@ -340,11 +352,11 @@ class FinalEvaluationCoordinator:
             try:
                 # Re-check live input immediately before native execution.
                 inspector = inspect_live_roots if live else inspect_roots
-                current = (
-                    await self._scan_live(roots) if live
-                    else inspector(roots)
+                current_digest = (
+                    (await self._scan_live(roots))[1] if live
+                    else manifest_digest(inspector(roots))
                 )
-                if manifest_digest(current) != snap.digest:
+                if current_digest != snap.digest:
                     raise RuntimeError("evaluation source changed before dispatch")
                 dispatch_started = True
                 response = await self.runtime.delegate(
@@ -440,8 +452,8 @@ class FinalEvaluationCoordinator:
                 # Herdr is already closed here. A broken/slow Git scan must
                 # never strand the SQLite attempt in 'evaluating'.
                 try:
-                    current = await self._scan_live(roots)
-                    if manifest_digest(current) != snap.digest:
+                    _manifest, current_digest = await self._scan_live(roots)
+                    if current_digest != snap.digest:
                         status = "inconclusive"
                         report = None
                         detail = "Registered source changed during live evaluation; rerun"
@@ -474,11 +486,18 @@ class FinalEvaluationCoordinator:
     @staticmethod
     def _inspect_for_row(roots: dict[str, Path], row: dict[str, Any]):
         return (
-            inspect_live_roots(roots)
+            scan_live_roots_bounded(roots)[0]
             if any(entry.get("inspection_mode") == "live"
                    for entry in row["manifest"].values())
             else inspect_roots(roots)
         )
+
+    @staticmethod
+    def _digest_for_row(roots: dict[str, Path], row: dict[str, Any]) -> str:
+        if any(entry.get("inspection_mode") == "live"
+               for entry in row["manifest"].values()):
+            return scan_live_roots_bounded(roots)[1]
+        return manifest_digest(inspect_roots(roots))
 
     def read(self, graph_run_id: str, evaluation_id: str | None = None):
         row = (self.store.get(evaluation_id) if evaluation_id
@@ -493,8 +512,8 @@ class FinalEvaluationCoordinator:
                 graph["revision"] == row["graph_revision"] and
                 task["request_id"] == row["request_id"] and
                 task["revision"] == row["request_revision"] and
-                manifest_digest(
-                    self._inspect_for_row(roots, row)
+                (
+                    self._digest_for_row(roots, row)
                 ) == row["manifest_digest"]
             )
         except (RuntimeError, ValueError, OSError):
@@ -524,9 +543,15 @@ class FinalEvaluationCoordinator:
             graph, _authored, _binding, task, _names, roots = self._eligible(
                 graph_run_id,
             )
-            mode = os.environ.get("QIQI_EVALUATION_MODE", "live").lower()
-            inspector = inspect_live_roots if mode == "live" else inspect_roots
-            digest = manifest_digest(inspector(roots))
+            mode = os.environ.get(
+                "QIQI_EVALUATION_MODE", "live",
+            ).strip().lower()
+            if mode not in {"live", "snapshot"}:
+                raise ValueError("QIQI_EVALUATION_MODE must be live or snapshot")
+            digest = (
+                scan_live_roots_bounded(roots)[1] if mode == "live"
+                else manifest_digest(inspect_roots(roots))
+            )
 
             def is_current(candidate: dict[str, Any]) -> bool:
                 return (
@@ -568,7 +593,7 @@ class FinalEvaluationCoordinator:
         if (entry.get("status") != "passed" or not entry.get("is_current")
                 or entry.get("finalized_at_ns")):
             raise ValueError("current independent final evaluation PASS is required")
-        current_digest = manifest_digest(self._inspect_for_row(roots, entry))
+        current_digest = self._digest_for_row(roots, entry)
         persisted = self.store.finalize(
             evaluation_id, graph["revision"], task["revision"], current_digest,
         )
@@ -586,8 +611,8 @@ class FinalEvaluationCoordinator:
                 and fresh_task["revision"] == task["revision"]
                 and fresh_names == _names
                 and fresh_roots == roots
-                and manifest_digest(
-                    self._inspect_for_row(fresh_roots, entry)
+                and self._digest_for_row(
+                    fresh_roots, entry
                 ) == current_digest
             )
         except Exception:
