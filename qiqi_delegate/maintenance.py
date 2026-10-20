@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from qiqi_delegate.runtime import DelegateRuntime
+from qiqi_delegate.runtime import DelegateRuntime, release_evaluator_run_lock
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
