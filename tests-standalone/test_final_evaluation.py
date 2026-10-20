@@ -521,7 +521,10 @@ def test_native_runtime_sets_snapshot_cwd_add_dir_and_fresh_turn_before_launch(
                 evaluation_id=eid,
             ))
         # Candidate CLAUDE.md/AGENTS.md must not be startup instructions.
-        assert captured["cwd"] == str(trusted)
+        native = Path(captured["cwd"])
+        assert native.parent == trusted / "runs"
+        assert native.name.startswith("turn-")
+        assert not native.exists()  # closed workspace releases per-turn CWD
         assert trusted.is_dir()
         assert captured["cwd"] not in {str(path) for path in snap.paths.values()}
         assert captured["cwd"] not in {str(path) for path in repos.values()}
@@ -683,7 +686,8 @@ def test_evaluator_snapshot_contains_untrusted_project_config_but_cli_blocks_loa
         async def fake_json(*args, **kw):
             assert args[:3] == ("workspace", "create", "--cwd")
             neutral = Path(args[3])
-            assert neutral.name == "evaluator-cwd"
+            assert neutral.name.startswith("turn-")
+            assert neutral.parent.name == "runs"
             assert neutral.is_dir()
             assert neutral not in snap.paths.values()
             assert not (neutral / "CLAUDE.md").exists()
@@ -1423,7 +1427,9 @@ def test_blocked_final_evaluator_retains_snapshot_and_sink_until_verified_recove
 
     async def create_workspace(*args, **kwargs):
         assert args[:3] == ("workspace", "create", "--cwd")
-        assert args[3] == str(trusted)
+        cwd = Path(args[3])
+        assert cwd.parent == trusted / "runs"
+        assert cwd.is_dir()
         return {
             "workspace": {"workspace_id": "trust-workspace"},
             "root_pane": {"pane_id": "trust-pane"},
@@ -1452,6 +1458,9 @@ def test_blocked_final_evaluator_retains_snapshot_and_sink_until_verified_recove
     assert cleanup["cleanup_state"] == "agent_startup_blocked"
     assert cleanup["workspace_id"] == "trust-workspace"
     assert cleanup["write_claim_repository"] == "backend"
+    run_cwd = Path(cleanup["evaluator_cwd"])
+    assert run_cwd.parent == trusted / "runs"
+    assert run_cwd.is_dir()
     sink = Path(cleanup["capture_sink"])
     snapshot = Path(cleanup["snapshot_root"])
     assert sink.is_dir()
@@ -1476,6 +1485,7 @@ def test_blocked_final_evaluator_retains_snapshot_and_sink_until_verified_recove
     )
     assert recovered["status"] == "errored"
     assert not sink.exists() and not snapshot.exists()
+    assert not run_cwd.exists()
     assert trusted.is_dir()
 
 
