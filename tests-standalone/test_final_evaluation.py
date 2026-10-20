@@ -1520,3 +1520,62 @@ def test_unconfirmed_native_close_keeps_final_snapshot_for_recovery(
     )
     assert recovered["status"] == "errored"
     assert not snapshot.exists()
+
+
+def test_per_turn_native_cwd_does_not_inherit_previous_run_artifacts(tmp_path, monkeypatch):
+    import uuid
+    from qiqi_delegate.runtime import evaluator_run_directory
+    from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
+
+    root = tmp_path / "trusted"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(root))
+    source = tmp_path / "repo"
+    source.mkdir()
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    repos = {"repo": source}
+    snapshots = {"repo": snapshot}
+    first = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    (first / "CLAUDE.md").write_text("untrusted first-turn content")
+    (first / "AGENTS.md").write_text("untrusted first-turn content")
+    second = evaluator_run_directory(repos, snapshots, str(uuid.uuid4()))
+    assert first != second and first.parent == second.parent == root / "runs"
+    assert list(second.iterdir()) == []
+    assert (first / "CLAUDE.md").is_file()
+    cleanup_temporary_tree(first)
+    cleanup_temporary_tree(second)
+    assert root.is_dir()
+
+
+def test_evaluator_refuses_poisoned_trusted_ancestors(tmp_path, monkeypatch):
+    import uuid
+    from qiqi_delegate.runtime import evaluator_run_directory
+
+    root = tmp_path / "trusted"
+    root.mkdir()
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(root))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (root / "CLAUDE.md").write_text("poisoned")
+    with pytest.raises(ValueError, match="only the runs directory"):
+        evaluator_run_directory({"repo": repo}, {"repo": snapshot}, str(uuid.uuid4()))
+    (root / "CLAUDE.md").unlink()
+    (root / "runs").mkdir()
+    (root / "runs" / "AGENTS.md").write_text("poisoned")
+    with pytest.raises(ValueError, match="unexpected files"):
+        evaluator_run_directory({"repo": repo}, {"repo": snapshot}, str(uuid.uuid4()))
+
+
+def test_recovery_refuses_arbitrary_evaluator_cwd(tmp_path, monkeypatch):
+    from qiqi_delegate.maintenance import _cleanup_retained_evaluation_paths
+
+    root = tmp_path / "trusted"
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(root))
+    victim = tmp_path / "other" / ("turn-" + "b" * 32)
+    victim.mkdir(parents=True)
+    (victim / "keep.txt").write_text("must not delete")
+    with pytest.raises(ValueError, match="unsafe retained evaluator CWD"):
+        _cleanup_retained_evaluation_paths({"evaluator_cwd": str(victim)})
+    assert (victim / "keep.txt").is_file()
