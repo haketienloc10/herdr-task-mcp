@@ -334,8 +334,8 @@ class FinalEvaluationCoordinator:
             if cleanup_state is not None:
                 cleanup = {
                     key: value for key in (
-                        "cleanup_state", "workspace_id", "write_claim_id",
-                        "write_claim_repository", "recovery_action",
+                        "cleanup_state", "workspace_id", "workspace_label",
+                        "write_claim_id", "write_claim_repository", "recovery_action",
                         "capture_sink", "evaluator_cwd",
                     )
                     if isinstance((value := response.get(key)), str)
