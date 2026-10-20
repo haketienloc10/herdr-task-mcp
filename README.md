@@ -622,7 +622,15 @@ None of those are copies of source repositories; they are deleted after
 confirmed Herdr closure, and retained on uncertain closure until verified
 operator recovery. The evaluator sees live source content and can observe
 concurrent edits: QiQi hashes before dispatch, after native review and again
-when finalizing, and does not authorize PASS if sources changed. These checks
+when finalizing, and does not authorize PASS if sources changed.
+The independent Evaluator takes **one atomic write-claim set covering EVERY
+registered Git root exposed to it**, preventing new Peers from writing any
+of those roots while the evaluation is active. When a native workspace close
+is unconfirmed, all root claims remain held; recovery metadata includes
+`write_claim_repositories` (JSON array) and the exact `write_claim_id`.
+The operator must confirm the worker stopped and release that claim for
+**each** listed root before exact evaluation recovery. Do not release only
+the primary root's claim and assume other modules are unblocked. These checks
 are **not a filesystem sandbox** and cannot freeze writes in other processes.
 Use an appropriately read-only agent configuration to reduce accidental edits.
 For legacy copy-based operation set `QIQI_EVALUATION_MODE=snapshot`; that
