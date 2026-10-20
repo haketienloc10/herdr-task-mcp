@@ -279,15 +279,16 @@ class EvaluationSnapshot:
 
     def __init__(self, roots: dict[str, Path]):
         self.roots = roots
-        self._temp: tempfile.TemporaryDirectory[str] | None = None
+        self._temp: Path | None = None
+        self._retained = False
         self.paths: dict[str, Path] = {}
         self.manifest: dict[str, Any] = {}
         self.digest = ""
     def __enter__(self) -> "EvaluationSnapshot":
         first = inspect_roots(self.roots)
-        self._temp = tempfile.TemporaryDirectory(prefix="qiqi-final-eval-")
+        self._temp = Path(tempfile.mkdtemp(prefix="qiqi-final-eval-"))
         try:
-            base = Path(self._temp.name)
+            base = self._temp
             for name, info in sorted(first.items()):
                 # Registered repository names may contain filesystem separators.
                 # Never derive a destination directory from untrusted names.
@@ -327,9 +328,16 @@ class EvaluationSnapshot:
             self.__exit__(None, None, None)
             raise
 
+    def retain(self) -> Path:
+        """Keep snapshot files when a native evaluator has not confirmed shutdown."""
+        if self._temp is None:
+            raise RuntimeError("evaluation snapshot is not active")
+        self._retained = True
+        return self._temp
+
     def __exit__(self, *_args: Any) -> None:
-        if self._temp:
-            self._temp.cleanup()
+        if self._temp is not None and not self._retained:
+            shutil.rmtree(self._temp)
         self._temp = None
         self.paths = {}
 
