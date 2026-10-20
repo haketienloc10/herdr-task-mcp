@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import shutil
 import stat
@@ -419,21 +420,96 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
     return manifest
 
 
+def _live_scan_worker(roots: dict[str, Path], sink: Any) -> None:
+    """Isolated scanner: a blocked filesystem syscall cannot pin MCP threads."""
+    try:
+        manifest = inspect_live_roots(roots)
+        sink.send(("ok", manifest, manifest_digest(manifest)))
+    except BaseException as exc:
+        try:
+            sink.send(("error", type(exc).__name__, str(exc)))
+        except (OSError, EOFError, BrokenPipeError):
+            pass
+    finally:
+        sink.close()
+
+
+def scan_live_roots_bounded(
+    roots: dict[str, Path], *, cancel_event: Any = None,
+    timeout: float = 65,
+) -> tuple[dict[str, Any], str]:
+    """Hard-limit an entire live scan, INCLUDING blocking os.read().
+
+    multiprocessing.spawn avoids inheriting the MCP server's open SQLite
+    connections, locks and event-loop state. On timeout or cancellation the
+    scan child is terminated, not merely a Future backed by a blocked thread.
+    The child produces both manifest and digest, so neither requires JSON
+    serialization on the caller's event loop.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    reader, writer = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=_live_scan_worker, args=(roots, writer))
+    try:
+        process.start()
+        writer.close()
+        expires = time.monotonic() + timeout
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("live evaluation scan cancelled")
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("live evaluation scanner process timed out")
+            if reader.poll(min(0.1, remaining)):
+                try:
+                    result = reader.recv()
+                except EOFError as exc:
+                    raise RuntimeError("live evaluation scanner exited without result") from exc
+                if result[0] == "ok":
+                    return result[1], result[2]
+                kind, detail = result[1], result[2]
+                if kind == "TimeoutError":
+                    raise TimeoutError(detail)
+                if kind == "ValueError":
+                    raise ValueError(detail)
+                raise RuntimeError(
+                    "live evaluation scanner failed: " + kind + ": " + detail
+                )
+            if not process.is_alive():
+                raise RuntimeError(
+                    "live evaluation scanner exited unexpectedly: "
+                    + str(process.exitcode)
+                )
+    finally:
+        reader.close()
+        writer.close()
+        if process.pid is not None:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+            else:
+                process.join(timeout=0.2)
+
+
 class LiveEvaluationView:
     """No repository copy; the evaluator reads original registered roots."""
 
     def __init__(
         self, roots: dict[str, Path],
         precomputed: dict[str, Any] | None = None,
+        precomputed_digest: str | None = None,
     ):
         self.paths = roots
         self.manifest: dict[str, Any] = precomputed or {}
-        self.digest = ""
+        self.digest = precomputed_digest or ""
 
     def __enter__(self) -> "LiveEvaluationView":
         if not self.manifest:
-            self.manifest = inspect_live_roots(self.paths)
-        self.digest = manifest_digest(self.manifest)
+            self.manifest, self.digest = scan_live_roots_bounded(self.paths)
+        if not self.digest:
+            self.digest = manifest_digest(self.manifest)
         return self
 
     def __exit__(self, *_args: Any) -> None:
