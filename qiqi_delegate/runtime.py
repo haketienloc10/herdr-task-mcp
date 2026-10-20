@@ -1115,6 +1115,7 @@ class DelegateRuntime:
         evaluator_cwd: Path | None = None
         planned_run: Path | None = None
         workspace_label: str | None = None
+        workspace_create_attempted = False
         closed = False
         preserve_startup = False
         result = None
@@ -1180,6 +1181,7 @@ class DelegateRuntime:
                 await self._ensure_herdr_server()
                 label = (workspace_label if evaluation_id is not None else
                          f"qiqi:{repository}:{turn_id[:8]}")
+                workspace_create_attempted = True
                 top = await self._json("workspace", "create", "--cwd", str(native_cwd),
                                        "--label", label, "--no-focus")
                 workspace_id = top["workspace"]["workspace_id"]
@@ -1344,7 +1346,12 @@ class DelegateRuntime:
                 error = close_task.result()
                 closed = error is None
             else:
-                closed = True
+                # A failed/aborted create request may have succeeded in Herdr
+                # despite never returning its assigned workspace_id. Do not
+                # delete resources or lease on such an ambiguous outcome.
+                closed = not (
+                    evaluation_id is not None and workspace_create_attempted
+                )
             if closed:
                 try:
                     self.release_claim(repository, claim_id)
@@ -1374,7 +1381,27 @@ class DelegateRuntime:
                     raise
                 if original_cancel is not None:
                     original_cancel.evaluator_worker_closed = True
-            if not closed and original_cancel is not None and evaluation_id is not None:
+            if (not closed and workspace_id is None and
+                    workspace_create_attempted and evaluation_id is not None):
+                uncertain = {
+                    "cleanup_state": "workspace_create_unconfirmed",
+                    "workspace_label": workspace_label or "",
+                    "workspace_id": "",
+                    "write_claim_id": claim_id,
+                    "write_claim_repository": repository,
+                    "capture_sink": str(sink) if sink is not None else "",
+                    "evaluator_cwd": str(evaluator_cwd or planned_run or ""),
+                }
+                if original_cancel is not None:
+                    original_cancel.cleanup = uncertain
+                else:
+                    raise EvaluatorCleanupUnconfirmed(
+                        "Herdr workspace create outcome unknown; inspect "
+                        "workspace list for exact label and CWD before "
+                        "confirming worker shutdown: " + (workspace_label or ""),
+                        uncertain,
+                    )
+            if not closed and original_cancel is not None and evaluation_id is not None and workspace_id:
                 original_cancel.cleanup = {
                     "cleanup_state": "workspace_close_unconfirmed",
                     "workspace_label": workspace_label or "",
@@ -1391,7 +1418,7 @@ class DelegateRuntime:
                     if evaluation_id is not None:
                         raise EvaluatorCleanupUnconfirmed(detail, {
                             "cleanup_state": "workspace_close_unconfirmed",
-                    "workspace_label": workspace_label or "",
+                            "workspace_label": workspace_label or "",
                             "workspace_id": str(workspace_id),
                             "write_claim_id": claim_id,
                             "write_claim_repository": repository,
@@ -1401,10 +1428,9 @@ class DelegateRuntime:
                     raise RuntimeError(detail)
                 if result is not None:
                     result.update({"cleanup_state": "workspace_close_unconfirmed",
-                    "workspace_label": workspace_label or "",
+                                   "workspace_label": workspace_label or "",
                                    "write_claim_id": claim_id, "write_claim_repository": repository,
                                    "workspace_id": workspace_id,
-                                   "workspace_label": workspace_label or "",
                                    "capture_sink": str(sink) if sink is not None else "",
                                    "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                                    "recovery_action": "Verify worker has stopped; then release claim"})
@@ -1418,7 +1444,7 @@ class DelegateRuntime:
                     else:
                         cancelled.cleanup = {
                             "cleanup_state": "workspace_close_unconfirmed",
-                    "workspace_label": workspace_label or "",
+                            "workspace_label": workspace_label or "",
                             "workspace_id": str(workspace_id),
                             "write_claim_id": claim_id,
                             "write_claim_repository": repository,
