@@ -112,4 +112,6 @@ def test_live_git_discovery_propagates_deadline_to_all_git_queries(
     monkeypatch.setattr(snapshot, "_git", verified)
     assert set(inspect_live_roots(runtime.repos())) == {"backend", "frontend"}
     assert any(args[0] == "ls-files" for args in calls)
-    assert any(args[0] == "ls-tree" for args in calls)
+    # HEAD-less Git fixture has no committed tree yet. The rev-parse and
+    # index/untracked discovery commands must still share one deadline.
+    assert any(args[0] == "rev-parse" for args in calls)
