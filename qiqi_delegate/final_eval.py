@@ -438,6 +438,16 @@ class FinalEvaluationCoordinator:
                         status = "inconclusive"
                         report = None
                         detail = "Registered source changed during live evaluation; rerun"
+                except asyncio.CancelledError:
+                    # Native Herdr has already been closed. A cancelled
+                    # freshness scan must not retain an 'evaluating' attempt.
+                    self.store.complete(
+                        eid, raw_response=raw, report=None,
+                        status="inconclusive",
+                        detail="Live source verification cancelled after native close",
+                        turn_id=response.get("turn_id"),
+                    )
+                    raise
                 except Exception as exc:
                     status = "inconclusive"
                     report = None
