@@ -266,6 +266,7 @@ class FinalEvaluationCoordinator:
             reserved, created = self.store.reserve(
                 graph_run_id, graph["revision"], task["request_id"],
                 task["revision"], route, snap.manifest, snap.digest,
+                snapshot_root=snap.temporary_root,
             )
             if not created:
                 # Reuse a current finalized PASS; never demote delivered state
@@ -284,11 +285,7 @@ class FinalEvaluationCoordinator:
                         "status": reserved["status"], "already_active": True,
                         "turn_id": reserved["turn_id"]}
             eid = reserved["evaluation_id"]
-            # The copy predates dispatch and must be discoverable after a
-            # process crash. Ordinary completion still removes it.
-            self.store.checkpoint_cleanup(
-                eid, snapshot_root=str(snap.temporary_root),
-            )
+            # Snapshot recovery locator was written atomically by reserve().
             try:
                 # Re-check live input immediately before native execution.
                 if manifest_digest(inspect_roots(roots)) != snap.digest:
