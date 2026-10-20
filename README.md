@@ -605,6 +605,29 @@ Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó khô
 
 ## Final Evaluation Gate — Issue #8
 
+**Default as of this refactor: direct multi-module review (no cloned repository).**
+`QIQI_EVALUATION_MODE=live` (default) runs a fresh independent Claude/Codex
+Evaluator against the **registered Git roots** of all modules in the current
+TaskGraph. The runtime streams SHA-256 hashes of tracked and non-ignored
+untracked files (including large, unchanged JAR/WAR binaries); it does **not**
+copy the repository to `qiqi-final-eval-*`, and the old **1 MB/file and
+24 MB snapshot-copy limits do not apply**. Git symlink, sensitive-file,
+submodule and sparse-worktree guards remain. For large worktrees, live mode
+allows up to 20,000 paths per registered root. Independent review means a
+fresh evaluator session, not a copied repository.
+
+Only the **small per-turn neutral evaluator CWD**, task/request evidence archive,
+JSON hash manifest and native Stop hook capture sink are created for execution.
+None of those are copies of source repositories; they are deleted after
+confirmed Herdr closure, and retained on uncertain closure until verified
+operator recovery. The evaluator sees live source content and can observe
+concurrent edits: QiQi hashes before dispatch, after native review and again
+when finalizing, and does not authorize PASS if sources changed. These checks
+are **not a filesystem sandbox** and cannot freeze writes in other processes.
+Use an appropriately read-only agent configuration to reduce accidental edits.
+For legacy copy-based operation set `QIQI_EVALUATION_MODE=snapshot`; that
+mode retains its historical file-size and total-copy limits.
+
 A completed TaskGraph is NOT necessarily a verified final product. The Lead
 continues its existing per-node `get_node_reviews` / `submit_decisions` loop.
 When the entire graph is `complete` with **every node satisfied**, a separate
@@ -650,14 +673,16 @@ including cross-module contracts, before delivery is finalized.
 4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
    hoặc sử dụng `"claude-xhigh"` / `"codex-evaluator"` theo độ khó.
    Không cần tạo riêng một route Claude có cùng model và effort.
-   The Coordinator snapshots **all** repositories in the active TaskGraph
-   (including staged, unstaged and non-ignored untracked files), then launches
-   **one fresh native Evaluator session** in a fresh per-turn subdirectory
-   of the stable, trusted neutral parent CWD, with every
-   snapshot root passed via `--add-dir` and identified by absolute paths
-   in the native prompt. This is a disposable working copy, not an
-   immutable or read-only mount. Native Stop/StopFailure capture stays
-   runtime-owned. Operator/user/managed agent configuration remains a
+   In default live mode the Coordinator hashes **all** registered repositories
+   in the active TaskGraph (including staged, unstaged and non-ignored untracked
+   files), then launches **one fresh native Evaluator session** from the
+   trusted neutral CWD. The actual registered Git roots are passed via
+   `--add-dir` and named by absolute paths. The evaluator reads the original
+   modules directly. The small task archive and hash manifest are staged in
+   its per-turn CWD, not in project folders. No repository clone or source
+   snapshot is created. Native Stop/StopFailure capture stays runtime-owned.
+   The legacy `QIQI_EVALUATION_MODE=snapshot` mode continues to make disposable
+   repository copies. Operator/user/managed agent configuration remains a
    trusted deployment input; no OS sandbox or extra memory-policy override
    is installed by the Final Evaluation workflow.
    The bounded TaskPacket contains only
@@ -719,8 +744,11 @@ from the worktree—fail closed rather than becoming fake deletion evidence.
 Present index-only additions are captured and hashed normally. Verified
 HEAD deletions are not copied; restoring one changes the manifest digest
 and invalidates a prior PASS.
-Default bounds are 3,000 files/repo, 1 MB/file and 24 MB total.
-Snapshots are temporary and separate from original trees. Repository
+For legacy `snapshot` mode the bounds remain 3,000 files/repo,
+1 MB/file and 24 MB total. In default `live` mode source files are hashed
+incrementally without those byte-copy limits (maximum 20,000 paths/repo).
+Snapshot copies are temporary and separate from original trees only in
+the legacy mode. Repository
 files or directories colliding with reserved evaluator metadata paths
 (`.qiqi-evaluation-manifest.json` or `.qiqi-final-task-sources`) are
 rejected before copying, rather than silently overwritten. Git submodules
