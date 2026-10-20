@@ -1370,12 +1370,13 @@ class DelegateRuntime:
             # This stdio server is launched with the package's venv Python.
             # Reuse that exact interpreter: operators are not required to
             # activate the venv, and qiqi-delegate-admin is not on global PATH.
-            recovery = (
+            recovery = "\\n".join(
                 f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
                 f"release-claim --workspace {shlex.quote(str(self.root))} "
-                f"--repository {shlex.quote(repository)} "
+                f"--repository {shlex.quote(root_name)} "
                 f"--claim-id {shlex.quote(claim_id)} "
                 "--worker-termination-confirmed"
+                for root_name in claimed_repositories
             )
             public_context = (
                 f"agent_not_ready; agent_name={exc.agent_name}; pane_id={exc.pane_id}; "
