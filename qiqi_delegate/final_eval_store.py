@@ -315,6 +315,35 @@ class FinalEvaluationStore:
                 created = True
         return self.get(return_id), created
 
+    def checkpoint_cleanup(self, evaluation_id: str, **fields: str) -> None:
+        """Durably record resource locators before launching native workers.
+
+        These fields remain on orphaned 'evaluating' attempts after SIGKILL.
+        Normal completion clears provisional cleanup_json unless interrupted.
+        """
+        if not fields or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            or not value for key, value in fields.items()
+        ):
+            raise ValueError("invalid evaluator recovery checkpoint")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status, cleanup_json FROM final_evaluations "
+                "WHERE evaluation_id=?", (evaluation_id,),
+            ).fetchone()
+            if row is None or row["status"] not in ACTIVE:
+                raise RuntimeError("cannot checkpoint an inactive evaluation")
+            current = json.loads(row["cleanup_json"]) if row["cleanup_json"] else {}
+            current.update(fields)
+            updated = db.execute(
+                "UPDATE final_evaluations SET cleanup_json=?, updated_at_ns=? "
+                "WHERE evaluation_id=? AND status IN ('requested','evaluating')",
+                (json.dumps(current, sort_keys=True), time.time_ns(), evaluation_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("concurrent evaluator checkpoint transition")
+
     def bind_turn(self, evaluation_id: str, turn_id: str) -> None:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
