@@ -211,6 +211,22 @@ def evaluator_working_directory(
     if not path.is_absolute():
         raise ValueError("QIQI_EVALUATOR_CWD must be an absolute path")
     candidate = path.resolve()
+    # Native agents may discover startup instructions from any CWD ancestor.
+    # Refuse a custom trust root beneath a directory containing project
+    # instructions; the user's ~/.claude settings remain operator-managed.
+    home = Path.home().resolve()
+    for ancestor in (candidate, *candidate.parents):
+        for instruction in ("CLAUDE.md", "AGENTS.md", ".mcp.json"):
+            if (ancestor / instruction).exists() or (ancestor / instruction).is_symlink():
+                raise ValueError(
+                    f"evaluator CWD ancestor contains startup instructions: "
+                    f"{ancestor / instruction}"
+                )
+        if ancestor != home and (ancestor / ".claude").exists():
+            raise ValueError(
+                f"evaluator CWD ancestor contains project settings: "
+                f"{ancestor / '.claude'}"
+            )
     for root in (*repositories.values(), *snapshots.values()):
         canonical = root.resolve()
         if (candidate == canonical or candidate in canonical.parents or
@@ -235,10 +251,29 @@ def evaluator_working_directory(
     if runs.is_symlink():
         raise ValueError("evaluator runs directory must not be a symlink")
     runs.mkdir(mode=0o700, exist_ok=True)
-    if not runs.is_dir() or any(not item.is_dir() or item.is_symlink()
-                                for item in runs.iterdir()):
+    if not runs.is_dir() or any(
+        (item.is_symlink() or not item.is_file()) if item.name == ".qiqi-active"
+        else (not item.is_dir() or item.is_symlink())
+        for item in runs.iterdir()
+    ):
         raise ValueError("evaluator runs directory contains unexpected files")
     return candidate
+
+
+def _evaluator_lock_path(run_cwd: Path) -> Path:
+    return run_cwd.parent / ".qiqi-active"
+
+
+def release_evaluator_run_lock(run_cwd: Path) -> None:
+    """Release only the lease belonging to a confirmed-stopped turn."""
+    lock = _evaluator_lock_path(run_cwd)
+    if lock.is_symlink():
+        raise RuntimeError("refusing to release symlinked evaluator lease")
+    if not lock.exists():
+        return
+    if lock.read_text(encoding="utf-8").strip() != run_cwd.name:
+        raise RuntimeError("evaluator lease belongs to a different turn")
+    lock.unlink()
 
 
 def evaluator_run_directory(
@@ -247,7 +282,26 @@ def evaluator_run_directory(
     """Fresh per-turn native CWD below a stable operator-trusted ancestor."""
     trusted = evaluator_working_directory(repositories, snapshots)
     run = trusted / "runs" / ("turn-" + uuid.UUID(turn_id).hex)
-    run.mkdir(mode=0o700)  # never reuse a previous turn's content
+    lock = _evaluator_lock_path(run)
+    # Exclusive creation serializes evaluators across independent MCP
+    # processes; a blocked or unconfirmed worker keeps the lease until
+    # exact operator recovery. Never overwrite an existing lease.
+    try:
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            "another evaluator is active or requires operator recovery; "
+            f"inspect the lease at {lock}"
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(run.name + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        run.mkdir(mode=0o700)  # never reuse a previous turn's content
+    except BaseException:
+        release_evaluator_run_lock(run)
+        raise
     return run
 
 
@@ -1016,6 +1070,7 @@ class DelegateRuntime:
         preserve_startup = False
         result = None
         was_cancelled = False
+        original_cancel: asyncio.CancelledError | None = None
         try:
             # Peers keep their existing TemporaryDirectory lifecycle. Only
             # Final Evaluation needs persistent sink paths on blocked startup.
@@ -1176,10 +1231,11 @@ class DelegateRuntime:
                     "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
                 }
             raise blocked from exc
-        except asyncio.CancelledError:
-            # Task.cancelling() is only available on newer Python releases;
-            # record the original cancellation explicitly for Python 3.10.
+        except asyncio.CancelledError as exc:
+            # Keep a reference so finally can attach the actual worker-close
+            # result to the original exception before it reaches the coordinator.
             was_cancelled = True
+            original_cancel = exc
             raise
         finally:
             error = None
@@ -1212,7 +1268,21 @@ class DelegateRuntime:
                 if sink is not None and evaluation_id is not None:
                     cleanup_temporary_tree(sink)
                 if evaluator_cwd is not None:
-                    cleanup_temporary_tree(evaluator_cwd)
+                    try:
+                        cleanup_temporary_tree(evaluator_cwd)
+                    finally:
+                        release_evaluator_run_lock(evaluator_cwd)
+                if original_cancel is not None:
+                    original_cancel.evaluator_worker_closed = True
+            if not closed and original_cancel is not None and evaluation_id is not None:
+                original_cancel.cleanup = {
+                    "cleanup_state": "workspace_close_unconfirmed",
+                    "workspace_id": str(workspace_id),
+                    "write_claim_id": claim_id,
+                    "write_claim_repository": repository,
+                    "capture_sink": str(sink) if sink is not None else "",
+                    "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
+                }
             if error:
                 if result is None and not (was_cancelled or cancelled_during_close):
                     detail = (f"workspace close unconfirmed; workspace={workspace_id}; "
@@ -1238,15 +1308,18 @@ class DelegateRuntime:
                 # A second cancel must be propagated *after* the close task
                 # succeeds or fails, never while it can still leave live agents.
                 cancelled = asyncio.CancelledError()
-                if not closed and evaluation_id is not None:
-                    cancelled.cleanup = {
-                        "cleanup_state": "workspace_close_unconfirmed",
-                        "workspace_id": str(workspace_id),
-                        "write_claim_id": claim_id,
-                        "write_claim_repository": repository,
-                        "capture_sink": str(sink) if sink is not None else "",
-                        "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
-                    }
+                if evaluation_id is not None:
+                    if closed:
+                        cancelled.evaluator_worker_closed = True
+                    else:
+                        cancelled.cleanup = {
+                            "cleanup_state": "workspace_close_unconfirmed",
+                            "workspace_id": str(workspace_id),
+                            "write_claim_id": claim_id,
+                            "write_claim_repository": repository,
+                            "capture_sink": str(sink) if sink is not None else "",
+                            "evaluator_cwd": str(evaluator_cwd) if evaluator_cwd else "",
+                        }
                 raise cancelled
         assert result is not None
         return result
