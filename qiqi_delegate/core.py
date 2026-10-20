@@ -315,7 +315,8 @@ def _bullet_lines(items: Iterable[str]) -> str:
 
 def render_task_prompt(packet: TaskPacket, *,
                        discovery_repositories: tuple[str, ...] | None = None,
-                       evaluation_repositories: tuple[str, ...] | None = None) -> str:
+                       evaluation_repositories: tuple[str, ...] | None = None,
+                       evaluation_live: bool = False) -> str:
     sections = [
         "Repository task delegated by QiQi",
         f"## Repository objective\n\n{packet.objective}",
@@ -381,10 +382,16 @@ def render_task_prompt(packet: TaskPacket, *,
             "## Independent final cross-repository evaluation\n\n"
             "You are an independent final Evaluator, NOT the Lead or a Peer. "
             "Verify the original user request and TaskGraph requirements "
-            "against actual final source across these snapshot roots: "
+            + ("against actual live registered Git roots: "
+               if evaluation_live else
+               "against actual final source across these snapshot roots: ")
             + ", ".join(evaluation_repositories) + ". "
-            "All roots are isolated copies accessible through --add-dir. "
-            "Trace cross-repository API/data/schema contracts in ONE session. "
+            + ("These are REAL original working trees, NOT copies or a "
+               "read-only mount. Do not write, edit, delete, build, install, "
+               "run commands with side effects, or modify any original file. "
+               if evaluation_live else
+               "All roots are isolated copies accessible through --add-dir. ")
+            + "Trace cross-repository API/data/schema contracts in ONE session. "
             "Do not trust Peer reports or Lead ACCEPT as evidence. "
             "Inspect code/files yourself, distinguish verified evidence from "
             "assumptions, and do not change source files or launch deployments. "
