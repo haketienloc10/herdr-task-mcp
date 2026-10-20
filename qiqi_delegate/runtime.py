@@ -1226,6 +1226,7 @@ class DelegateRuntime:
                 prompt = render_task_prompt(
                     packet, discovery_repositories=discovery_repositories,
                     evaluation_repositories=evaluation_repositories,
+                    evaluation_live=evaluation_live,
                 )
                 if evaluation_id is not None:
                     primary_root = evaluation_roots[repository]
