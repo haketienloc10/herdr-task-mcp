@@ -789,6 +789,20 @@ and exact-ID `release-claim` commands shown below. Next use
 temporary trees after termination confirmation. Releasing the write claim
 alone does not clear an interrupted evaluation reservation; these are
 separate, audited recoveries. Never release a still-running worker's claim.
+Crash/recovery details: `snapshot_root` is committed atomically with the
+Final Evaluation reservation. Before `herdr workspace create`, the runtime
+persists a unique `workspace_label` of the form
+`qiqi:evaluator:<full-turn-uuid>` together with `evaluator_cwd`,
+`capture_sink` and the write claim. Herdr assigns `workspace_id`, so a
+crash or lost response during creation may leave that ID unknown. Use
+`herdr workspace list` to find the **exact recorded label and CWD**;
+inspect/close the corresponding workspace (if present), verify external
+worker termination, then run the operator-only recovery commands.
+Never infer from a missing workspace ID that creation failed. A local
+filesystem cleanup error after successful Herdr close also keeps the
+attempt `interrupted`, its lease and all recovery locators until explicit
+verified recovery.
+
 The trusted parent `~/.qiqi/evaluator-cwd` is never removed by cleanup;
 each completed per-turn CWD is removed, and its exclusive lease is released.
 If a request is cancelled and Herdr **confirms** workspace closure, the
