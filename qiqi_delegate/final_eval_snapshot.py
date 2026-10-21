@@ -9,6 +9,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import pickle
 import signal
 import shutil
 import stat
@@ -22,6 +23,10 @@ from typing import Any
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 24_000_000
+# Maximum manifest metadata transferred from the isolated scanner. The
+# project source itself is never copied and can be much larger than this.
+MAX_LIVE_MANIFEST_BYTES = 512 * 1024 * 1024
+MAX_LIVE_STATUS_BYTES = 4096
 FORBIDDEN_BASENAMES = {".env", ".env.local", ".env.production", ".npmrc",
                        ".pypirc", "id_rsa", "id_ed25519", "credentials.json"}
 FORBIDDEN_PATH_PARTS = {".git", ".herdr-task-mcp", ".qiqi", ".ssh", ".aws",
@@ -421,27 +426,49 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
     return manifest
 
 
-def _live_scan_worker(roots: dict[str, Path], sink: Any) -> None:
-    """Isolated scanner: a blocked filesystem syscall cannot pin MCP threads."""
+def _live_scan_worker(
+    roots: dict[str, Path], sink: Any, manifest_path: Path,
+) -> None:
+    """Write large manifest to a bounded local file; IPC stays tiny.
+
+    The child computes the *canonical* manifest SHA-256 while streaming JSON
+    to disk. No multi-megabyte pickle ever crosses the scanner control pipe.
+    """
     try:
         manifest = inspect_live_roots(roots)
-        sink.send(("ok", manifest, manifest_digest(manifest)))
+        digest = hashlib.sha256()
+        size = 0
+        encoder = json.JSONEncoder(
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        with manifest_path.open("xb") as output:
+            for chunk in encoder.iterencode(manifest):
+                data = chunk.encode("utf-8")
+                size += len(data)
+                if size > MAX_LIVE_MANIFEST_BYTES:
+                    raise ValueError("live evaluation manifest exceeds metadata limit")
+                digest.update(data)
+                output.write(data)
+        sink.send(("ok", digest.hexdigest(), size))
     except BaseException as exc:
         try:
-            sink.send(("error", type(exc).__name__, str(exc)))
+            sink.send(("error", type(exc).__name__, str(exc)[:2048]))
         except (OSError, EOFError, BrokenPipeError):
             pass
     finally:
         sink.close()
 
-
 def _isolated_live_scan_worker(
     roots: dict[str, Path], sink: Any, worker: Any,
+    manifest_path: Path,
 ) -> None:
     """Create a scanner-owned POSIX session before it can launch git."""
     if os.name == "posix":
         os.setsid()
-    (worker or _live_scan_worker)(roots, sink)
+    if worker is None:
+        _live_scan_worker(roots, sink, manifest_path)
+    else:
+        worker(roots, sink)
 
 
 def _stop_scanner_tree(process: Any) -> None:
@@ -510,41 +537,81 @@ def scan_live_roots_bounded(
     """
     ctx = multiprocessing.get_context("spawn")
     reader, writer = ctx.Pipe(duplex=False)
+    # Per-scan 0700 staging outside registered repositories, not a source
+    # snapshot. The directory is removed after the scanner process stops.
+    result_dir = tempfile.TemporaryDirectory(prefix="qiqi-scan-result-")
+    manifest_path = Path(result_dir.name) / "manifest.json"
     process = ctx.Process(
-        target=_isolated_live_scan_worker, args=(roots, writer, _worker),
+        target=_isolated_live_scan_worker,
+        args=(roots, writer, _worker, manifest_path),
     )
     succeeded = False
     try:
         process.start()
         writer.close()
         expires = time.monotonic() + timeout
-        while True:
+        while process.is_alive():
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("live evaluation scan cancelled")
             remaining = expires - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("live evaluation scanner process timed out")
-            if reader.poll(min(0.1, remaining)):
-                try:
-                    result = reader.recv()
-                except EOFError as exc:
-                    raise RuntimeError("live evaluation scanner exited without result") from exc
-                if result[0] == "ok":
-                    succeeded = True
-                    return result[1], result[2]
-                kind, detail = result[1], result[2]
-                if kind == "TimeoutError":
-                    raise TimeoutError(detail)
-                if kind == "ValueError":
-                    raise ValueError(detail)
-                raise RuntimeError(
-                    "live evaluation scanner failed: " + kind + ": " + detail
-                )
-            if not process.is_alive():
-                raise RuntimeError(
-                    "live evaluation scanner exited unexpectedly: "
-                    + str(process.exitcode)
-                )
+            # Do NOT call recv() merely because poll() sees the first bytes
+            # of a pickle frame. Wait for process exit; incomplete frames
+            # and children stalled while sending never bypass the watchdog.
+            process.join(timeout=min(0.1, remaining))
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("live evaluation scan cancelled")
+        if time.monotonic() > expires:
+            raise TimeoutError("live evaluation scanner process timed out")
+        if not reader.poll(0):
+            raise RuntimeError(
+                "live evaluation scanner exited without completion status: "
+                + str(process.exitcode)
+            )
+        try:
+            result = pickle.loads(reader.recv_bytes(MAX_LIVE_STATUS_BYTES))
+        except (EOFError, OSError, pickle.UnpicklingError, ValueError) as exc:
+            raise RuntimeError("invalid live scanner completion status") from exc
+        if not isinstance(result, tuple) or len(result) != 3:
+            raise RuntimeError("malformed live scanner completion status")
+        if result[0] != "ok":
+            kind, detail = result[1], result[2]
+            if kind == "TimeoutError":
+                raise TimeoutError(detail)
+            if kind == "ValueError":
+                raise ValueError(detail)
+            raise RuntimeError(
+                "live evaluation scanner failed: " + str(kind) + ": " + str(detail)
+            )
+        digest, size = result[1], result[2]
+        if (not isinstance(size, int) or isinstance(size, bool)
+                or size < 1 or size > MAX_LIVE_MANIFEST_BYTES
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in digest)):
+            raise RuntimeError("invalid live scanner manifest metadata")
+        # Stream the bounded result in chunks, keeping checks active while
+        # reading and verifying the exact bytes written by the scanner.
+        data = bytearray()
+        with manifest_path.open("rb") as handle:
+            while len(data) < size:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("live evaluation scan cancelled")
+                if time.monotonic() > expires:
+                    raise TimeoutError("live evaluation result transfer timed out")
+                block = handle.read(min(1024 * 1024, size - len(data)))
+                if not block:
+                    raise RuntimeError("incomplete live scanner manifest file")
+                data.extend(block)
+            if handle.read(1):
+                raise RuntimeError("oversized live scanner manifest file")
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise RuntimeError("corrupted live scanner manifest transfer")
+        manifest = json.loads(data)
+        if not isinstance(manifest, dict):
+            raise RuntimeError("malformed live scanner manifest")
+        succeeded = True
+        return manifest, digest
     finally:
         reader.close()
         writer.close()
@@ -555,6 +622,7 @@ def scan_live_roots_bounded(
                 _stop_scanner_tree(process)
             else:
                 process.join(timeout=0.2)
+        result_dir.cleanup()
 
 
 class LiveEvaluationView:
