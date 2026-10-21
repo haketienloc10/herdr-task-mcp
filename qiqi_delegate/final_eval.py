@@ -662,11 +662,32 @@ class FinalEvaluationCoordinator:
             # or scan error must not surface a stale PASS as current, even
             # when the selected row has not yet been finalized.
             if row["is_current"]:
+                # Hashing can take time, and the graph/request binding or
+                # repos.yaml registry can change while the final scan runs.
+                # Never publish a PASS based only on previously captured
+                # roots or an eligibility check from before that scan.
+                still_current = False
                 try:
                     current_digest = self._digest_for_row(roots, row)
+                    (fresh_graph, fresh_authored, fresh_binding, fresh_task,
+                     fresh_names, fresh_roots) = self._eligible(graph_run_id)
+                    still_current = (
+                        current_digest == row["manifest_digest"]
+                        and fresh_graph == graph
+                        and fresh_authored == _authored
+                        and fresh_binding == _binding
+                        and fresh_task == task
+                        and fresh_names == _names
+                        and fresh_roots == roots
+                        and row["graph_revision"] == fresh_graph["revision"]
+                        and row["request_id"] == fresh_task["request_id"]
+                        and row["request_revision"] == fresh_task["revision"]
+                    )
                 except (RuntimeError, ValueError, OSError, TimeoutError):
-                    current_digest = None
-                if current_digest != row["manifest_digest"]:
+                    # A stale/unavailable Task Request or a remapped Git root
+                    # is not authorization to report a current PASS.
+                    pass
+                if not still_current:
                     row["is_current"] = False
                     row["effective_status"] = (
                         "stale" if row["status"] == "passed"
