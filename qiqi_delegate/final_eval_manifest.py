@@ -142,6 +142,32 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str], set[str]]
     return names, tracked, head_paths
 
 
+def _reject_sensitive_ignored_files(root: Path) -> None:
+    """Fail closed on known ignored credentials hidden from the Git manifest.
+
+    Git's exclude-standard enumeration omits ignored paths even though native
+    --add-dir exposes the whole root. Enumerate ignored names separately, but
+    do not add their contents to the evaluation context or manifest.
+    This is defense-in-depth, NOT containment of .git/history or arbitrary
+    secret filenames; that requires an OS-enforced source view.
+    """
+    ignored = _git_paths(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "--directory", "-z",
+    )
+    for name in ignored:
+        parts = Path(name.rstrip("/")).parts
+        if (any(p in FORBIDDEN_PATH_PARTS - {"node_modules", "__pycache__"}
+                for p in parts) or
+                any(p in FORBIDDEN_BASENAMES or
+                    (p.startswith(".env.") and p != ".env.example")
+                    for p in parts)):
+            raise ValueError(
+                "evaluation root contains ignored sensitive path accessible "
+                "to native agent: " + name
+            )
+
+
 def _file_present(root: Path, relative: str) -> bool:
     """Distinguish legitimate tracked deletion from unsafe symlink traversal."""
     path = root
@@ -211,6 +237,7 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
             head = None
         entries = []
         deleted_paths = []
+        _reject_sensitive_ignored_files(root)
         names, tracked, head_paths = _files(root, head)
         for relative in names:
             if not _file_present(root, relative):

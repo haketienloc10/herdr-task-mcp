@@ -692,23 +692,41 @@ class DelegateRuntime:
                 "recover stale claim explicitly"
             ) from exc
 
-    def _claim_many(self, repositories: tuple[str, ...], claim_id: str) -> None:
-        """Claim every evaluated root in one atomic transaction."""
-        registered = self.repos()
+    def _claim_many(
+        self, repositories: tuple[str, ...], claim_id: str,
+        *, expected_roots: dict[str, Path] | None = None,
+    ) -> None:
+        """Atomically claim the EXACT roots previously authorized to the evaluator.
+
+        Never rebind these claims from a second repos.yaml lookup: a concurrent
+        registry remap could otherwise release the old Git root for Peer writes
+        while the native Evaluator still has --add-dir access to that root.
+        """
         if not repositories or len(set(repositories)) != len(repositories):
             raise ValueError("evaluation repositories must be unique and nonempty")
-        if any(name not in registered for name in repositories):
+        roots = expected_roots if expected_roots is not None else self.repos()
+        if any(name not in roots for name in repositories):
             raise ValueError("evaluation root not registered")
+        registered = self.repos()
+        if any(registered.get(name) != roots[name] for name in repositories):
+            raise RuntimeError("evaluation repository mapping changed before claiming roots")
         try:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                if db.execute("SELECT 1 FROM write_claims WHERE repository_root IS NULL LIMIT 1").fetchone():
+                # The config file is outside SQLite. Recheck it while holding
+                # the claim transaction to minimize the remap/claim window.
+                current = self.repos()
+                if any(current.get(name) != roots[name] for name in repositories):
+                    raise RuntimeError("evaluation repository mapping changed while claiming roots")
+                if db.execute(
+                    "SELECT 1 FROM write_claims WHERE repository_root IS NULL LIMIT 1"
+                ).fetchone():
                     raise RuntimeError("unmapped legacy write claim blocks evaluation")
                 for name in repositories:
                     db.execute(
                         "INSERT INTO write_claims(repository,claim_id,created_at_ns,repository_root) "
                         "VALUES (?,?,?,?)",
-                        (name, claim_id, time.time_ns(), str(registered[name])),
+                        (name, claim_id, time.time_ns(), str(roots[name])),
                     )
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("one or more evaluation Git roots are busy") from exc
@@ -1203,7 +1221,9 @@ class DelegateRuntime:
         # and permanently block subsequent delegation.
         claim_root = repos[repository] if evaluation_id is not None else execution_root
         if evaluation_id is not None:
-            self._claim_many(evaluation_repositories, claim_id)
+            self._claim_many(
+                evaluation_repositories, claim_id, expected_roots=evaluation_roots,
+            )
         else:
             self._claim(repository, claim_id, repository_root=claim_root)
         workspace_id = None
@@ -1372,17 +1392,26 @@ class DelegateRuntime:
             # This stdio server is launched with the package's venv Python.
             # Reuse that exact interpreter: operators are not required to
             # activate the venv, and qiqi-delegate-admin is not on global PATH.
-            recovery = (
-                f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
-                f"release-claim --workspace {shlex.quote(str(self.root))} "
-                f"--repository {shlex.quote(repository)} "
-                f"--claim-id {shlex.quote(claim_id)} "
-                "--worker-termination-confirmed"
+            release_roots = (
+                evaluation_repositories if evaluation_id is not None
+                else (repository,)
             )
+            recovery_commands = [
+                (
+                    f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
+                    f"release-claim --workspace {shlex.quote(str(self.root))} "
+                    f"--repository {shlex.quote(repo_name)} "
+                    f"--claim-id {shlex.quote(claim_id)} "
+                    "--worker-termination-confirmed"
+                )
+                for repo_name in release_roots
+            ]
+            recovery = "\n".join(recovery_commands)
             public_context = (
                 f"agent_not_ready; agent_name={exc.agent_name}; pane_id={exc.pane_id}; "
                 f"workspace_id={workspace_id}; write_claim_id={claim_id}; "
-                f"repository={repository}; inspect: {target} agent explain "
+                f"repository={repository}; claimed_roots={','.join(release_roots)}; "
+                f"inspect: {target} agent explain "
                 f"{exc.agent_name} --json; startup_evidence={exc}"
             )
             blocked = AgentStartupBlocked(
@@ -1393,7 +1422,8 @@ class DelegateRuntime:
                 f"inspect startup UI: {target} agent read {exc.agent_name} "
                 f"--source visible --lines 30; "
                 f"recovery: close Herdr workspace {workspace_id} after inspection, "
-                f"confirm agent termination, then run: {recovery}. "
+                f"confirm agent termination, then run ALL commands, one per root: "
+                f"{recovery}. "
                 "See README operator recovery instructions; do not send the "
                 f"delegated task prompt to the blocked agent manually. {exc}",
                 recovery_command=recovery,

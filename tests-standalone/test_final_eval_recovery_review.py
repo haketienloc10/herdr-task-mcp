@@ -134,3 +134,35 @@ def test_local_cleanup_failure_keeps_context_sink_and_lease(
     assert "snapshot_root" not in cleanup
     assert not observed["cwd"].exists()
     assert not (trust / "runs" / ".qiqi-active").exists()
+
+
+def test_blocked_evaluator_recovery_instructions_cover_every_root(tmp_path, monkeypatch):
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.maintenance import show_claim
+
+    runtime, _, graph_rt, coord, gid = setup_graph(tmp_path)
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(tmp_path / "trusted-blocked"))
+    async def create(*_argv, **_kwargs):
+        return {
+            "workspace": {"workspace_id": "blocked-eval-42"},
+            "root_pane": {"pane_id": "blocked-pane-42"},
+        }
+    async def start(*_argv):
+        raise AgentStartupBlocked("blocked-agent", "blocked-pane-42",
+                                  "native trust approval required")
+    _mock_native(monkeypatch, runtime, workspace_create=create, start=start)
+    with pytest.raises(AgentStartupBlocked) as info:
+        asyncio.run(coord.start(
+            gid, "claude-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    message = info.value.actionable_detail()
+    assert message.startswith("agent_not_ready")
+    assert message.count("release-claim") == 2
+    assert "--repository backend" in message
+    assert "--repository frontend" in message
+    row = coord.store.latest(gid)
+    assert row["status"] == "interrupted"
+    for name in ("backend", "frontend"):
+        assert show_claim(workspace=runtime.root, repository=name)["claim_id"] == (
+            row["cleanup"]["write_claim_id"]
+        )

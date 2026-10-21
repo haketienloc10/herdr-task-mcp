@@ -716,3 +716,17 @@ GitHub Actions chạy test trên Python **3.10, 3.12 và 3.13**. Workflow nằm 
 | `tests-standalone/` | Regression tests của runtime Python |
 
 Không sửa trực tiếp dữ liệu SQLite để xử lý công việc kẹt. Dùng các lệnh bảo trì có kiểm tra ID và ghi audit.
+
+
+### Codex review follow-up — direct-root security boundary
+
+Native `--add-dir` exposes the full registered Git root to native tools, including
+ignored files and `.git` metadata. To prevent common accidental credential
+exposure, source inspection now **fails closed** when it detects ignored
+credential filenames or ignored private directories (`.env`, `.aws`,
+`.ssh`, `.venv`, etc.). This check is **not a sandbox**: a sensitive file under
+an unexpected filename, a sensitive Git object, or a racing external writer
+remains readable by a sufficiently privileged native agent. Do not deploy
+direct-root Final Evaluation on untrusted repositories or ones with sensitive
+Git history until Herdr/adapter-level OS read isolation is available. This
+retains the requested **no repository snapshot/copy** property.

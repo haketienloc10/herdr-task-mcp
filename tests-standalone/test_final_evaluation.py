@@ -857,3 +857,62 @@ def test_same_root_module_contracts_do_not_replace_cross_root_checks(tmp_path):
     payload["cross_repository_checks"] = payload["cross_repository_checks"][1:]
     with pytest.raises(ValueError, match="claimed PASS"):
         coordinator.store.validate_report(payload, manifest, {"R1"})
+
+
+def test_ignored_env_secrets_are_rejected_before_native_evaluator(tmp_path, monkeypatch):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    (backend / ".gitignore").write_text(".env\n", encoding="utf-8")
+    (backend / ".env").write_text("API_TOKEN=private\n", encoding="utf-8")
+    launched = []
+    async def forbidden_delegate(**kwargs):
+        launched.append(kwargs)
+        raise AssertionError("native evaluator must not see ignored credentials")
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="ignored sensitive path"):
+        inspect_roots(runtime.repos())
+    with pytest.raises(ValueError, match="ignored sensitive path"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert launched == []
+    assert coordinator.store.latest(gid) is None
+
+
+def test_multi_root_claim_uses_only_validated_registry_mapping(tmp_path, monkeypatch):
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    expected = runtime.repos()
+    assert expected["backend"] != expected["frontend"]
+    # Simulate an alias remap after the packet/--add-dir roots were fixed.
+    monkeypatch.setattr(runtime, "repos", lambda: {
+        "backend": expected["frontend"], "frontend": expected["backend"],
+    })
+    with pytest.raises(RuntimeError, match="mapping changed"):
+        runtime._claim_many(
+            ("backend", "frontend"), "turn:stale-root",
+            expected_roots=expected,
+        )
+    with sqlite3.connect(runtime.db) as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM write_claims WHERE claim_id=?",
+            ("turn:stale-root",),
+        ).fetchone()[0] == 0
+
+
+def test_multi_root_claim_detects_mapping_change_inside_transaction(tmp_path, monkeypatch):
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    expected = runtime.repos()
+    calls = []
+    def changing_repos():
+        calls.append(1)
+        if len(calls) == 1:
+            return expected
+        return {"backend": expected["frontend"], "frontend": expected["backend"]}
+    monkeypatch.setattr(runtime, "repos", changing_repos)
+    with pytest.raises(RuntimeError, match="mapping changed"):
+        runtime._claim_many(
+            ("backend", "frontend"), "turn:transacted-root",
+            expected_roots=expected,
+        )
+    with sqlite3.connect(runtime.db) as db:
+        assert db.execute("SELECT COUNT(*) FROM write_claims").fetchone()[0] == 0
