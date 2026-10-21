@@ -650,6 +650,88 @@ def scan_live_roots_bounded(
                 segment.close()
 
 
+
+def _isolated_archive_stage(
+    worker: Any, args: tuple[Any, ...], sink: Any,
+) -> None:
+    """Run attachment/hash/archive preparation in a killable process."""
+    if os.name == "posix":
+        os.setsid()
+    try:
+        worker(*args)
+        sink.send(("ok",))
+    except BaseException as exc:
+        try:
+            sink.send(("error", type(exc).__name__, str(exc)[:2048]))
+        except (OSError, EOFError, BrokenPipeError):
+            pass
+    finally:
+        sink.close()
+
+
+def stage_task_archive_bounded(
+    worker: Any, args: tuple[Any, ...], *,
+    cancel_event: Any = None, timeout: float = 120,
+) -> None:
+    """Do not let large workspace_file references pin MCP or its worker.
+
+    Both workspace file reads AND evaluator archive writes live in a separate
+    spawn worker, which is terminated with its subprocess tree on cancellation
+    or timeout. The pipe carries only a tiny terminal status.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    reader, writer = ctx.Pipe(duplex=False)
+    process = ctx.Process(
+        target=_isolated_archive_stage, args=(worker, args, writer),
+    )
+    success = False
+    try:
+        process.start()
+        writer.close()
+        expires = time.monotonic() + timeout
+        while process.is_alive():
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("evaluation archive staging cancelled")
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("evaluation archive staging timed out")
+            process.join(timeout=min(0.1, remaining))
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("evaluation archive staging cancelled")
+        if time.monotonic() > expires:
+            raise TimeoutError("evaluation archive staging timed out")
+        if not reader.poll(0):
+            raise RuntimeError(
+                "evaluation archive worker exited without status: "
+                + str(process.exitcode)
+            )
+        try:
+            result = pickle.loads(reader.recv_bytes(MAX_LIVE_STATUS_BYTES))
+        except (EOFError, OSError, ValueError, pickle.UnpicklingError) as exc:
+            raise RuntimeError("invalid evaluation archive staging status") from exc
+        if result == ("ok",):
+            success = True
+            return
+        if isinstance(result, tuple) and len(result) == 3 and result[0] == "error":
+            kind, detail = result[1:]
+            if kind == "ValueError":
+                raise ValueError(detail)
+            if kind == "TimeoutError":
+                raise TimeoutError(detail)
+            raise RuntimeError("evaluation archive staging failed: " + str(kind) + ": " + str(detail))
+        raise RuntimeError("invalid evaluation archive staging response")
+    finally:
+        reader.close()
+        writer.close()
+        if process.pid is not None:
+            if success:
+                process.join(timeout=0.2)
+            if process.is_alive() or not success:
+                _stop_scanner_tree(process)
+            else:
+                process.join(timeout=0.2)
+
+
 class LiveEvaluationView:
     """No repository copy; the evaluator reads original registered roots."""
 
