@@ -322,3 +322,71 @@ def test_unmapped_legacy_claim_blocks_writes_until_exact_manual_recovery(tmp_pat
     with migrated._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM write_claims").fetchone()[0] == 1
 
+
+
+
+def test_exact_claim_repository_recovers_removed_alias_without_guessing(tmp_path):
+    runtime = setup_workspace(tmp_path)
+    runtime._claim_many(("backend", "frontend"), "turn:old", expected_roots=runtime.repos())
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n"
+        "  - name: renamed_backend\n    path: backend\n"
+        "  - name: renamed_frontend\n    path: frontend\n",
+        encoding="utf-8",
+    )
+    assert show_claim(
+        workspace=tmp_path, claim_repository="backend",
+    )["claim_id"] == "turn:old"
+    with pytest.raises(ValueError, match="unregistered"):
+        show_claim(workspace=tmp_path, repository="backend")
+    with pytest.raises(ValueError, match="exactly one"):
+        show_claim(workspace=tmp_path, repository="renamed_backend",
+                   claim_repository="backend")
+    with pytest.raises(ValueError, match="worker has stopped"):
+        release_stale_claim(
+            workspace=tmp_path, claim_repository="backend",
+            claim_id="turn:old", worker_termination_confirmed=False,
+        )
+    with pytest.raises(RuntimeError, match="mismatch"):
+        release_stale_claim(
+            workspace=tmp_path, claim_repository="backend",
+            claim_id="turn:different", worker_termination_confirmed=True,
+        )
+    with pytest.raises(RuntimeError, match="no write claim"):
+        release_stale_claim(
+            workspace=tmp_path, claim_repository="unknown",
+            claim_id="turn:old", worker_termination_confirmed=True,
+        )
+    assert release_stale_claim(
+        workspace=tmp_path, claim_repository="backend",
+        claim_id="turn:old", worker_termination_confirmed=True,
+    )["released"]
+    with runtime._connect() as db:
+        rows = db.execute("SELECT repository, claim_id FROM write_claims").fetchall()
+        assert [(x["repository"], x["claim_id"]) for x in rows] == [
+            ("frontend", "turn:old"),
+        ]
+    assert release_stale_claim(
+        workspace=tmp_path, claim_repository="frontend",
+        claim_id="turn:old", worker_termination_confirmed=True,
+    )["released"]
+
+
+def test_original_root_claim_cannot_release_reassigned_alias(tmp_path):
+    runtime = setup_workspace(tmp_path)
+    runtime._claim("backend", "turn:original")
+    (tmp_path / "repos.yaml").write_text(
+        "repositories:\n"
+        "  - name: moved\n    path: backend\n"
+        "  - name: backend\n    path: frontend\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="no write claim"):
+        release_stale_claim(
+            workspace=tmp_path, repository="backend",
+            claim_id="turn:original", worker_termination_confirmed=True,
+        )
+    assert release_stale_claim(
+        workspace=tmp_path, claim_repository="backend",
+        claim_id="turn:original", worker_termination_confirmed=True,
+    )["released"]

@@ -46,23 +46,60 @@ def _validated_runtime(
     return runtime
 
 
-def show_claim(*, workspace: Path, repository: str) -> dict[str, Any]:
-    """Read the exact current holder without modifying worker state."""
-    runtime = _validated_runtime(workspace, repository, allow_legacy_claim=True)
+def _claim_lookup(
+    runtime: DelegateRuntime, *, repository: str | None,
+    claim_repository: str | None,
+) -> tuple[list[Any], str]:
+    """Find a claim by current root alias OR its immutable SQLite row identity.
+
+    The latter is for evaluator recovery after repos.yaml has been remapped.
+    Never resolve --claim-repository through the mutable registry.
+    """
+    if (repository is None) == (claim_repository is None):
+        raise ValueError("supply exactly one of repository or claim_repository")
+    if claim_repository is not None:
+        if not isinstance(claim_repository, str) or not claim_repository.strip():
+            raise ValueError("claim_repository must be a non-empty persisted claim key")
+        if not runtime.root.is_dir():
+            raise ValueError("workspace directory missing")
+        with runtime._connect() as db:
+            rows = db.execute(
+                "SELECT repository, repository_root, claim_id, created_at_ns "
+                "FROM write_claims WHERE repository=?",
+                (claim_repository,),
+            ).fetchall()
+        return rows, claim_repository
+    assert repository is not None
+    _validated_runtime(runtime.root, repository, allow_legacy_claim=True)
     roots = runtime.repos()
     canonical = str(roots[repository]) if repository in roots else None
     with runtime._connect() as db:
-        # A renamed registered alias looks up the claim by stable root. For
-        # pre-migration rows, only the original exact name is available.
-        row = db.execute(
+        rows = db.execute(
             "SELECT repository, repository_root, claim_id, created_at_ns "
             "FROM write_claims WHERE repository_root = ? "
             "OR (repository = ? AND repository_root IS NULL) "
-            "ORDER BY repository_root IS NULL ASC LIMIT 1",
+            "ORDER BY repository_root IS NULL ASC",
             (canonical, repository),
-        ).fetchone()
+        ).fetchall()
+    return rows, repository
+
+
+def show_claim(
+    *, workspace: Path, repository: str | None = None,
+    claim_repository: str | None = None,
+) -> dict[str, Any]:
+    """Read a claim by root alias or exact persisted claim row key."""
+    if not workspace.is_dir():
+        raise ValueError("workspace directory missing")
+    runtime = DelegateRuntime(workspace)
+    rows, selector = _claim_lookup(
+        runtime, repository=repository, claim_repository=claim_repository,
+    )
+    row = rows[0] if rows else None
     return {
-        "repository": repository,
+        "repository": selector,
+        "claim_repository": row["repository"] if row else None,
+        "repository_root": row["repository_root"] if row else None,
         "claim_id": row["claim_id"] if row else None,
         "created_at_ns": row["created_at_ns"] if row else None,
     }
@@ -71,14 +108,16 @@ def show_claim(*, workspace: Path, repository: str) -> dict[str, Any]:
 def release_stale_claim(
     *,
     workspace: Path,
-    repository: str,
+    repository: str | None = None,
+    claim_repository: str | None = None,
     claim_id: str,
     worker_termination_confirmed: bool,
 ) -> dict[str, Any]:
-    """Clear exactly one claim after an operator has verified the worker stopped.
+    """Delete exactly ONE persisted row after explicit worker-exit confirmation.
 
-    The flag records operator confirmation; it does not inspect Herdr or prove
-    termination. There is no force release, fallback repository, or wildcard.
+    --claim-repository selects the immutable SQLite primary key, even if the
+    original alias was removed or reassigned in repos.yaml. The exact claim ID
+    is mandatory; this never searches by claim_id alone or releases a wildcard.
     """
     if worker_termination_confirmed is not True:
         raise ValueError(
@@ -87,27 +126,48 @@ def release_stale_claim(
         )
     if not isinstance(claim_id, str) or not claim_id.strip():
         raise ValueError("claim_id must be an exact non-empty value")
-    runtime = _validated_runtime(workspace, repository, allow_legacy_claim=True)
-    roots = runtime.repos()
-    canonical = str(roots[repository]) if repository in roots else None
+    if not workspace.is_dir():
+        raise ValueError("workspace directory missing")
+    runtime = DelegateRuntime(workspace)
+    # Legacy --repository continues to resolve CURRENT aliases against the
+    # stable root. --claim-repository intentionally bypasses mutable aliases.
+    rows, selector = _claim_lookup(
+        runtime, repository=repository, claim_repository=claim_repository,
+    )
+    if not rows:
+        raise RuntimeError(f"no write claim exists for repository {selector!r}")
+    # Validate the exact saved identity again UNDER the write transaction.
     with runtime._connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        current = db.execute(
-            "SELECT repository, repository_root, claim_id FROM write_claims "
-            "WHERE repository_root = ? OR "
-            "(repository = ? AND repository_root IS NULL)",
-            (canonical, repository),
-        ).fetchall()
-        if not current:
-            raise RuntimeError(f"no write claim exists for repository {repository!r}")
+        if claim_repository is not None:
+            current = db.execute(
+                "SELECT repository, repository_root, claim_id "
+                "FROM write_claims WHERE repository=?",
+                (claim_repository,),
+            ).fetchall()
+        else:
+            assert repository is not None
+            roots = runtime.repos()
+            canonical = str(roots[repository]) if repository in roots else None
+            current = db.execute(
+                "SELECT repository, repository_root, claim_id "
+                "FROM write_claims WHERE repository_root = ? OR "
+                "(repository = ? AND repository_root IS NULL)",
+                (canonical, repository),
+            ).fetchall()
         matches = [row for row in current if row["claim_id"] == claim_id]
         if len(matches) != 1:
             raise RuntimeError(
-                f"claim_id mismatch for repository {repository!r}; "
+                f"claim_id mismatch for repository {selector!r}; "
                 "refusing to release a different writer"
             )
         holder = matches[0]
-
+        # A mutable alias may have been remapped between the first lookup
+        # and BEGIN IMMEDIATE. Never release a *different* root's claim,
+        # especially when an evaluator claim_id is shared by all roots.
+        identities = {(row["repository"], row["repository_root"]) for row in rows}
+        if (holder["repository"], holder["repository_root"]) not in identities:
+            raise RuntimeError("claim mapping changed during recovery")
         db.execute("""
             CREATE TABLE IF NOT EXISTS write_claim_recovery_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,7 +190,7 @@ def release_stale_claim(
             "VALUES (?, ?, 1, ?)",
             (holder["repository"], claim_id, time.time_ns()),
         )
-    return {"repository": repository, "claim_id": claim_id, "released": True}
+    return {"repository": selector, "claim_id": claim_id, "released": True}
 
 
 def show_attempt(
@@ -371,14 +431,24 @@ def main(argv: list[str] | None = None) -> int:
 
     show = actions.add_parser("show-claim", help="Inspect a repository write claim")
     show.add_argument("--workspace", required=True, type=Path)
-    show.add_argument("--repository", required=True)
+    show_selector = show.add_mutually_exclusive_group(required=True)
+    show_selector.add_argument("--repository", help="Current registered root alias")
+    show_selector.add_argument(
+        "--claim-repository",
+        help="Exact persisted claim repository key, independent of repos.yaml",
+    )
 
     release = actions.add_parser(
         "release-claim",
         help="Release an exact stale claim only after confirming worker termination",
     )
     release.add_argument("--workspace", required=True, type=Path)
-    release.add_argument("--repository", required=True)
+    release_selector = release.add_mutually_exclusive_group(required=True)
+    release_selector.add_argument("--repository", help="Current root alias")
+    release_selector.add_argument(
+        "--claim-repository",
+        help="Exact persisted claim key; use for blocked evaluator recovery",
+    )
     release.add_argument("--claim-id", required=True)
     release.add_argument(
         "--worker-termination-confirmed", action="store_true",
@@ -453,11 +523,15 @@ def main(argv: list[str] | None = None) -> int:
                 worker_termination_confirmed=args.worker_termination_confirmed,
             )
         elif args.action == "show-claim":
-            output = show_claim(workspace=args.workspace, repository=args.repository)
+            output = show_claim(
+                workspace=args.workspace, repository=args.repository,
+                claim_repository=args.claim_repository,
+            )
         elif args.action == "release-claim":
             output = release_stale_claim(
                 workspace=args.workspace,
                 repository=args.repository,
+                claim_repository=args.claim_repository,
                 claim_id=args.claim_id,
                 worker_termination_confirmed=args.worker_termination_confirmed,
             )

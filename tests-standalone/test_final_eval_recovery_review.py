@@ -158,11 +158,85 @@ def test_blocked_evaluator_recovery_instructions_cover_every_root(tmp_path, monk
     message = info.value.actionable_detail()
     assert message.startswith("agent_not_ready")
     assert message.count("release-claim") == 2
-    assert "--repository backend" in message
-    assert "--repository frontend" in message
+    assert "--claim-repository backend" in message
+    assert "--claim-repository frontend" in message
     row = coord.store.latest(gid)
     assert row["status"] == "interrupted"
     for name in ("backend", "frontend"):
         assert show_claim(workspace=runtime.root, repository=name)["claim_id"] == (
             row["cleanup"]["write_claim_id"]
         )
+
+
+
+def test_blocked_eval_claim_commands_survive_removed_and_reassigned_aliases(
+    tmp_path, monkeypatch,
+):
+    """The generated commands must identify persisted claim keys, not repos.yaml."""
+    import shlex
+    import subprocess
+    import sys
+
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.maintenance import (
+        show_claim, release_stale_claim, recover_final_evaluation,
+    )
+
+    runtime, _, graph_rt, coord, gid = setup_graph(tmp_path)
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(tmp_path / "trusted-remap"))
+    async def create(*_args, **_kwargs):
+        return {
+            "workspace": {"workspace_id": "blocked-remap-eval"},
+            "root_pane": {"pane_id": "blocked-remap-pane"},
+        }
+    async def blocked(*_args):
+        raise AgentStartupBlocked(
+            "blocked-agent", "blocked-remap-pane",
+            "native approval required",
+        )
+    _mock_native(monkeypatch, runtime, workspace_create=create, start=blocked)
+    with pytest.raises(AgentStartupBlocked) as info:
+        asyncio.run(coord.start(
+            gid, "claude-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    cleanup = coord.store.latest(gid)["cleanup"]
+    stable_claim = cleanup["write_claim_id"]
+    commands = info.value.recovery_command.splitlines()
+    assert len(commands) == 2
+    assert "--claim-repository backend" in commands[0]
+    assert "--claim-repository frontend" in commands[1]
+
+    # Rename one original root and reassign its old alias to another Git root.
+    (runtime.root / "repos.yaml").write_text(
+        "repositories:\n"
+        "  - name: moved_backend\n    path: backend\n"
+        "  - name: moved_frontend\n    path: frontend\n",
+        encoding="utf-8",
+    )
+    assert show_claim(
+        workspace=runtime.root, claim_repository="backend",
+    )["claim_id"] == stable_claim
+    with pytest.raises(ValueError, match="unregistered"):
+        release_stale_claim(
+            workspace=runtime.root, repository="backend",
+            claim_id=stable_claim, worker_termination_confirmed=True,
+        )
+    # The original commands from the exception remain valid unchanged.
+    for command in commands:
+        argv = shlex.split(command)
+        assert argv[:3] == [sys.executable, "-m", "qiqi_delegate.maintenance"]
+        # Execute the actual CLI entrypoint without a new process so its
+        # workspace and environment match the blocked evaluator.
+        from qiqi_delegate.maintenance import main
+        assert main(argv[3:]) == 0
+    with runtime._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM write_claims WHERE claim_id=?",
+            (stable_claim,),
+        ).fetchone()[0] == 0
+    outcome = recover_final_evaluation(
+        workspace=runtime.root,
+        evaluation_id=coord.store.latest(gid)["evaluation_id"],
+        worker_termination_confirmed=True,
+    )
+    assert outcome["status"] == "errored"

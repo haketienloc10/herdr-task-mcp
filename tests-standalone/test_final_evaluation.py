@@ -916,3 +916,26 @@ def test_multi_root_claim_detects_mapping_change_inside_transaction(tmp_path, mo
         )
     with sqlite3.connect(runtime.db) as db:
         assert db.execute("SELECT COUNT(*) FROM write_claims").fetchone()[0] == 0
+
+
+
+def test_ignored_parent_directory_does_not_hide_nested_credentials(tmp_path, monkeypatch):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    (backend / ".gitignore").write_text("private/\n", encoding="utf-8")
+    secret = backend / "private" / ".env"
+    secret.parent.mkdir()
+    secret.write_text("PASSWORD=not-for-review\n", encoding="utf-8")
+    invoked = []
+    async def forbidden_delegate(**kwargs):
+        invoked.append(kwargs)
+        raise AssertionError("native worker cannot be launched here")
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="ignored sensitive path"):
+        inspect_roots(runtime.repos())
+    with pytest.raises(ValueError, match="ignored sensitive path"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert invoked == []
+    assert coordinator.store.latest(gid) is None

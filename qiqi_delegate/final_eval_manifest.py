@@ -143,17 +143,15 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str], set[str]]
 
 
 def _reject_sensitive_ignored_files(root: Path) -> None:
-    """Fail closed on known ignored credentials hidden from the Git manifest.
+    """Fail closed on ignored credentials, including nested paths.
 
-    Git's exclude-standard enumeration omits ignored paths even though native
-    --add-dir exposes the whole root. Enumerate ignored names separately, but
-    do not add their contents to the evaluation context or manifest.
-    This is defense-in-depth, NOT containment of .git/history or arbitrary
-    secret filenames; that requires an OS-enforced source view.
+    Do NOT use --directory: Git otherwise collapses ignored parent directories
+    and hides e.g. private/.env when private/ is ignored.
+    This scan is defense in depth, not a native worker filesystem boundary.
     """
     ignored = _git_paths(
         root, "ls-files", "--others", "--ignored", "--exclude-standard",
-        "--directory", "-z",
+        "-z",
     )
     for name in ignored:
         parts = Path(name.rstrip("/")).parts

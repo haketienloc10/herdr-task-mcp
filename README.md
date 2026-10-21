@@ -730,3 +730,20 @@ remains readable by a sufficiently privileged native agent. Do not deploy
 direct-root Final Evaluation on untrusted repositories or ones with sensitive
 Git history until Herdr/adapter-level OS read isolation is available. This
 retains the requested **no repository snapshot/copy** property.
+
+
+### Codex follow-up — stable evaluator claim identity
+
+When a native Evaluator starts and becomes blocked, recovery output uses
+`release-claim --claim-repository <persisted-key> --claim-id <turn-id>`
+for **each** held Git root. The persisted key identifies the immutable
+`write_claims.repository` primary key, **not** the current `repos.yaml`
+alias. The operator must still verify native worker termination and pass
+`--worker-termination-confirmed`; only a matching exact row/claim pair
+is released and audited. The prior `--repository` selector is supported
+for callers working with currently registered Git root aliases.
+
+Ignored-path preflight now enumerates nested ignored files instead of
+collapsing whole ignored directories; it detects examples such as
+`private/.env` even when `private/` is ignored. This is defense in depth,
+not a solution to Codex's OS-level isolation finding.

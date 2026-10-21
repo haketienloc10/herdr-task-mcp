@@ -1400,7 +1400,8 @@ class DelegateRuntime:
                 (
                     f"{shlex.quote(sys.executable)} -m qiqi_delegate.maintenance "
                     f"release-claim --workspace {shlex.quote(str(self.root))} "
-                    f"--repository {shlex.quote(repo_name)} "
+                    f"{'--claim-repository' if evaluation_id is not None else '--repository'} "
+                    f"{shlex.quote(repo_name)} "
                     f"--claim-id {shlex.quote(claim_id)} "
                     "--worker-termination-confirmed"
                 )
