@@ -206,11 +206,16 @@ def test_blocked_eval_claim_commands_survive_removed_and_reassigned_aliases(
     assert "--claim-repository backend" in commands[0]
     assert "--claim-repository frontend" in commands[1]
 
-    # Rename one original root and reassign its old alias to another Git root.
+    # The control workspace may be a sibling of the Git roots, not their
+    # parent. Preserve canonical original paths while renaming both aliases.
+    import os
+    roots = runtime.repos()
+    backend_rel = os.path.relpath(roots["backend"], runtime.root)
+    frontend_rel = os.path.relpath(roots["frontend"], runtime.root)
     (runtime.root / "repos.yaml").write_text(
         "repositories:\n"
-        "  - name: moved_backend\n    path: backend\n"
-        "  - name: moved_frontend\n    path: frontend\n",
+        f"  - name: moved_backend\n    path: {backend_rel}\n"
+        f"  - name: moved_frontend\n    path: {frontend_rel}\n",
         encoding="utf-8",
     )
     assert show_claim(
