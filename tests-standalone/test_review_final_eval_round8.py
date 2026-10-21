@@ -6,8 +6,7 @@ import subprocess
 
 import pytest
 
-from qiqi_delegate.final_eval_snapshot import (
-    EvaluationSnapshot, evidence_is_in_manifest, inspect_roots, manifest_digest,
+from qiqi_delegate.final_eval_manifest import ( evidence_is_in_manifest, inspect_roots, manifest_digest,
 )
 from test_final_evaluation import evidence, report, setup_graph
 
@@ -33,19 +32,15 @@ def _committed_deletion(runtime, *, staged=False):
     return path
 
 
+
 @pytest.mark.parametrize("staged", [False, True])
 def test_deletion_only_requirement_can_pass_with_verified_tombstone(tmp_path, staged):
     runtime, _requests, _graph, coordinator, _gid = setup_graph(tmp_path)
     deleted_file = _committed_deletion(runtime, staged=staged)
-    with EvaluationSnapshot(runtime.repos()) as snapshot:
-        manifest = snapshot.manifest
+    if True:
+        manifest = inspect_roots(runtime.repos())
         assert "obsolete_api.py" in manifest["backend"]["deleted_paths"]
-        assert not (snapshot.paths["backend"] / "obsolete_api.py").exists()
-        index = json.loads(
-            (snapshot.paths["backend"] /
-             ".qiqi-evaluation-manifest.json").read_text(encoding="utf-8")
-        )
-        assert "obsolete_api.py" in index["deleted_paths"]
+        assert not deleted_file.exists()
         tombstone = {
             "kind": "deleted", "repository": "backend",
             "path": "obsolete_api.py", "locator": "git:tracked-deletion",
@@ -70,6 +65,7 @@ def test_deletion_only_requirement_can_pass_with_verified_tombstone(tmp_path, st
     assert "obsolete_api.py" not in inspect_roots(
         runtime.repos()
     )["backend"]["deleted_paths"]
+
 
 
 def test_unknown_or_forged_tombstone_never_authorizes_pass(tmp_path):
@@ -99,6 +95,7 @@ def test_unknown_or_forged_tombstone_never_authorizes_pass(tmp_path):
     assert coordinator.store.validate_report(base, manifest, {"R1"})[
         "verdict"
     ] == "pass"
+
 
 
 def test_native_deletion_only_pass_can_finalize_and_becomes_stale_if_restored(
@@ -138,6 +135,7 @@ def test_native_deletion_only_pass_can_finalize_and_becomes_stale_if_restored(
     deleted_file.write_text("def obsolete(): return True\n", encoding="utf-8")
     assert coordinator.graph_status(gid)["delivery_status"] == "not_finalized"
     assert coordinator.read(gid)["effective_status"] == "stale"
+
 
 
 def test_repeat_start_on_same_finalized_snapshot_does_not_redispatch_or_hide_delivery(
@@ -182,6 +180,7 @@ def test_repeat_start_on_same_finalized_snapshot_does_not_redispatch_or_hide_del
         ).fetchone()[0] == 1
 
 
+
 def test_older_current_finalization_keeps_delivery_if_a_newer_attempt_exists(
     tmp_path, monkeypatch,
 ):
@@ -220,6 +219,7 @@ def test_older_current_finalization_keeps_delivery_if_a_newer_attempt_exists(
     assert reused["already_finalized"]
     assert reused["evaluation_id"] == first["evaluation_id"]
     assert len(calls) == 1
+
 
 
 def test_changed_worktree_does_not_reuse_stale_finalization(tmp_path, monkeypatch):

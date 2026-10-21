@@ -122,7 +122,7 @@ có thể làm tăng thời gian và chi phí mà không giúp việc đơn gi�
 **Không cần route `claude-evaluator` riêng**: sau khi TaskGraph hoàn tất,
 gọi `start_final_evaluation` với `claude-high`, hoặc `claude-xhigh`
 nếu cần đánh giá phức tạp. Vai trò Final Evaluator được quyết định bằng API
-và snapshot, không phải tên route. MCP không ép chính xác một profile
+và TaskGraph context, không phải tên route. MCP không ép chính xác một profile
 CLI nào: model, effort và permission do YAML quyết định. Nhưng evaluator
 Claude **luôn bỏ project/local settings, .mcp.json** bằng
 `--setting-sources user`, `--strict-mcp-config`, và chặn MCP/skills.
@@ -134,8 +134,7 @@ các flags này thuộc ranh giới khởi động do runtime quản lý.
 **Codex Evaluator** cũng bảo vệ thư mục khởi chạy trung lập: route cho
 Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
 `-C/path`, `--cd=/path`, vì các cờ này có thể buộc Codex nạp
-`AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải
-dùng phiên native mới ở host cục bộ**, không thể dùng
+`AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải dùng phiên native mới ở host cục bộ**, không thể dùng
 `resume`/`fork`/`queue`/`--remote` hoặc non-interactive `exec`/`e`/`review`
 đối với Codex. Codex Final Evaluator chạy TUI tương tác từ neutral CWD;
 không dùng `--skip-git-repo-check` (cờ chỉ dành cho `codex exec`), hoặc
@@ -181,14 +180,14 @@ do route YAML lựa chọn. `workspace_info().route_details.model` nhận
 diện cả `--model` và native alias `-m` (bao gồm `-mVALUE`).
 Route Peer thông thường không bị giới hạn bởi bộ kiểm tra này.
 
-Lưu ý: `--add-dir` cung cấp quyền truy cập thư mục, không áp đặt
-filesystem chỉ đọc. Phiên Final Evaluator dùng bản sao tạm của toàn bộ
-repository cần đánh giá, không sửa trực tiếp các repo khi thao tác trên
-bản sao đó. Với route permissive, native agent/tools vẫn có thể có side
-effects ngoài bản sao: chỉ chạy workflow này trong môi trường đáng tin
-cậy. PR này **không triển khai sandbox, inotify hoặc kiểm chứng tính bất
-biến của snapshot trước tác nhân đối kháng**; hardening như vậy nằm
-ngoài phạm vi và được theo dõi riêng tại Issue #20.
+Lưu ý: `--add-dir` cung cấp quyền truy cập Git root trực tiếp,
+không áp đặt filesystem chỉ đọc. Final Evaluator không tạo repository copy.
+Prompt cấm thay đổi source, nhưng route permissive vẫn có thể cho phép
+native agent thực hiện side effects. Multi-root claims ngăn Peer hợp tác
+ghi vào các Git root trong lúc review; external writers không bị chặn.
+Manifest SHA256 kiểm tra thay đổi trước/sau, không bảo đảm bất biến tại
+mọi thời điểm. Cần OS sandbox hoặc immutable filesystem view nếu review
+code không đáng tin cậy.
 
 Runtime sở hữu native Stop/StopFailure hooks; không thêm `--settings` hoặc
 `hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
@@ -603,225 +602,22 @@ Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó khô
   mới đã được lưu hợp lệ), rồi mới `finalize_graph`. PASS của request revision
   cũ không tự trở thành PASS cho revision mới.
 
-## Final Evaluation Gate — Issue #8
+## Final Evaluation Gate — Native Multi-Root Review
 
-A completed TaskGraph is NOT necessarily a verified final product. The Lead
-continues its existing per-node `get_node_reviews` / `submit_decisions` loop.
-When the entire graph is `complete` with **every node satisfied**, a separate
-**single, fresh Unified Evaluator** reviews the final combined implementation,
-including cross-module contracts, before delivery is finalized.
+TaskGraph `complete` chỉ xác nhận execution hoàn thành. Mọi node phải `satisfied` với native Peer evidence trước khi có thể chạy Final Evaluation. **Lead/Peer ACCEPT không phải chứng cứ Final PASS.**
 
-1. Bind the original verbatim user request using `prepare_task_request`,
-   `submit_context_assessment`, and `start_graph(..., task_request_id,
-   task_request_revision, requirement_map)`. Legacy unbound graphs are explicitly
-   ineligible for independent final PASS; their old APIs remain usable.
-2. Finish every TaskGraph node with Lead ACCEPT. The scheduler's
-   `graph_state="complete"` remains an execution-only state, not a final PASS.
-3. Chọn route có model và effort thích hợp trong `agent-routing.yaml`,
-   ví dụ `claude-high` (đa số Final Evaluation), `claude-xhigh` (phức tạp)
-   hoặc `codex-evaluator`. Model, effort, permission mode
-   do người dùng tự cấu hình; runtime không ép `--restricted` hay
-   `--sandbox read-only`. Nhưng Claude evaluator luôn bỏ project/local
-   settings và MCP config để tránh chạy hooks/MCP nằm trong code ứng viên;
-   runtime chặn override của các flags bảo vệ và result hooks.
-   Mặc định cài mới: Claude dùng `--permission-mode auto`.
-   Final Evaluator dùng `~/.qiqi/evaluator-cwd` làm thư mục cha được trust
-   (trên Windows giải bằng `Path.home()`). Mỗi lượt khởi động trong thư mục
-   con sạch `runs/turn-<uuid>`, không tái sử dụng file từ lượt trước.
-   Runtime kiểm tra chỉ dẫn khởi động trong toàn bộ chuỗi thư mục cha,
-   đồng thời chỉ chấp nhận `runs/turn-<uuid>` và lease `.qiqi-active`
-   trong thư mục `runs`; nếu xuất hiện `runs/.claude` hoặc thư mục lạ,
-   evaluator sẽ từ chối khởi động để tránh nạp project settings/hook cũ.
-   Khóa độc quyền `runs/.qiqi-active` cùng mutex OS-backed
-   `runs/.qiqi-mutex` cho phép tối đa một Final Evaluator
-   chạy trên cùng trust root, kể cả giữa các MCP process. Lượt thứ hai
-   nhận lỗi rõ ràng nếu evaluator trước vẫn chạy hoặc chưa được recovery;
-   không tự xóa khóa của worker có thể còn sống. Đây là tuần tự hóa
-   có phối hợp, không phải OS sandbox đối với tiến trình cố tình ghi đè
-   dữ liệu khi chạy cùng UID.
-   Claude interactive thường kế thừa trust của thư mục cha không thuộc Git;
-   không tự chỉnh trạng thái trust và cần kiểm chứng với CLI thực tế.
-   Có thể đặt `QIQI_EVALUATOR_CWD` thành đường dẫn tuyệt đối ngoài
-   repository và snapshot. Runtime không tự xác nhận trust hoặc thay đổi
-   permission mode. Claude route mặc định dùng `--permission-mode auto`.
-   Source vẫn nằm trong bản sao tạm và được truyền qua `--add-dir`;
-   đây chỉ là quyền truy cập thư mục, không phải filesystem sandbox.
-   Hệ thống không yêu cầu Linux inotify hay kernel snapshot monitoring.
-4. Gọi `start_final_evaluation(graph_run_id, "claude-high", expected_revision)`
-   hoặc sử dụng `"claude-xhigh"` / `"codex-evaluator"` theo độ khó.
-   Không cần tạo riêng một route Claude có cùng model và effort.
-   The Coordinator snapshots **all** repositories in the active TaskGraph
-   (including staged, unstaged and non-ignored untracked files), then launches
-   **one fresh native Evaluator session** in a fresh per-turn subdirectory
-   of the stable, trusted neutral parent CWD, with every
-   snapshot root passed via `--add-dir` and identified by absolute paths
-   in the native prompt. This is a disposable working copy, not an
-   immutable or read-only mount. Native Stop/StopFailure capture stays
-   runtime-owned. Operator/user/managed agent configuration remains a
-   trusted deployment input; no OS sandbox or extra memory-policy override
-   is installed by the Final Evaluation workflow.
-   The bounded TaskPacket contains only
-   small routing metadata and relative archive locations, not the entire
-   original request and TaskGraph inline. In the primary isolated snapshot,
-   `.qiqi-final-task-sources/index.json` stores the **full verbatim original
-   request**, assessed requirements, and an index of every source (including
-   sources omitted by Lead). `.qiqi-final-task-sources/task-graph.json`
-   preserves every node and acceptance criterion. Complete original source
-   contents are separate files in the temporary copy, including large native captures.
-   The Evaluator must read all relevant archives; no 100k-character prompt
-   truncation is allowed. Missing or changed source during snapshot materialization blocks dispatch.
-5. Inspect `get_final_evaluation(graph_run_id, evaluation_id?)`. The durable
-   structured report has `verdict`, `requirement_results`,
-   `cross_repository_checks`, `verification_runs`, `findings`, and `unknowns`.
-   Report evidence must match each repository's captured
-   `.qiqi-evaluation-manifest.json`. Existing file evidence has fields
-   `{repository, path, sha256, locator}`. A tracked file deleted during
-   implementation has **no current content SHA256** and may instead provide
-   `{kind: "deleted", repository, path, locator}`; its path must exist in
-   that manifest's `deleted_paths` tombstones. This permits legitimate
-   deletion-only requirements to PASS without inventing file hashes.
-   Untracked/missing paths and fake deletion references are rejected.
-   All original requirements must be covered. For multi-repo PASS,
-   **each** integration check must cite
-   at least two distinct repository sources, while the complete set of
-   integration checks must cover every participating repository. Separate
-   module-only checks never suffice. A bare LLM "PASS" without corroborating
-   file evidence is rejected; a native settled response alone is not a PASS.
-6. On FAIL or INCONCLUSIVE, Lead fixes/replans through existing graph tools,
-   then reruns one whole-product evaluation after the updated graph is complete.
-7. Call `finalize_graph(graph_run_id, evaluation_id, expected_revision)` only
-   after an independently validated `passed` result matching the exact current
-   graph/request/repository snapshot. `get_graph` separately reports
-   `graph_state`, `final_evaluation_status`, `evaluation_is_current` and
-   `delivery_status`. Changes to untracked/tracked files or graph/request
-   revision invalidate the previous PASS. Repeating
-   `start_final_evaluation` on an already finalized **unchanged**
-   graph/request/snapshot reuses the existing result (`already_finalized=true`)
-   without dispatching another native Evaluator or clearing delivery.
-   `get_graph` continues to report `delivery_status="finalized"` for a
-   current approved snapshot, even if a newer attempt record exists.
-   If snapshots A and B were both finalized and a worktree reverts from B to A,
-   the gate selects A's **historical finalized PASS** by the current
-   graph revision, Task Request identity/revision and repository manifest digest
-   (not by the most recent finalization timestamp), and reuses its original
-   evaluation ID without rerunning Codex. Rebinding a different Task Request
-   or changing to a never-approved snapshot cannot reuse that PASS.
-   A changed snapshot without a matching finalized PASS must be evaluated again.
+1. Bind verbatim Task Request, assessment và `requirement_map` khi gọi `start_graph`. TaskGraph không được bind không đủ điều kiện Final PASS.
+2. Kết thúc các node bằng vòng `get_node_reviews` / `submit_decisions` hiện hành. Nếu có node cancelled/blocked, Final Evaluation từ chối.
+3. Gọi `start_final_evaluation(graph_run_id, route, expected_revision)`. Route `claude-high`, `claude-xhigh` hoặc Codex tùy theo `agent-routing.yaml`. Mỗi lượt sử dụng **một native session mới**, bắt đầu từ `~/.qiqi/evaluator-cwd/runs/turn-<uuid>`, không tái sử dụng phiên Lead/Peer. Trust được thiết lập một lần tại thư mục cha cho các adapter hỗ trợ kế thừa trust.
+4. Runtime kiểm tra các Git root thuộc TaskGraph trong `repos.yaml`, tạo **manifest SHA256 trực tiếp trên working tree** (bao gồm staged, unstaged và non-ignored untracked files). Không sao chép repository, không tạo `.qiqi-evaluation-manifest.json` trong source. Một transaction cấp claim cho **tất cả** Git root trong scope; native agent được cấp quyền đọc thông qua `--add-dir`.
+5. Trong CWD trung lập, runtime tạo `context/context.json`, `context/source_index.json` và file nguồn Task Request được tham chiếu. Context chứa verbatim user request, requirements, requirement mapping, graph objective/acceptance criteria, lịch sử node attempts, Lead decisions, Git root manifest. Tất cả Lead/Peer reports chỉ là claims cần xác minh. Nguồn đính kèm `workspace_file` có thể được copy riêng lẻ để bảo toàn nội dung; **không có repository snapshot/copy**.
+6. Evaluator phải review implementation thực tế ở **mọi Git root thuộc TaskGraph**, gồm mọi module liên quan, contract nội repository lẫn liên repository. Phải đối chiếu request, requirements, node evidence, producer/consumer interface, schema và data flow. Report gồm `verdict`, `requirement_results`, `cross_repository_checks`, `verification_runs`, `findings`, `unknowns`. File evidence yêu cầu `{repository,path,sha256,locator}`; deletion yêu cầu `{kind:"deleted",repository,path,locator}` nằm trong manifest.
+7. Native captured PASS **chưa phải Final PASS**. `FinalEvaluationStore.validate_report()` kiểm tra coverage và evidence, kết quả phải thuộc đúng native turn đã settled. Report còn phải khớp graph/request revision và Git manifest sau khi native review kết thúc. Worker cleanup chưa xác nhận, stale code hoặc report thiếu bằng chứng đều không được PASS.
+8. Dùng `get_final_evaluation(graph_run_id, evaluation_id?)` để đọc evidence. Nếu FAIL/INCONCLUSIVE, Lead sửa hoặc reconcile rồi đánh giá lại toàn bộ graph. Chỉ gọi `finalize_graph(graph_run_id, evaluation_id, expected_revision)` khi PASS vẫn current. Các PASS cũ từ snapshot-copy (`policy_version=1`) lưu audit nhưng **không thể tái sử dụng** ở native direct-root policy v2.
 
-**Limits and security boundaries:** Snapshots use verified registered Git roots,
-a strict file allowlist, symlink/path protections, file hashing before/after
-copy and deterministic manifests. Tracked paths deleted from the worktree,
-including staged deletions and staged/unstaged renames, are preserved as
-`deleted_paths` tombstones **only when that path exists in HEAD** (a real
-previously committed file). Missing index-only additions—such as a
-`git add -N` intent-to-add file or a staged new file subsequently deleted
-from the worktree—fail closed rather than becoming fake deletion evidence.
-Present index-only additions are captured and hashed normally. Verified
-HEAD deletions are not copied; restoring one changes the manifest digest
-and invalidates a prior PASS.
-Default bounds are 3,000 files/repo, 1 MB/file and 24 MB total.
-Snapshots are temporary and separate from original trees. Repository
-files or directories colliding with reserved evaluator metadata paths
-(`.qiqi-evaluation-manifest.json` or `.qiqi-final-task-sources`) are
-rejected before copying, rather than silently overwritten. Git submodules
-(gitlink mode 160000 in HEAD or index) are rejected rather than incorrectly
-recorded as deletions: recursively snapshotting submodule worktrees is not
-supported yet. **Sparse checkout is also unsupported and fails closed.**
-Git `core.sparseCheckout` mode and individual `skip-worktree` index entries
-are rejected before manifest creation: a tracked path intentionally omitted
-by sparse checkout is not a real deletion tombstone and can never count as
-final PASS evidence. Restore a complete working tree and clear skip-worktree
-flags before evaluating. Ordinary staged/unstaged deletions in a complete
-working tree remain supported.
-`--add-dir` grants additional directory access: **it is not a sandbox**.
-A route may choose its own native permission flags; Final Evaluation does
-not impose an immutable filesystem or a kernel monitor.
-The feature does not execute arbitrary verification commands from reports or
-independently attest LLM-reported test runs; do not treat test claims as
-deterministic proof. Host filesystem access and side effects depend on the configured native
-agent permissions. Use trusted workspaces and tools; hostile-agent filesystem
-confinement is outside this PR's scope.
-A model finding no errors cannot prove mathematical correctness.
+**Concurrency/recovery:** Runtime giữ lock cho tất cả registered roots trong một transaction; chỉ nhả sau khi Herdr workspace đã đóng. Nếu native worker vẫn có thể tồn tại, giữ claims và evaluator CWD để operator kiểm tra. Phải xác nhận worker termination, release từng exact Git root claim, sau đó dùng `recover-final-evaluation`; capture đơn lẻ không thể phục hồi thành PASS.
 
-**Crash/concurrency semantics:** Store evaluation IDs and native turn bindings
-before launch. Duplicate active requests do not dispatch a second agent.
-Failed/ambiguous/cancelled runs never PASS; diagnostic and native capture
-association remain auditable. If the bound Task Request/assessment or
-TaskGraph revision changes while the Evaluator is running, its completed
-PASS claim is stored as `inconclusive` with a stale-input reason and
-full native capture; the `evaluating` slot is released for reevaluation
-once the new request-to-graph binding is updated. Startup-blocked agents
-whose Herdr workspace
-is preserved remain `interrupted` and block further evaluator launches until
-an operator confirms worker termination using `recover-final-evaluation`.
-**Settled capture does not override failed Herdr cleanup.** If a native
-Evaluator produces a complete structured PASS but Herdr cannot confirm
-closing its workspace, `start_final_evaluation` returns
-`final_evaluation_status="interrupted"`, never `passed`.
-`get_final_evaluation` preserves the full native turn capture and returns
-`cleanup` with `cleanup_state`, `workspace_id`, `write_claim_id`,
-`write_claim_repository` and `recovery_action`. These IDs remain durable
-across MCP restarts. `finalize_graph` rejects the result, and a second
-evaluation is blocked until exact operator recovery; an LLM's captured PASS
-is evidence for inspection, not permission to deliver. During startup
-recovery, **no abandoned attempt is automatically restored as PASS**, even
-when a settled native capture is durable and no write claim remains: a process
-crash can occur before the Coordinator has validated and persisted
-a complete FinalEvaluationReport. Recovery retains the original native response for
-operator inspection, marks the attempt `interrupted`, and requires operator
-confirmation of worker termination before a new attempt. If a write claim
-remains, it must also be safely released.
-
-**Operator recovery for preserved Evaluator workspaces:** The Herdr Evaluator
-runs inside a disposable snapshot, but its write claim records the stable
-canonical root registered under the primary repository in `repos.yaml`.
-This deliberate separation makes `show-claim --repository <primary-repo>`
-and `release-claim --repository <primary-repo> --claim-id 'turn:<id>'
---worker-termination-confirmed` usable even when snapshots are temporary.
-On `AgentStartupBlocked` or an unconfirmed workspace close, runtime
-**retains** `qiqi-result-*` (native hook sink),
-`qiqi-final-eval-*` (source snapshots), and the per-turn native CWD. The
-interrupted evaluation's `cleanup` metadata records their paths. Inspect/close the Herdr workspace,
-verify the external worker stopped, then use the operator-only `show-claim`
-and exact-ID `release-claim` commands shown below. Next use
-`show-final-evaluation` and `recover-final-evaluation --evaluation-id <id>
---worker-termination-confirmed`: recovery removes only the recorded QiQi
-temporary trees after termination confirmation. Releasing the write claim
-alone does not clear an interrupted evaluation reservation; these are
-separate, audited recoveries. Never release a still-running worker's claim.
-Crash/recovery details: `snapshot_root` is committed atomically with the
-Final Evaluation reservation. Before `herdr workspace create`, the runtime
-persists a unique `workspace_label` of the form
-`qiqi:evaluator:<full-turn-uuid>` together with `evaluator_cwd`,
-`capture_sink` and the write claim. Herdr assigns `workspace_id`, so a
-crash or lost response during creation may leave that ID unknown. Use
-`herdr workspace list` to find the **exact recorded label and CWD**;
-inspect/close the corresponding workspace (if present), verify external
-worker termination, then run the operator-only recovery commands.
-Never infer from a missing workspace ID that creation failed. A local
-filesystem cleanup error after successful Herdr close also keeps the
-attempt `interrupted`, its lease and all recovery locators until explicit
-verified recovery.
-
-The trusted parent `~/.qiqi/evaluator-cwd` is never removed by cleanup;
-each completed per-turn CWD is removed, and its exclusive lease is released.
-If a request is cancelled and Herdr **confirms** workspace closure, the
-snapshot, hook sink and per-turn CWD are removed; the attempt is marked
-errored and may be retried without additional operator recovery. If
-closure is unconfirmed, metadata retains all recovery paths and the
-lease blocks later Evaluators until verified recovery.
-Peers/Discovery keep their original auto-cleaned `TemporaryDirectory` hook sinks.
-
-Finalization checks graph/request revisions and the live multi-repository
-manifest digest. **After SQLite commits**, it reloads `repos.yaml`, resolves
-the current Graph repository names to their canonical Git roots, rechecks
-Graph/Task Request eligibility, and recomputes the manifest against **those
-freshly registered paths**. Repository remaps/removals, malformed registry
-configuration, or changed worktree contents revoke the delivered flag with
-a durable audit record and return an error—not successful delivery. Later
-registry or source changes also stale any previous PASS on reads. SQLite
-alone cannot prevent external filesystem/registry writes after the final
-freshness check.
+**Giới hạn bảo mật và tính nhất quán:** `--add-dir` không phải filesystem sandbox. Quy tắc không ghi repository chỉ là instruction; native CLI permission còn phụ thuộc `agent-routing.yaml`. Git manifests được hash trước dispatch, sau native response và khi finalization, nhưng không tạo atomic filesystem snapshot. Write claims chỉ chặn writer dùng chung QiQi runtime; external writer có thể thay đổi files giữa các lần hash. Nếu cần bảo đảm hard read-only hoặc immutable source view, triển khai OS-level sandbox / filesystem view độc lập. File nguồn và node evidence là untrusted data, không được thực thi hay dùng làm hướng dẫn cho Evaluator.
 
 ## Native capture và trạng thái lỗi
 
@@ -920,3 +716,34 @@ GitHub Actions chạy test trên Python **3.10, 3.12 và 3.13**. Workflow nằm 
 | `tests-standalone/` | Regression tests của runtime Python |
 
 Không sửa trực tiếp dữ liệu SQLite để xử lý công việc kẹt. Dùng các lệnh bảo trì có kiểm tra ID và ghi audit.
+
+
+### Codex review follow-up — direct-root security boundary
+
+Native `--add-dir` exposes the full registered Git root to native tools, including
+ignored files and `.git` metadata. To prevent common accidental credential
+exposure, source inspection now **fails closed** when it detects ignored
+credential filenames or ignored private directories (`.env`, `.aws`,
+`.ssh`, `.venv`, etc.). This check is **not a sandbox**: a sensitive file under
+an unexpected filename, a sensitive Git object, or a racing external writer
+remains readable by a sufficiently privileged native agent. Do not deploy
+direct-root Final Evaluation on untrusted repositories or ones with sensitive
+Git history until Herdr/adapter-level OS read isolation is available. This
+retains the requested **no repository snapshot/copy** property.
+
+
+### Codex follow-up — stable evaluator claim identity
+
+When a native Evaluator starts and becomes blocked, recovery output uses
+`release-claim --claim-repository <persisted-key> --claim-id <turn-id>`
+for **each** held Git root. The persisted key identifies the immutable
+`write_claims.repository` primary key, **not** the current `repos.yaml`
+alias. The operator must still verify native worker termination and pass
+`--worker-termination-confirmed`; only a matching exact row/claim pair
+is released and audited. The prior `--repository` selector is supported
+for callers working with currently registered Git root aliases.
+
+Ignored-path preflight now enumerates nested ignored files instead of
+collapsing whole ignored directories; it detects examples such as
+`private/.env` even when `private/` is ignored. This is defense in depth,
+not a solution to Codex's OS-level isolation finding.

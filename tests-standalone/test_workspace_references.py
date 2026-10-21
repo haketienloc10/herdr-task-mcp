@@ -146,7 +146,9 @@ def test_native_peer_gets_only_cited_snapshot(workspace, monkeypatch):
     assert not observed["snapshot"].exists()
 
 
-def test_final_evaluator_gets_full_reference_snapshot(workspace, tmp_path):
+def test_final_evaluator_stages_reference_context_without_copying_repos(
+    workspace, tmp_path,
+):
     lead, runtime, store, server = workspace
     req, source, content = create_source(lead, store)
     assessed = store.assess(req["request_id"], req["revision"], {
@@ -157,14 +159,20 @@ def test_final_evaluator_gets_full_reference_snapshot(workspace, tmp_path):
         "decision": "direct",
         "rationale": "Specification supplied",
     })
-    evaluator = SimpleNamespace(task_requests=store)
-    isolated = tmp_path / "isolated"
-    isolated.mkdir()
-    index = FinalEvaluationCoordinator._materialize_task_sources(
-        evaluator, assessed, isolated,
+    neutral = tmp_path / "neutral-run"
+    neutral.mkdir()
+    runtime._materialize_evaluation_context(neutral, {
+        "original_user_request": assessed["user_request"],
+        "requirements": assessed["assessment"]["requirements"],
+        "sources": assessed["sources"],
+    })
+    context_dir = neutral / "context"
+    source_index = json.loads(
+        (context_dir / "source_index.json").read_text(encoding="utf-8")
     )
-    root = isolated / ".qiqi-final-task-sources"
-    manifest = json.loads((root / "index.json").read_text(encoding="utf-8"))
-    assert index["source_count"] == 1
-    assert manifest["sources"][0]["sha256"] == source["sha256"]
-    assert (root / "source-00.txt").read_text(encoding="utf-8") == content
+    assert len(source_index) == 1
+    assert source_index[0]["sha256"] == source["sha256"]
+    assert (context_dir / source_index[0]["source_path"]).read_text(
+        encoding="utf-8"
+    ) == content
+    assert not (neutral / ".qiqi-final-task-sources").exists()

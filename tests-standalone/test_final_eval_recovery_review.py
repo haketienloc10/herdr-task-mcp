@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from test_final_evaluation import setup_graph
-from qiqi_delegate.maintenance import recover_final_evaluation
+from qiqi_delegate.maintenance import recover_final_evaluation, release_stale_claim
 
 
 def _mock_native(monkeypatch, runtime, *, workspace_create, start=None):
@@ -61,11 +61,18 @@ def test_lost_herdr_create_response_preserves_discoverable_label(
     assert cleanup["workspace_id"] == ""
     assert cleanup["evaluator_cwd"] == str(seen["cwd"])
     assert Path(cleanup["capture_sink"]).is_dir()
-    assert Path(cleanup["snapshot_root"]).is_dir()
+    assert "snapshot_root" not in cleanup
     assert (trust / "runs" / ".qiqi-active").is_file()
 
     # In production, operator inspects 'herdr workspace list', matches the
     # exact label and cwd, closes the workspace if present, and verifies exit.
+    # Native workspace is now stopped; release every held Git root explicitly.
+    for name in ("backend", "frontend"):
+        assert release_stale_claim(
+            workspace=runtime.root, repository=name,
+            claim_id=cleanup["write_claim_id"],
+            worker_termination_confirmed=True,
+        )["released"]
     row = recover_final_evaluation(
         workspace=runtime.root, evaluation_id=row["evaluation_id"],
         worker_termination_confirmed=True,
@@ -75,7 +82,7 @@ def test_lost_herdr_create_response_preserves_discoverable_label(
     assert not (trust / "runs" / ".qiqi-active").exists()
 
 
-def test_local_cleanup_failure_keeps_snapshot_sink_and_lease(
+def test_local_cleanup_failure_keeps_context_sink_and_lease(
     tmp_path, monkeypatch,
 ):
     import qiqi_delegate.runtime as runtime_module
@@ -113,7 +120,7 @@ def test_local_cleanup_failure_keeps_snapshot_sink_and_lease(
     assert cleanup["workspace_label"].startswith("qiqi:evaluator:")
     assert cleanup["evaluator_cwd"] == str(observed["cwd"])
     assert Path(cleanup["capture_sink"]).is_dir()
-    assert Path(cleanup["snapshot_root"]).is_dir()
+    assert "snapshot_root" not in cleanup
     assert observed["cwd"].is_dir()
     assert (trust / "runs" / ".qiqi-active").exists()
 
@@ -124,6 +131,117 @@ def test_local_cleanup_failure_keeps_snapshot_sink_and_lease(
     )
     assert recovered["status"] == "errored"
     assert not Path(cleanup["capture_sink"]).exists()
-    assert not Path(cleanup["snapshot_root"]).exists()
+    assert "snapshot_root" not in cleanup
     assert not observed["cwd"].exists()
     assert not (trust / "runs" / ".qiqi-active").exists()
+
+
+def test_blocked_evaluator_recovery_instructions_cover_every_root(tmp_path, monkeypatch):
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.maintenance import show_claim
+
+    runtime, _, graph_rt, coord, gid = setup_graph(tmp_path)
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(tmp_path / "trusted-blocked"))
+    async def create(*_argv, **_kwargs):
+        return {
+            "workspace": {"workspace_id": "blocked-eval-42"},
+            "root_pane": {"pane_id": "blocked-pane-42"},
+        }
+    async def start(*_argv):
+        raise AgentStartupBlocked("blocked-agent", "blocked-pane-42",
+                                  "native trust approval required")
+    _mock_native(monkeypatch, runtime, workspace_create=create, start=start)
+    with pytest.raises(AgentStartupBlocked) as info:
+        asyncio.run(coord.start(
+            gid, "claude-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    message = info.value.actionable_detail()
+    assert message.startswith("agent_not_ready")
+    assert message.count("release-claim") == 2
+    assert "--claim-repository backend" in message
+    assert "--claim-repository frontend" in message
+    row = coord.store.latest(gid)
+    assert row["status"] == "interrupted"
+    for name in ("backend", "frontend"):
+        assert show_claim(workspace=runtime.root, repository=name)["claim_id"] == (
+            row["cleanup"]["write_claim_id"]
+        )
+
+
+
+def test_blocked_eval_claim_commands_survive_removed_and_reassigned_aliases(
+    tmp_path, monkeypatch,
+):
+    """The generated commands must identify persisted claim keys, not repos.yaml."""
+    import shlex
+    import subprocess
+    import sys
+
+    from qiqi_delegate.runtime import AgentStartupBlocked
+    from qiqi_delegate.maintenance import (
+        show_claim, release_stale_claim, recover_final_evaluation,
+    )
+
+    runtime, _, graph_rt, coord, gid = setup_graph(tmp_path)
+    monkeypatch.setenv("QIQI_EVALUATOR_CWD", str(tmp_path / "trusted-remap"))
+    async def create(*_args, **_kwargs):
+        return {
+            "workspace": {"workspace_id": "blocked-remap-eval"},
+            "root_pane": {"pane_id": "blocked-remap-pane"},
+        }
+    async def blocked(*_args):
+        raise AgentStartupBlocked(
+            "blocked-agent", "blocked-remap-pane",
+            "native approval required",
+        )
+    _mock_native(monkeypatch, runtime, workspace_create=create, start=blocked)
+    with pytest.raises(AgentStartupBlocked) as info:
+        asyncio.run(coord.start(
+            gid, "claude-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    cleanup = coord.store.latest(gid)["cleanup"]
+    stable_claim = cleanup["write_claim_id"]
+    commands = info.value.recovery_command.splitlines()
+    assert len(commands) == 2
+    assert "--claim-repository backend" in commands[0]
+    assert "--claim-repository frontend" in commands[1]
+
+    # The control workspace may be a sibling of the Git roots, not their
+    # parent. Preserve canonical original paths while renaming both aliases.
+    import os
+    roots = runtime.repos()
+    backend_rel = os.path.relpath(roots["backend"], runtime.root)
+    frontend_rel = os.path.relpath(roots["frontend"], runtime.root)
+    (runtime.root / "repos.yaml").write_text(
+        "repositories:\n"
+        f"  - name: moved_backend\n    path: {backend_rel}\n"
+        f"  - name: moved_frontend\n    path: {frontend_rel}\n",
+        encoding="utf-8",
+    )
+    assert show_claim(
+        workspace=runtime.root, claim_repository="backend",
+    )["claim_id"] == stable_claim
+    with pytest.raises(ValueError, match="unregistered"):
+        release_stale_claim(
+            workspace=runtime.root, repository="backend",
+            claim_id=stable_claim, worker_termination_confirmed=True,
+        )
+    # The original commands from the exception remain valid unchanged.
+    for command in commands:
+        argv = shlex.split(command)
+        assert argv[:3] == [sys.executable, "-m", "qiqi_delegate.maintenance"]
+        # Execute the actual CLI entrypoint without a new process so its
+        # workspace and environment match the blocked evaluator.
+        from qiqi_delegate.maintenance import main
+        assert main(argv[3:]) == 0
+    with runtime._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM write_claims WHERE claim_id=?",
+            (stable_claim,),
+        ).fetchone()[0] == 0
+    outcome = recover_final_evaluation(
+        workspace=runtime.root,
+        evaluation_id=coord.store.latest(gid)["evaluation_id"],
+        worker_termination_confirmed=True,
+    )
+    assert outcome["status"] == "errored"

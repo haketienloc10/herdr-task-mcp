@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from qiqi_delegate.final_eval_snapshot import inspect_roots, manifest_digest
+from qiqi_delegate.final_eval_manifest import inspect_roots, manifest_digest
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from test_final_evaluation import setup_graph, report
 
@@ -35,6 +35,7 @@ def _persist_pass(runtime, requests, graph_rt, coordinator, graph_run_id):
     )
     assert stored["status"] == "passed"
     return eid, graph_revision
+
 
 
 @pytest.mark.parametrize("mutation", ["remap", "remove", "invalid_registry"])
@@ -105,6 +106,7 @@ def test_registry_mutation_during_sqlite_commit_revokes_delivery(
         ).fetchall()
     assert len(audit) == 1
     assert "repository registry" in audit[0][0]
+
 
 
 def test_same_registry_roots_after_sqlite_commit_still_finalize(

@@ -1,55 +1,22 @@
-"""Reproducible, bounded Git working-tree copies for final evaluation.
+"""Git worktree inspection and evidence verification for direct native evaluation.
 
-Do not use live registered working trees as evaluator CWD. Copy all
-tracked and non-ignored untracked files, not just HEAD: Peer output may be dirty.
+Never create a repository copy; hash live registered roots before and after review.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import shutil
 import stat
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
 
-MAX_FILES = 3000
-MAX_FILE_BYTES = 1_000_000
-MAX_TOTAL_BYTES = 24_000_000
 FORBIDDEN_BASENAMES = {".env", ".env.local", ".env.production", ".npmrc",
                        ".pypirc", "id_rsa", "id_ed25519", "credentials.json"}
 FORBIDDEN_PATH_PARTS = {".git", ".herdr-task-mcp", ".qiqi", ".ssh", ".aws",
                         ".venv", "node_modules", "__pycache__"}
-# Generated metadata is placed inside isolated repository copies. Collision
-# with a real tracked/untracked product file would silently overwrite bytes
-# while leaving the original SHA256 recorded in the evaluation manifest.
-RESERVED_EVALUATION_PATHS = {
-    ".qiqi-evaluation-manifest.json",
-    ".qiqi-final-task-sources",
-}
-
-
-def cleanup_temporary_tree(root: Path) -> None:
-    """Remove QiQi temporary trees, including intentionally read-only sources."""
-    def make_writable_and_retry(func: Any, name: str, _exc: Any) -> None:
-        target = Path(name)
-        if target != root and root not in target.parents:
-            raise RuntimeError("refusing to change permissions outside temporary tree")
-        # Source staging removes owner write bits. Never chmod the tree's
-        # parent (often /tmp), even if deleting the top-level tree fails.
-        parent = target.parent
-        if (parent == root or root in parent.parents) and (
-            parent.is_dir() and not parent.is_symlink()
-        ):
-            parent.chmod(0o700)
-        if target.exists() and not target.is_symlink():
-            target.chmod(0o700 if target.is_dir() else 0o600)
-        func(name)
-
-    shutil.rmtree(root, onerror=make_writable_and_retry)
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -59,7 +26,7 @@ def _git(root: Path, *args: str) -> bytes:
             stderr=subprocess.PIPE, check=True, timeout=30,
         ).stdout
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError("unable to produce verified Git evaluation snapshot") from exc
+        raise RuntimeError("unable to produce verified Git evaluation source") from exc
 
 
 def _git_paths(root: Path, *args: str) -> set[str]:
@@ -91,7 +58,7 @@ def _reject_gitlinks(root: Path, head: str | None) -> None:
             if metadata.startswith(b"160000 "):
                 path = raw_path.decode("utf-8")
                 raise ValueError(
-                    "evaluation snapshot cannot safely capture Git "
+                    "evaluation source cannot safely capture Git "
                     f"submodule/gitlink from {label}: {path}; "
                     "remove the submodule or implement recursive source capture"
                 )
@@ -123,7 +90,7 @@ def _reject_sparse_checkout(root: Path) -> None:
         value = mode.stdout.strip()
         if value == b"true":
             raise ValueError(
-                "evaluation snapshot refuses sparse checkout: materialize "
+                "evaluation source refuses sparse checkout: materialize "
                 "the full working tree before final evaluation"
             )
         if value != b"false":
@@ -135,7 +102,7 @@ def _reject_sparse_checkout(root: Path) -> None:
             raise RuntimeError("cannot verify tracked Git index flags")
         if record[:1] == b"S":
             raise ValueError(
-                "evaluation snapshot refuses skip-worktree tracked path: "
+                "evaluation source refuses skip-worktree tracked path: "
                 + record[2:].decode("utf-8")
             )
 
@@ -162,22 +129,41 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str], set[str]]
         root, "ls-files", "--others", "--exclude-standard", "-z",
     )
     names = sorted(tracked | others)
-    if not names or len(names) > MAX_FILES:
-        raise ValueError("evaluation snapshot has no files or exceeds file-count limit")
+    if not names:
+        raise ValueError("evaluation source has no files")
     for name in names:
         parts = Path(name).parts
-        if any(name == reserved or name.startswith(reserved + "/")
-               for reserved in RESERVED_EVALUATION_PATHS):
-            raise ValueError(
-                "evaluation snapshot reserved metadata path collision: " + name
-            )
         if (Path(name).is_absolute() or not parts or
                 any(part in {"", ".", ".."} for part in parts) or
                 any(part in FORBIDDEN_PATH_PARTS for part in parts) or
                 Path(name).name in FORBIDDEN_BASENAMES or
                 (Path(name).name.startswith(".env.") and Path(name).name != ".env.example")):
-            raise ValueError("unsafe or sensitive file in evaluation snapshot: " + name)
+            raise ValueError("unsafe or sensitive file in evaluation source: " + name)
     return names, tracked, head_paths
+
+
+def _reject_sensitive_ignored_files(root: Path) -> None:
+    """Fail closed on ignored credentials, including nested paths.
+
+    Do NOT use --directory: Git otherwise collapses ignored parent directories
+    and hides e.g. private/.env when private/ is ignored.
+    This scan is defense in depth, not a native worker filesystem boundary.
+    """
+    ignored = _git_paths(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "-z",
+    )
+    for name in ignored:
+        parts = Path(name.rstrip("/")).parts
+        if (any(p in FORBIDDEN_PATH_PARTS - {"node_modules", "__pycache__"}
+                for p in parts) or
+                any(p in FORBIDDEN_BASENAMES or
+                    (p.startswith(".env.") and p != ".env.example")
+                    for p in parts)):
+            raise ValueError(
+                "evaluation root contains ignored sensitive path accessible "
+                "to native agent: " + name
+            )
 
 
 def _file_present(root: Path, relative: str) -> bool:
@@ -191,7 +177,7 @@ def _file_present(root: Path, relative: str) -> bool:
         except FileNotFoundError:
             return False
         if stat.S_ISLNK(mode):
-            raise ValueError("evaluation snapshot refuses symlink: " + relative)
+            raise ValueError("evaluation source refuses symlink: " + relative)
         if stat.S_ISDIR(mode):
             # A directory replacing an old tracked file is a deletion of
             # that file; any new children appear as untracked source files.
@@ -202,33 +188,36 @@ def _file_present(root: Path, relative: str) -> bool:
     return True
 
 
-def _read_file(root: Path, relative: str) -> tuple[bytes, int]:
-    # lstat every component to prevent symlinks in tracked/untracked paths.
+def _hash_file(root: Path, relative: str) -> tuple[str, int, int]:
+    """Stream a live file without copying it; detect concurrent in-place mutation."""
     path = root
     for component in Path(relative).parts:
         path = path / component
         if stat.S_ISLNK(path.lstat().st_mode):
-            raise ValueError("evaluation snapshot refuses symlink: " + relative)
+            raise ValueError("evaluation refuses symlink: " + relative)
     before = path.lstat()
-    if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_FILE_BYTES:
-        raise ValueError("unsafe or oversized evaluation file: " + relative)
-    # Open with O_NOFOLLOW where supported; compare inode/mtime after read.
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("evaluation source is not a regular file: " + relative)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError("evaluation file changed during snapshot: " + relative)
+            raise RuntimeError("evaluation file changed while opening: " + relative)
+        digest = hashlib.sha256()
+        size = 0
         with os.fdopen(fd, "rb", closefd=False) as handle:
-            data = handle.read(MAX_FILE_BYTES + 1)
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+                size += len(block)
         after = os.fstat(fd)
     finally:
         os.close(fd)
-    if (len(data) > MAX_FILE_BYTES or
-            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
-        raise RuntimeError("evaluation source changed or exceeded limit: " + relative)
-    return data, stat.S_IMODE(after.st_mode)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+        before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
+                              after.st_mtime_ns, after.st_ctime_ns) or size != after.st_size:
+        raise RuntimeError("evaluation source changed during inspection: " + relative)
+    return digest.hexdigest(), size, stat.S_IMODE(after.st_mode)
 
 
 def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
@@ -236,7 +225,6 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
     if not roots:
         raise ValueError("evaluation needs at least one repository")
     manifest: dict[str, Any] = {}
-    total = 0
     for name, root in sorted(roots.items()):
         if not root.is_dir() or root != root.resolve():
             raise ValueError("evaluation repository root must be canonical")
@@ -247,6 +235,7 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
             head = None
         entries = []
         deleted_paths = []
+        _reject_sensitive_ignored_files(root)
         names, tracked, head_paths = _files(root, head)
         for relative in names:
             if not _file_present(root, relative):
@@ -262,23 +251,19 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
                     # previous content. Classifying their absence as a
                     # deletion would allow fabricated deletion-only PASS.
                     raise ValueError(
-                        "evaluation snapshot refuses missing index-only path "
+                        "evaluation source refuses missing index-only path "
                         "without HEAD history: " + relative
                     )
                 deleted_paths.append(relative)
                 continue
             try:
-                data, mode = _read_file(root, relative)
+                sha256, size, mode = _hash_file(root, relative)
             except (FileNotFoundError, NotADirectoryError) as exc:
                 raise RuntimeError(
                     "evaluation file disappeared during snapshot: " + relative
                 ) from exc
-            total += len(data)
-            if total > MAX_TOTAL_BYTES:
-                raise ValueError("evaluation snapshot exceeds aggregate byte limit")
             entries.append({
-                "path": relative, "sha256": hashlib.sha256(data).hexdigest(),
-                "size": len(data), "mode": mode,
+                "path": relative, "sha256": sha256, "size": size, "mode": mode,
             })
         manifest[name] = {
             "root": str(root), "head": head,
@@ -292,81 +277,6 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
         manifest, ensure_ascii=False, sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
-
-
-class EvaluationSnapshot:
-    """Temporary copies of all TaskGraph repositories for one native evaluation."""
-
-    def __init__(self, roots: dict[str, Path]):
-        self.roots = roots
-        self._temp: Path | None = None
-        self._retained = False
-        self.paths: dict[str, Path] = {}
-        self.manifest: dict[str, Any] = {}
-        self.digest = ""
-    def __enter__(self) -> "EvaluationSnapshot":
-        first = inspect_roots(self.roots)
-        self._temp = Path(tempfile.mkdtemp(prefix="qiqi-final-eval-"))
-        try:
-            base = self._temp
-            for name, info in sorted(first.items()):
-                # Registered repository names may contain filesystem separators.
-                # Never derive a destination directory from untrusted names.
-                destination = base / ("repo-" + hashlib.sha256(
-                    name.encode("utf-8")).hexdigest()[:20])
-                destination.mkdir(mode=0o700)
-                root = self.roots[name]
-                for item in info["files"]:
-                    payload, mode = _read_file(root, item["path"])
-                    if hashlib.sha256(payload).hexdigest() != item["sha256"]:
-                        raise RuntimeError("source changed during snapshot materialization")
-                    target = destination / item["path"]
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with target.open("xb") as handle:
-                        handle.write(payload)
-                    # Preserve executable bits in this disposable working copy.
-                    # --add-dir is directory access, not a read-only mount.
-                    target.chmod(mode)
-                # Evaluator can look up hashes by repository-relative path
-                # without embedding thousands of file hashes in the prompt.
-                (destination / ".qiqi-evaluation-manifest.json").write_text(
-                    json.dumps({
-                        "repository": name, "head": info["head"],
-                        "files": info["files"],
-                        "deleted_paths": info["deleted_paths"],
-                    }, ensure_ascii=False, sort_keys=True),
-                    encoding="utf-8",
-                )
-                self.paths[name] = destination
-            second = inspect_roots(self.roots)
-            if first != second:
-                raise RuntimeError("evaluation source changed while capturing snapshot")
-            self.manifest = first
-            self.digest = manifest_digest(first)
-            return self
-        except BaseException:
-            self.__exit__(None, None, None)
-            raise
-
-    @property
-    def temporary_root(self) -> Path:
-        """Absolute location of this active snapshot, for crash recovery."""
-        if self._temp is None:
-            raise RuntimeError("evaluation snapshot is not active")
-        return self._temp
-
-    def retain(self) -> Path:
-        """Keep snapshot files when a native evaluator has not confirmed shutdown."""
-        if self._temp is None:
-            raise RuntimeError("evaluation snapshot is not active")
-        self._retained = True
-        return self._temp
-
-    def __exit__(self, *_args: Any) -> None:
-        if self._temp is not None and not self._retained:
-            cleanup_temporary_tree(self._temp)
-        self._temp = None
-        self.paths = {}
 
 
 def evidence_is_in_manifest(

@@ -4,8 +4,7 @@ import subprocess
 
 import pytest
 
-from qiqi_delegate.final_eval_snapshot import (
-    EvaluationSnapshot, inspect_roots,
+from qiqi_delegate.final_eval_manifest import (inspect_roots,
 )
 from test_final_evaluation import setup_graph
 
@@ -48,16 +47,15 @@ def test_manual_skip_worktree_absence_is_not_a_deletion(tmp_path):
     with pytest.raises(ValueError, match="skip-worktree"):
         inspect_roots({"backend": backend})
     with pytest.raises(ValueError, match="skip-worktree"):
-        with EvaluationSnapshot({"backend": backend}):
-            pass
+        inspect_roots({"backend": backend})
 
     # Once the skip-worktree marker is removed, the same tracked absence
     # means an actual unstaged deletion and must remain eligible evidence.
     git(backend, "update-index", "--no-skip-worktree", "--",
         "excluded/missing.py")
-    with EvaluationSnapshot({"backend": backend}) as snapshot:
-        assert "excluded/missing.py" in snapshot.manifest["backend"]["deleted_paths"]
-        assert not (snapshot.paths["backend"] / "excluded/missing.py").exists()
+    with __import__("contextlib").nullcontext(inspect_roots({"backend": backend})) as manifest:
+        assert "excluded/missing.py" in manifest["backend"]["deleted_paths"]
+        assert not (backend / "excluded/missing.py").exists()
 
 
 @pytest.mark.parametrize("sparse_index", [False, True])
@@ -81,8 +79,7 @@ def test_real_sparse_checkout_cannot_issue_tombstones_for_excluded_paths(
     with pytest.raises(ValueError, match="sparse checkout"):
         inspect_roots({"backend": backend})
     with pytest.raises(ValueError, match="sparse checkout"):
-        with EvaluationSnapshot({"backend": backend}):
-            pass
+        inspect_roots({"backend": backend})
 
 
 def test_sparse_checkout_fails_before_evaluator_reservation_or_dispatch(tmp_path, monkeypatch):

@@ -23,6 +23,7 @@ def _native_dispatch(runtime, coordinator, calls):
     return fake_delegate
 
 
+
 def test_finalized_a_then_finalized_b_then_revert_to_a_keeps_delivery(
     tmp_path, monkeypatch,
 ):
@@ -84,6 +85,7 @@ def test_finalized_a_then_finalized_b_then_revert_to_a_keeps_delivery(
     }
     assert len(calls) == 3
     assert coordinator.graph_status(gid)["delivery_status"] == "not_finalized"
+
 
 
 def test_a_b_a_revert_matches_only_identical_task_request_binding(

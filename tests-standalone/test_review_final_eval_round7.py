@@ -12,6 +12,7 @@ from qiqi_delegate.maintenance import (
 from test_final_evaluation import setup_graph, report
 
 
+
 @pytest.mark.parametrize("close_unconfirmed", [False, True])
 def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     tmp_path, monkeypatch, close_unconfirmed,
@@ -29,6 +30,12 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
 
     async def workspace(*args, **_kwargs):
         observed["cwd"] = args[3]
+        context_file = __import__("pathlib").Path(args[3]) / "context" / "context.json"
+        assert context_file.exists()
+        context = json.loads(context_file.read_text(encoding="utf-8"))
+        assert context["original_user_request"] == "Display prices correctly end to end"
+        assert set(context["repository_scope"]) == {"backend", "frontend"}
+        assert len(context["node_evidence"]) == 2
         assert args[:3] == ("workspace", "create", "--cwd")
         return {"workspace": {"workspace_id": "preserved-native-workspace"},
                 "root_pane": {"pane_id": "evaluation-pane"}}
@@ -74,6 +81,7 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
         assert entry["status"] == "passed"
         assert entry["cleanup"] is None
         assert show_claim(workspace=runtime.root, repository="backend")["claim_id"] is None
+        assert show_claim(workspace=runtime.root, repository="frontend")["claim_id"] is None
         assert coordinator.finalize(gid, eid, revision)["finalized_at_ns"]
         return
 
@@ -82,18 +90,20 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     assert entry["status"] == "interrupted"
     assert entry["report"] is None
     assert entry["finalized_at_ns"] is None
-    assert "worker termination" in entry["detail"]
+    assert "verify termination" in entry["detail"]
     cleanup = entry["cleanup"]
     assert cleanup["cleanup_state"] == "workspace_close_unconfirmed"
     assert cleanup["workspace_id"] == "preserved-native-workspace"
     assert cleanup["write_claim_id"] == "turn:" + entry["turn_id"]
     assert cleanup["write_claim_repository"] == "backend"
+    assert set(json.loads(cleanup["write_claim_repositories"])) == {
+        "backend", "frontend",
+    }
     assert cleanup["recovery_action"] == "Verify worker has stopped; then release claim"
     from pathlib import Path
     retained_sink = Path(cleanup["capture_sink"])
-    retained_snapshot = Path(cleanup["snapshot_root"])
     retained_cwd = Path(cleanup["evaluator_cwd"])
-    assert retained_sink.is_dir() and retained_snapshot.is_dir()
+    assert retained_sink.is_dir()
     assert retained_cwd.is_dir()
     assert coordinator.graph_status(gid)["final_evaluation_status"] == "interrupted"
     assert coordinator.graph_status(gid)["delivery_status"] == "not_finalized"
@@ -123,6 +133,16 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
         claim_id=reloaded["cleanup"]["write_claim_id"],
         worker_termination_confirmed=True,
     )["released"]
+    with pytest.raises(RuntimeError, match="every|ALL"):
+        recover_final_evaluation(
+            workspace=runtime.root, evaluation_id=eid,
+            worker_termination_confirmed=True,
+        )
+    assert release_stale_claim(
+        workspace=runtime.root, repository="frontend",
+        claim_id=cleanup["write_claim_id"],
+        worker_termination_confirmed=True,
+    )["released"]
     with pytest.raises(RuntimeError, match="operator"):
         asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
     recovered = recover_final_evaluation(
@@ -131,7 +151,7 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     )
     assert recovered["status"] == "errored"
     assert recovered["cleanup"] == entry["cleanup"]  # retained for audit
-    assert not retained_sink.exists() and not retained_snapshot.exists()
+    assert not retained_sink.exists()
     assert not retained_cwd.exists()
     assert Path(observed["cwd"]).parent.parent.is_dir()
     assert recovered["finalized_at_ns"] is None
@@ -160,11 +180,12 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     assert retried["evaluation_id"] != eid
 
 
+
 def test_crash_with_captured_pass_and_held_claim_never_auto_recovers_pass(tmp_path):
     """If process crashes between native capture and cleanup, held claim blocks PASS."""
     runtime, requests, graph_runtime, coordinator, gid = setup_graph(tmp_path)
     binding = requests.graph_binding(gid)
-    manifest = __import__("qiqi_delegate.final_eval_snapshot", fromlist=["inspect_roots"])
+    manifest = __import__("qiqi_delegate.final_eval_manifest", fromlist=["inspect_roots"])
     content = manifest.inspect_roots(runtime.repos())
     eid_row, created = coordinator.store.reserve(
         gid, graph_runtime.get_graph(gid)["revision"],
@@ -199,6 +220,7 @@ def test_crash_with_captured_pass_and_held_claim_never_auto_recovers_pass(tmp_pa
     assert restarted.recover_abandoned() == 0
     with pytest.raises((RuntimeError, ValueError), match="PASS"):
         coordinator.finalize(gid, eid, graph_runtime.get_graph(gid)["revision"])
+
 
 
 def test_legacy_store_schema_adds_cleanup_column_without_losing_attempts(tmp_path):

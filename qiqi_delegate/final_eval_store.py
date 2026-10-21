@@ -13,9 +13,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from qiqi_delegate.final_eval_snapshot import evidence_is_in_manifest
+from qiqi_delegate.final_eval_manifest import evidence_is_in_manifest
 from qiqi_delegate.task_request import _owner_alive, _process_start_token
 
+POLICY_VERSION = 2
 ACTIVE = ("requested", "evaluating")
 FINISHED = ("passed", "failed", "inconclusive", "errored", "interrupted")
 
@@ -44,7 +45,8 @@ class FinalEvaluationStore:
                     owner_start_token TEXT,
                     created_at_ns INTEGER NOT NULL,
                     updated_at_ns INTEGER NOT NULL,
-                    finalized_at_ns INTEGER
+                    finalized_at_ns INTEGER,
+                    policy_version INTEGER NOT NULL DEFAULT 1
                 );
                 CREATE INDEX IF NOT EXISTS final_evaluations_run_idx
                     ON final_evaluations(graph_run_id, created_at_ns);
@@ -58,6 +60,11 @@ class FinalEvaluationStore:
                     "PRAGMA table_info(final_evaluations)"
                 )
             }
+            if "policy_version" not in columns:
+                db.execute(
+                    "ALTER TABLE final_evaluations "
+                    "ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1"
+                )
             if "owner_start_token" not in columns:
                 db.execute(
                     "ALTER TABLE final_evaluations ADD COLUMN owner_start_token TEXT"
@@ -134,11 +141,18 @@ class FinalEvaluationStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT status FROM final_evaluations WHERE evaluation_id=?",
+                "SELECT status, turn_id FROM final_evaluations WHERE evaluation_id=?",
                 (evaluation_id,),
             ).fetchone()
             if row is None or row["status"] != "interrupted":
                 raise ValueError("only an interrupted evaluation can be released")
+            if row["turn_id"] and db.execute(
+                "SELECT 1 FROM write_claims WHERE claim_id=? LIMIT 1",
+                ("turn:" + row["turn_id"],),
+            ).fetchone():
+                raise RuntimeError(
+                    "release ALL evaluator Git-root claims after worker termination"
+                )
             db.execute("""
                 CREATE TABLE IF NOT EXISTS final_evaluation_recovery_audit (
                     evaluation_id TEXT NOT NULL,
@@ -211,7 +225,7 @@ class FinalEvaluationStore:
     ) -> dict[str, Any] | None:
         """Select a finalized PASS for the exact current delivery identity.
 
-        A graph can have several historical finalized product snapshots. The
+        A graph can have several historical finalized product source states. The
         newest is not necessarily current after a worktree revert (A→B→A).
         Match the same full identity used by reserve() before projecting
         delivery, rather than selecting by finalized timestamp alone.
@@ -222,7 +236,7 @@ class FinalEvaluationStore:
                 "WHERE graph_run_id=? AND status='passed' "
                 "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
                 "AND request_id=? AND request_revision=? "
-                "AND manifest_digest=? "
+                "AND manifest_digest=? AND policy_version=2 "
                 "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
                 (graph_run_id, graph_revision, request_id,
                  request_revision, digest),
@@ -233,7 +247,6 @@ class FinalEvaluationStore:
         self, graph_run_id: str, graph_revision: int, request_id: str,
         request_revision: int, route: str,
         manifest: dict[str, Any], digest: str,
-        *, snapshot_root: Path | None = None,
     ) -> tuple[dict[str, Any], bool]:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -263,7 +276,7 @@ class FinalEvaluationStore:
                 "WHERE graph_run_id=? AND status='passed' "
                 "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
                 "AND request_id=? AND request_revision=? "
-                "AND manifest_digest=? "
+                "AND manifest_digest=? AND policy_version=2 "
                 "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
                 (graph_run_id, graph_revision, request_id,
                  request_revision, digest),
@@ -292,7 +305,8 @@ class FinalEvaluationStore:
                 "LIMIT 1", (graph_run_id,),
             ).fetchone()
             if existing is not None:
-                if (existing["graph_revision"] != graph_revision or
+                if (existing["policy_version"] != POLICY_VERSION or
+                        existing["graph_revision"] != graph_revision or
                         existing["manifest_digest"] != digest or
                         existing["request_revision"] != request_revision):
                     raise RuntimeError(
@@ -307,14 +321,12 @@ class FinalEvaluationStore:
                     "INSERT INTO final_evaluations "
                     "(evaluation_id,graph_run_id,graph_revision,request_id,"
                     "request_revision,route,manifest_json,manifest_digest,"
-                    "status,cleanup_json,owner_pid,owner_start_token,"
+                    "policy_version,status,cleanup_json,owner_pid,owner_start_token,"
                     "created_at_ns,updated_at_ns) "
-                    "VALUES (?,?,?,?,?,?,?,?,'requested',?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,2,'requested',?,?,?,?,?)",
                     (return_id, graph_run_id, graph_revision, request_id,
                      request_revision, route, json.dumps(manifest, sort_keys=True),
-                     digest, json.dumps(
-                         {"snapshot_root": str(snapshot_root)}, sort_keys=True
-                     ) if snapshot_root is not None else None,
+                     digest, None,
                      os.getpid(), _process_start_token(os.getpid()), now, now),
                 )
                 created = True
@@ -483,15 +495,16 @@ class FinalEvaluationStore:
                 # evidence from two or more distinct repositories. Merely
                 # covering them in separate single-module checks is not an
                 # independent cross-module verification.
-                any(
-                    len({e["repository"] for e in check["evidence"]}) < 2
+                # Same-root module contract checks are valid alongside
+                # cross-root checks; they do NOT count toward cross-root coverage.
+                not any(
+                    len({e["repository"] for e in check["evidence"]}) >= 2
                     for check in checks
                 ) or
-                # Multiple cross-repo checks are allowed, but collectively
-                # they must cover every repository in the TaskGraph.
                 set(manifest) - {
                     e["repository"]
                     for check in checks
+                    if len({e["repository"] for e in check["evidence"]}) >= 2
                     for e in check["evidence"]
                 }
             )) or
@@ -674,7 +687,8 @@ class FinalEvaluationStore:
                 "SELECT revision FROM task_requests WHERE request_id=?",
                 (entry["request_id"],),
             ).fetchone()
-            if (entry["status"] != "passed" or entry["finalized_at_ns"] is not None
+            if (entry["policy_version"] != POLICY_VERSION or
+                    entry["status"] != "passed" or entry["finalized_at_ns"] is not None
                     or entry["graph_revision"] != graph_revision
                     or entry["request_revision"] != request_revision
                     or entry["manifest_digest"] != manifest_digest

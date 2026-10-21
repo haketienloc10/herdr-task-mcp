@@ -4,8 +4,7 @@ import subprocess
 
 import pytest
 
-from qiqi_delegate.final_eval_snapshot import (
-    EvaluationSnapshot, evidence_is_in_manifest, inspect_roots,
+from qiqi_delegate.final_eval_manifest import (evidence_is_in_manifest, inspect_roots,
 )
 from test_final_evaluation import setup_graph
 
@@ -58,18 +57,17 @@ def test_absent_index_only_path_never_becomes_deletion_evidence(
     with pytest.raises(ValueError, match="missing index-only path"):
         inspect_roots({"backend": backend})
     with pytest.raises(ValueError, match="missing index-only path"):
-        with EvaluationSnapshot({"backend": backend}):
-            pass
+        inspect_roots({"backend": backend})
 
     # Once the new source exists again, its CURRENT bytes are valid evidence
     # and must never be misrepresented as a deletion tombstone.
     file.write_text("RESTORED_NEW_FILE = True\n", encoding="utf-8")
-    with EvaluationSnapshot({"backend": backend}) as snapshot:
-        row = snapshot.manifest["backend"]
+    with __import__("contextlib").nullcontext(inspect_roots({"backend": backend})) as manifest:
+        row = manifest["backend"]
         assert "phantom.py" not in row["deleted_paths"]
         assert "phantom.py" in {x["path"] for x in row["files"]}
         assert not evidence_is_in_manifest(
-            snapshot.manifest, "backend", "phantom.py", kind="deleted"
+            manifest, "backend", "phantom.py", kind="deleted"
         )
 
 
@@ -92,10 +90,10 @@ def test_genuine_head_deletion_still_produces_valid_tombstone(tmp_path, staged):
             backend, "ls-files", "--cached"
         )
 
-    with EvaluationSnapshot({"backend": backend}) as snapshot:
-        assert "legacy_feature.py" in snapshot.manifest["backend"]["deleted_paths"]
+    with __import__("contextlib").nullcontext(inspect_roots({"backend": backend})) as manifest:
+        assert "legacy_feature.py" in manifest["backend"]["deleted_paths"]
         assert evidence_is_in_manifest(
-            snapshot.manifest, "backend", "legacy_feature.py", kind="deleted"
+            manifest, "backend", "legacy_feature.py", kind="deleted"
         )
     # Keep existing multi-repo report and PASS verification unchanged.
     manifest = inspect_roots(runtime.repos())
