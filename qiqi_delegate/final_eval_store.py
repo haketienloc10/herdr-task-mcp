@@ -205,6 +205,38 @@ class FinalEvaluationStore:
             ).fetchone()
         return self.get(row["evaluation_id"]) if row else None
 
+    def finalized_candidates(
+        self, graph_run_id: str, graph_revision: int,
+        request_id: str, request_revision: int,
+    ) -> list[dict[str, Any]]:
+        """Historical delivered rows, including each original manifest mode.
+
+        The newest attempt can use a different source inspection mode from an
+        older finalized PASS. Avoid assuming the latest row's scan semantics
+        when checking A->B->A source reverts.
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT evaluation_id, manifest_json, manifest_digest "
+                "FROM final_evaluations "
+                "WHERE graph_run_id=? AND status='passed' "
+                "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
+                "AND request_id=? AND request_revision=? "
+                "ORDER BY finalized_at_ns DESC, rowid DESC",
+                (graph_run_id, graph_revision, request_id, request_revision),
+            ).fetchall()
+        return [
+            {
+                "evaluation_id": row["evaluation_id"],
+                "manifest": json.loads(row["manifest_json"]),
+                "manifest_digest": row["manifest_digest"],
+                "graph_revision": graph_revision,
+                "request_id": request_id,
+                "request_revision": request_revision,
+            }
+            for row in rows
+        ]
+
     def matching_finalized(
         self, graph_run_id: str, graph_revision: int,
         request_id: str, request_revision: int, digest: str,
