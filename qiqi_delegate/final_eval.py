@@ -649,27 +649,29 @@ class FinalEvaluationCoordinator:
                 row["effective_status"] = row["status"]
             for candidate in candidates:
                 if is_current(candidate):
-                    # A historical candidate may match a cached digest from
-                    # BEFORE an intervening scan in the other mode. Confirm
-                    # its exact mode again immediately before publishing.
-                    try:
-                        verified_digest = self._digest_for_row(roots, candidate)
-                    except (RuntimeError, ValueError, OSError, TimeoutError):
-                        continue
-                    if verified_digest != candidate["manifest_digest"]:
-                        # Stop: a cross-mode source mutation invalidates every
-                        # mode digest computed in this query.
-                        row["is_current"] = False
-                        row["effective_status"] = (
-                            "stale" if row["status"] == "passed"
-                            else row["status"]
-                        )
-                        break
                     finalized = self.store.get(candidate["evaluation_id"])
                     finalized["is_current"] = True
                     finalized["effective_status"] = finalized["status"]
                     row = finalized
                     break
+
+            # The latest row may have matched BEFORE a later cross-mode
+            # historical scan. A finalized candidate may likewise have
+            # matched a cached earlier scan. Revalidate whichever row will
+            # actually be returned, after ALL intervening scans. A mismatch
+            # or scan error must not surface a stale PASS as current, even
+            # when the selected row has not yet been finalized.
+            if row["is_current"]:
+                try:
+                    current_digest = self._digest_for_row(roots, row)
+                except (RuntimeError, ValueError, OSError, TimeoutError):
+                    current_digest = None
+                if current_digest != row["manifest_digest"]:
+                    row["is_current"] = False
+                    row["effective_status"] = (
+                        "stale" if row["status"] == "passed"
+                        else row["status"]
+                    )
         except (RuntimeError, ValueError, OSError, TimeoutError):
             pass
         return {
