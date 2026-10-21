@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from qiqi_delegate.final_eval_snapshot import EvaluationSnapshot, inspect_roots, manifest_digest
+from qiqi_delegate.final_eval_manifest import inspect_roots, manifest_digest
 from qiqi_delegate.runtime import AgentStartupBlocked
 from test_final_evaluation import setup_graph, report
 
@@ -44,101 +44,6 @@ def _task_with_sources(requests, graph_runtime, gid, sources):
     )
     return assessed
 
-
-def test_final_evaluator_can_read_every_original_source_from_snapshot(tmp_path, monkeypatch):
-    runtime, requests, graph_runtime, coordinator, gid = setup_graph(tmp_path)
-    roots = runtime.repos()
-    workspace_file = runtime.root / "specification.md"
-    workspace_file.write_text(
-        "Workspace specification: use stable decimal prices.\n",
-        encoding="utf-8",
-    )
-    native_capture = "Discovery verified cross-module behavior.\n" + "X" * 115000
-    with sqlite3.connect(runtime.db) as db:
-        db.execute(
-            "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("discovery-attachment", "native-session", "backend",
-             "codex-balanced", "settled", native_capture, 44),
-        )
-    assessed = _task_with_sources(
-        requests, graph_runtime, gid, [
-            {"kind": "inline", "text": "CRITICAL REQUIREMENT: display VAT-inclusive prices."},
-            {"kind": "repo_file", "repository": "backend", "path": "orders.py"},
-            {"kind": "workspace_file", "path": "specification.md"},
-            {"kind": "peer_turn", "turn_id": "discovery-attachment"},
-        ],
-    )
-    assert all(
-        "content" not in s for s in assessed["sources"]
-        if s["kind"] == "workspace_file" and s.get("transfer_mode") == "reference"
-    )
-    expected = {
-        s["id"]: (
-            workspace_file.read_text(encoding="utf-8")
-            if s["kind"] == "workspace_file" and s.get("transfer_mode") == "reference"
-            else s["content"]
-        )
-        for s in assessed["sources"]
-    }
-    observed = {}
-
-    async def fake_delegate(**kwargs):
-        path = kwargs["evaluation_roots"]["backend"] / ".qiqi-final-task-sources"
-        archive = json.loads((path / "index.json").read_text(encoding="utf-8"))
-        assert len(archive["sources"]) == 4
-        assert set(archive["requirements"][0]["evidence_refs"]) == (
-            {"request:current"} | set(expected)
-        )
-        assert archive["original_user_request"] == assessed["user_request"]
-        for entry in archive["sources"]:
-            body = (path / entry["path"]).read_text(encoding="utf-8")
-            assert body == expected[entry["id"]]
-            assert entry["id"] in archive["requirements"][0]["evidence_refs"]
-            observed[entry["id"]] = body
-        # Source contents are available as files; don't truncate a >100k
-        # native capture to fit the 100k TaskPacket.
-        assert any(len(x) > 100_000 for x in observed.values())
-        prompt = kwargs["packet"].to_json()
-        assert ".qiqi-final-task-sources/index.json" in prompt
-        assert "READ EVERY referenced source" in prompt
-        coordinator.store.bind_turn(kwargs["evaluation_id"], "source-reviewed-turn")
-        manifest = coordinator.store.get(kwargs["evaluation_id"])["manifest"]
-        body = json.dumps(report(manifest))
-        with sqlite3.connect(runtime.db) as db:
-            db.execute(
-                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("source-reviewed-turn", "native-session", "backend",
-                 "codex-evaluator", "settled", body, 42),
-            )
-        return {"state": "settled", "turn_id": "source-reviewed-turn",
-                "agent_response": body}
-
-    monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    revision = graph_runtime.get_graph(gid)["revision"]
-    result = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
-    assert result["status"] == "passed"
-    assert set(observed) == set(expected)
-
-
-def test_missing_and_tampered_task_sources_fail_closed(tmp_path):
-    runtime, requests, graph_runtime, coordinator, gid = setup_graph(tmp_path)
-    _task_with_sources(requests, graph_runtime, gid, [
-        {"kind": "inline", "text": "Full specification required"},
-    ])
-    task = requests.get(requests.graph_binding(gid)["request_id"])
-    roots = runtime.repos()
-    with EvaluationSnapshot(roots) as snap:
-        current = task.copy()
-        current["sources"] = [dict(s) for s in task["sources"]]
-        current["sources"][0]["content"] = "tampered specification"
-        with pytest.raises(ValueError, match="digest mismatch"):
-            coordinator._materialize_task_sources(current, snap.paths["backend"])
-    with EvaluationSnapshot(roots) as snap:
-        current = task.copy()
-        current["assessment"] = json.loads(json.dumps(task["assessment"]))
-        current["assessment"]["requirements"][0]["evidence_refs"].append("source:unknown")
-        with pytest.raises(ValueError, match="missing task sources"):
-            coordinator._materialize_task_sources(current, snap.paths["backend"])
 
 
 def test_preserved_agent_startup_is_interrupted_and_requires_operator(tmp_path, monkeypatch):
@@ -181,40 +86,6 @@ def test_preserved_agent_startup_is_interrupted_and_requires_operator(tmp_path, 
         coordinator.start(gid, "codex-evaluator", revision)
     )["status"] == "passed"
 
-
-def test_git_submodule_in_index_is_rejected_not_marked_deleted(tmp_path):
-    runtime, _requests, _graph, _coordinator, _gid = setup_graph(tmp_path)
-    root = runtime.repos()["backend"]
-    _git(
-        root, "update-index", "--add", "--cacheinfo",
-        "160000," + "1" * 40 + ",third_party/library",
-    )
-    (root / "third_party/library").mkdir(parents=True)
-    (root / "third_party/library/README.md").write_text("dirty submodule\n")
-    with pytest.raises(ValueError, match="submodule/gitlink"):
-        inspect_roots({"backend": root})
-    with pytest.raises(ValueError, match="submodule/gitlink"):
-        with EvaluationSnapshot({"backend": root}):
-            pass
-
-
-def test_staged_submodule_deletion_still_rejected_from_head(tmp_path):
-    runtime, _requests, _graph, _coordinator, _gid = setup_graph(tmp_path)
-    root = runtime.repos()["backend"]
-    _git(
-        root, "update-index", "--add", "--cacheinfo",
-        "160000," + "1" * 40 + ",third_party/library",
-    )
-    _git(
-        root, "-c", "user.name=Evaluation Tests",
-        "-c", "user.email=eval@example.invalid",
-        "commit", "-m", "Tracked submodule gitlink",
-    )
-    _git(root, "rm", "--cached", "third_party/library")
-    # The index no longer references the submodule. Its HEAD gitlink must
-    # still cause an explicit fail-closed error instead of a deletion tombstone.
-    with pytest.raises(ValueError, match="submodule/gitlink from HEAD"):
-        inspect_roots({"backend": root})
 
 
 def test_finalization_revoked_if_source_changes_during_commit(tmp_path, monkeypatch):

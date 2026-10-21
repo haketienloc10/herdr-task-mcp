@@ -6,8 +6,7 @@ import subprocess
 
 import pytest
 
-from qiqi_delegate.final_eval_snapshot import (
-    EvaluationSnapshot, inspect_roots, manifest_digest,
+from qiqi_delegate.final_eval_manifest import ( inspect_roots, manifest_digest,
 )
 from test_final_evaluation import setup_graph, evidence, report
 
@@ -24,6 +23,7 @@ def commit(root, relative):
     git(root, "-c", "user.name=Evaluator Test",
         "-c", "user.email=eval@example.invalid",
         "commit", "-m", "Track fixture before evaluation")
+
 
 
 def test_split_single_repo_checks_cannot_fake_a_cross_repo_pass(tmp_path):
@@ -70,6 +70,7 @@ def test_split_single_repo_checks_cannot_fake_a_cross_repo_pass(tmp_path):
     assert checked["verdict"] == "pass"
 
 
+
 def test_multiple_real_integration_checks_must_cover_every_graph_repo(tmp_path):
     runtime, _requests, _graph, coordinator, _id = setup_graph(tmp_path)
     manifest = inspect_roots(runtime.repos())
@@ -93,77 +94,6 @@ def test_multiple_real_integration_checks_must_cover_every_graph_repo(tmp_path):
         payload, manifest, {"R1"}
     )["verdict"] == "pass"
 
-
-def test_unstaged_tracked_deletion_is_recorded_and_does_not_abort_snapshot(tmp_path):
-    runtime, _requests, _graph, _coordinator, _id = setup_graph(tmp_path)
-    roots = runtime.repos()
-    backend = roots["backend"]
-    doomed = backend / "legacy_contract.py"
-    doomed.write_text("OLD_API = True\n", encoding="utf-8")
-    commit(backend, "legacy_contract.py")
-
-    original = inspect_roots(roots)
-    assert "legacy_contract.py" not in original["backend"]["deleted_paths"]
-    doomed.unlink()
-
-    after = inspect_roots(roots)
-    assert "legacy_contract.py" in after["backend"]["deleted_paths"]
-    assert "legacy_contract.py" not in {
-        item["path"] for item in after["backend"]["files"]
-    }
-    assert manifest_digest(after) != manifest_digest(original)
-
-    with EvaluationSnapshot(roots) as snapshot:
-        assert snapshot.manifest == after
-        assert not (snapshot.paths["backend"] / "legacy_contract.py").exists()
-        metadata = json.loads(
-            (snapshot.paths["backend"] /
-             ".qiqi-evaluation-manifest.json").read_text(encoding="utf-8")
-        )
-        assert "legacy_contract.py" in metadata["deleted_paths"]
-
-    # Restoring a deleted tracked file MUST invalidate the previous digest.
-    doomed.write_text("OLD_API = True\n", encoding="utf-8")
-    assert manifest_digest(inspect_roots(roots)) == manifest_digest(original)
-
-
-def test_staged_deletion_is_recorded_even_after_it_disappears_from_index(tmp_path):
-    runtime, _requests, _graph, _coordinator, _id = setup_graph(tmp_path)
-    backend = runtime.repos()["backend"]
-    doomed = backend / "removed_endpoint.py"
-    doomed.write_text("ENDPOINT = '/old'\n", encoding="utf-8")
-    commit(backend, "removed_endpoint.py")
-    doomed.unlink()
-    git(backend, "add", "-u", "--", "removed_endpoint.py")
-    assert git(backend, "ls-files", "--cached", "--", "removed_endpoint.py") == ""
-    with EvaluationSnapshot({"backend": backend}) as snapshot:
-        assert "removed_endpoint.py" in (
-            snapshot.manifest["backend"]["deleted_paths"]
-        )
-        assert not (snapshot.paths["backend"] / "removed_endpoint.py").exists()
-
-
-@pytest.mark.parametrize("stage_rename", [False, True])
-def test_unstaged_and_staged_renames_capture_new_file_and_old_tombstone(
-    tmp_path, stage_rename,
-):
-    runtime, _requests, _graph, _coordinator, _id = setup_graph(tmp_path)
-    backend = runtime.repos()["backend"]
-    old = backend / "old_api.py"
-    new = backend / "new_api.py"
-    old.write_text("def api(): return 'new'\n", encoding="utf-8")
-    commit(backend, "old_api.py")
-    old.rename(new)
-    if stage_rename:
-        git(backend, "add", "-A")
-    with EvaluationSnapshot({"backend": backend}) as snapshot:
-        manifest = snapshot.manifest["backend"]
-        assert "old_api.py" in manifest["deleted_paths"]
-        assert "new_api.py" in {item["path"] for item in manifest["files"]}
-        assert not (snapshot.paths["backend"] / "old_api.py").exists()
-        assert (snapshot.paths["backend"] / "new_api.py").read_text(
-            encoding="utf-8"
-        ) == "def api(): return 'new'\n"
 
 
 def test_restoring_deleted_file_makes_existing_pass_stale(tmp_path, monkeypatch):

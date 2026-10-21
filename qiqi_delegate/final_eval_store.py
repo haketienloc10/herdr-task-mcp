@@ -495,15 +495,16 @@ class FinalEvaluationStore:
                 # evidence from two or more distinct repositories. Merely
                 # covering them in separate single-module checks is not an
                 # independent cross-module verification.
-                any(
-                    len({e["repository"] for e in check["evidence"]}) < 2
+                # Same-root module contract checks are valid alongside
+                # cross-root checks; they do NOT count toward cross-root coverage.
+                not any(
+                    len({e["repository"] for e in check["evidence"]}) >= 2
                     for check in checks
                 ) or
-                # Multiple cross-repo checks are allowed, but collectively
-                # they must cover every repository in the TaskGraph.
                 set(manifest) - {
                     e["repository"]
                     for check in checks
+                    if len({e["repository"] for e in check["evidence"]}) >= 2
                     for e in check["evidence"]
                 }
             )) or

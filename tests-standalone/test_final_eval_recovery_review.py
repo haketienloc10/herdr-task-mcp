@@ -61,7 +61,7 @@ def test_lost_herdr_create_response_preserves_discoverable_label(
     assert cleanup["workspace_id"] == ""
     assert cleanup["evaluator_cwd"] == str(seen["cwd"])
     assert Path(cleanup["capture_sink"]).is_dir()
-    assert Path(cleanup["snapshot_root"]).is_dir()
+    assert "snapshot_root" not in cleanup
     assert (trust / "runs" / ".qiqi-active").is_file()
 
     # In production, operator inspects 'herdr workspace list', matches the
@@ -75,7 +75,7 @@ def test_lost_herdr_create_response_preserves_discoverable_label(
     assert not (trust / "runs" / ".qiqi-active").exists()
 
 
-def test_local_cleanup_failure_keeps_snapshot_sink_and_lease(
+def test_local_cleanup_failure_keeps_context_sink_and_lease(
     tmp_path, monkeypatch,
 ):
     import qiqi_delegate.runtime as runtime_module
@@ -113,7 +113,7 @@ def test_local_cleanup_failure_keeps_snapshot_sink_and_lease(
     assert cleanup["workspace_label"].startswith("qiqi:evaluator:")
     assert cleanup["evaluator_cwd"] == str(observed["cwd"])
     assert Path(cleanup["capture_sink"]).is_dir()
-    assert Path(cleanup["snapshot_root"]).is_dir()
+    assert "snapshot_root" not in cleanup
     assert observed["cwd"].is_dir()
     assert (trust / "runs" / ".qiqi-active").exists()
 
@@ -124,6 +124,6 @@ def test_local_cleanup_failure_keeps_snapshot_sink_and_lease(
     )
     assert recovered["status"] == "errored"
     assert not Path(cleanup["capture_sink"]).exists()
-    assert not Path(cleanup["snapshot_root"]).exists()
+    assert "snapshot_root" not in cleanup
     assert not observed["cwd"].exists()
     assert not (trust / "runs" / ".qiqi-active").exists()

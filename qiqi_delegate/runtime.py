@@ -26,16 +26,19 @@ from qiqi_delegate.core import (
 )
 
 def cleanup_temporary_tree(root: Path) -> None:
-    """Delete only a runtime-owned temporary directory."""
+    """Clean only QiQi-owned temporary trees, including read-only evidence files."""
     def retry(func, name, _error):
         target = Path(name)
         if target != root and root not in target.parents:
             raise RuntimeError("cleanup outside evaluator runtime directory")
+        parent = target.parent
+        if parent == root or root in parent.parents:
+            if parent.is_dir() and not parent.is_symlink():
+                parent.chmod(0o700)
         if not target.is_symlink() and target.exists():
             target.chmod(0o700 if target.is_dir() else 0o600)
         func(name)
     shutil.rmtree(root, onerror=retry)
-
 
 # Final Evaluation must start a foreground interactive CLI. For the evaluator
 # only, parse supported OPTION arities instead of treating every token as a
