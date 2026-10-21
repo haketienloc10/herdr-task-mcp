@@ -1260,11 +1260,31 @@ class DelegateRuntime:
                         # This remains inside the existing per-turn neutral CWD.
                         evaluation_archive(evaluator_cwd)
                         manifest_file = evaluator_cwd / ".qiqi-evaluation-manifests.json"
-                        manifest_file.write_text(json.dumps(
-                            {"repositories": evaluation_manifest},
-                            sort_keys=True, ensure_ascii=False,
-                        ), encoding="utf-8")
-                        manifest_file.chmod(0o400)
+
+                        def write_manifest() -> None:
+                            # Multi-root JSON can be several MiB. Both encoding
+                            # and disk writes belong off the MCP event loop.
+                            manifest_file.write_text(json.dumps(
+                                {"repositories": evaluation_manifest},
+                                sort_keys=True, ensure_ascii=False,
+                            ), encoding="utf-8")
+                            manifest_file.chmod(0o400)
+
+                        task = asyncio.create_task(
+                            asyncio.to_thread(write_manifest)
+                        )
+                        cancelled = False
+                        # If cancelled while the file is being written, finish
+                        # the exact write before the outer finally can delete
+                        # the per-turn CWD and release its native lease.
+                        while not task.done():
+                            try:
+                                await asyncio.shield(task)
+                            except asyncio.CancelledError:
+                                cancelled = True
+                        task.result()
+                        if cancelled:
+                            raise asyncio.CancelledError()
                 await self._ensure_herdr_server()
                 label = (workspace_label if evaluation_id is not None else
                          f"qiqi:{repository}:{turn_id[:8]}")
