@@ -9,6 +9,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import signal
 import shutil
 import stat
 import subprocess
@@ -434,6 +435,59 @@ def _live_scan_worker(roots: dict[str, Path], sink: Any) -> None:
         sink.close()
 
 
+def _isolated_live_scan_worker(
+    roots: dict[str, Path], sink: Any, worker: Any,
+) -> None:
+    """Create a scanner-owned POSIX session before it can launch git."""
+    if os.name == "posix":
+        os.setsid()
+    (worker or _live_scan_worker)(roots, sink)
+
+
+def _stop_scanner_tree(process: Any) -> None:
+    """Terminate Git descendants together with their scanner supervisor.
+
+    POSIX: each scanner is its own process group. Windows: taskkill /T /F
+    terminates the full descendant tree using its parent PID.
+    """
+    if process.pid is None:
+        return
+    if os.name == "posix":
+        try:
+            if os.getpgid(process.pid) == process.pid:
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()  # worker exited before setsid()
+        except ProcessLookupError:
+            return
+        except OSError:
+            process.terminate()
+        process.join(timeout=0.8)
+        try:
+            # Descendants may outlive the supervising scanner. Kill the whole
+            # original group even if the parent has already exited.
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if process.is_alive():
+                process.kill()
+    else:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=3, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if process.is_alive():
+                process.terminate()
+    process.join(timeout=1)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=1)
+
+
 def scan_live_roots_bounded(
     roots: dict[str, Path], *, cancel_event: Any = None,
     timeout: float = 65, _worker: Any = None,
@@ -449,8 +503,9 @@ def scan_live_roots_bounded(
     ctx = multiprocessing.get_context("spawn")
     reader, writer = ctx.Pipe(duplex=False)
     process = ctx.Process(
-        target=_worker or _live_scan_worker, args=(roots, writer),
+        target=_isolated_live_scan_worker, args=(roots, writer, _worker),
     )
+    succeeded = False
     try:
         process.start()
         writer.close()
@@ -467,6 +522,7 @@ def scan_live_roots_bounded(
                 except EOFError as exc:
                     raise RuntimeError("live evaluation scanner exited without result") from exc
                 if result[0] == "ok":
+                    succeeded = True
                     return result[1], result[2]
                 kind, detail = result[1], result[2]
                 if kind == "TimeoutError":
@@ -485,12 +541,10 @@ def scan_live_roots_bounded(
         reader.close()
         writer.close()
         if process.pid is not None:
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=1)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=1)
+            if succeeded:
+                process.join(timeout=0.2)
+            if process.is_alive() or not succeeded:
+                _stop_scanner_tree(process)
             else:
                 process.join(timeout=0.2)
 
