@@ -10,7 +10,7 @@ import pytest
 from qiqi_delegate.final_eval_snapshot import (
     EvaluationSnapshot, scan_live_roots_bounded, stage_task_archive_bounded,
 )
-from test_final_evaluation import report, setup_graph
+from test_final_evaluation import setup_graph
 from test_live_final_evaluation import _fake_native
 
 
@@ -96,13 +96,19 @@ def test_historical_pass_is_rechecked_after_intervening_mode_scan(
             "codex-evaluator", snapshot.manifest, snapshot.digest,
         )
         assert created
+        # This regression tests status *selection*, not native capture
+        # authorization. Seed a historical finalized row directly because
+        # production's PASS transition requires a real persisted Herdr turn.
         coordinator.store.complete(
-            old["evaluation_id"], raw_response="pass",
-            report=report(snapshot.manifest), status="passed",
+            old["evaluation_id"], raw_response=None, report=None,
+            status="errored", detail="synthetic historical delivery",
         )
-        coordinator.store.finalize(
-            old["evaluation_id"], revision, task["revision"], snapshot.digest,
-        )
+        with coordinator.store._connect() as db:
+            db.execute(
+                "UPDATE final_evaluations SET status='passed', "
+                "finalized_at_ns=? WHERE evaluation_id=?",
+                (time.time_ns(), old["evaluation_id"]),
+            )
 
     # Historical live PASS of state B.
     source.write_bytes(state_a + b"\n# state B\n")
