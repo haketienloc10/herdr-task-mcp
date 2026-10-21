@@ -122,7 +122,7 @@ có thể làm tăng thời gian và chi phí mà không giúp việc đơn gi�
 **Không cần route `claude-evaluator` riêng**: sau khi TaskGraph hoàn tất,
 gọi `start_final_evaluation` với `claude-high`, hoặc `claude-xhigh`
 nếu cần đánh giá phức tạp. Vai trò Final Evaluator được quyết định bằng API
-và snapshot, không phải tên route. MCP không ép chính xác một profile
+và TaskGraph context, không phải tên route. MCP không ép chính xác một profile
 CLI nào: model, effort và permission do YAML quyết định. Nhưng evaluator
 Claude **luôn bỏ project/local settings, .mcp.json** bằng
 `--setting-sources user`, `--strict-mcp-config`, và chặn MCP/skills.
@@ -180,14 +180,14 @@ do route YAML lựa chọn. `workspace_info().route_details.model` nhận
 diện cả `--model` và native alias `-m` (bao gồm `-mVALUE`).
 Route Peer thông thường không bị giới hạn bởi bộ kiểm tra này.
 
-Lưu ý: `--add-dir` cung cấp quyền truy cập thư mục, không áp đặt
-filesystem chỉ đọc. Phiên Final Evaluator dùng bản sao tạm của toàn bộ
-repository cần đánh giá, không sửa trực tiếp các repo khi thao tác trên
-bản sao đó. Với route permissive, native agent/tools vẫn có thể có side
-effects ngoài bản sao: chỉ chạy workflow này trong môi trường đáng tin
-cậy. PR này **không triển khai sandbox, inotify hoặc kiểm chứng tính bất
-biến của snapshot trước tác nhân đối kháng**; hardening như vậy nằm
-ngoài phạm vi và được theo dõi riêng tại Issue #20.
+Lưu ý: `--add-dir` cung cấp quyền truy cập Git root trực tiếp,
+không áp đặt filesystem chỉ đọc. Final Evaluator không tạo repository copy.
+Prompt cấm thay đổi source, nhưng route permissive vẫn có thể cho phép
+native agent thực hiện side effects. Multi-root claims ngăn Peer hợp tác
+ghi vào các Git root trong lúc review; external writers không bị chặn.
+Manifest SHA256 kiểm tra thay đổi trước/sau, không bảo đảm bất biến tại
+mọi thời điểm. Cần OS sandbox hoặc immutable filesystem view nếu review
+code không đáng tin cậy.
 
 Runtime sở hữu native Stop/StopFailure hooks; không thêm `--settings` hoặc
 `hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)

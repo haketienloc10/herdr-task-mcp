@@ -342,6 +342,19 @@ def recover_final_evaluation(
         previous = store.inspect_interrupted(evaluation_id)
         if previous["status"] != "interrupted":
             raise ValueError("only an interrupted evaluation can be released")
+        # Hold the evaluator lease until every root claim is released.
+        turn_id = previous.get("turn_id")
+        if turn_id:
+            with runtime._connect() as db:
+                held = db.execute(
+                    "SELECT repository FROM write_claims WHERE claim_id=?",
+                    ("turn:" + turn_id,),
+                ).fetchall()
+            if held:
+                raise RuntimeError(
+                    "release ALL evaluator Git-root claims after worker termination: "
+                    + ", ".join(row["repository"] for row in held)
+                )
         _cleanup_retained_evaluation_paths(
             previous.get("cleanup"), guard_held=True,
         )

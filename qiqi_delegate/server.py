@@ -1195,7 +1195,7 @@ async def rebind_graph(
 async def start_final_evaluation(
     graph_run_id: str, route: str, expected_revision: int,
 ) -> dict[str, Any]:
-    """One fresh, configurable Codex/Claude Evaluator over TaskGraph snapshots.
+    """One fresh Codex/Claude Evaluator over all live TaskGraph Git roots.
 
     Evaluator CLI policy comes from agent-routing.yaml. A permissive CLI
     is not a read-only sandbox; original Git roots are never evaluator cwd.

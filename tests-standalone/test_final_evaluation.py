@@ -439,11 +439,38 @@ def test_duplicate_active_evaluation_does_not_dispatch_again(tmp_path, monkeypat
 
 
 
+@pytest.mark.parametrize("adapter,args", [
+    ("codex", ["--yolo"]),
+    ("claude", ["--permission-mode", "plan"]),
+    ("claude", ["--model", "claude-sonnet-5-5", "--effort", "xhigh",
+                "--permission-mode", "auto"]),
+    ("claude", ["--dangerously-skip-permissions"]),
+    ("claude", ["--strict-mcp-config", "--tools", "Read,Glob,Grep"]),
+    ("codex", ["--yolo"]),
+])
 def test_evaluator_route_profiles_accept_user_cli_args(adapter, args):
     # Compatibility function no longer mandates exact evaluator permissions.
     validate_evaluator_route(adapter, args)
 
 
+@pytest.mark.parametrize("args, expected", [
+    (["--system-prompt-file", "./rules.txt"],
+     ["--system-prompt-file", "rules.txt"]),
+    (["--append-system-prompt-file=./extra.txt"],
+     ["--append-system-prompt-file=extra.txt"]),
+    (["--system-prompt-file", "../shared/guide.txt",
+      "--append-system-prompt-file", "./extra.txt"],
+     ["--system-prompt-file", "../shared/guide.txt",
+      "--append-system-prompt-file", "extra.txt"]),
+    (["--add-dir", "./reference-a", "../reference-b", "--model", "sonnet"],
+     ["--add-dir", "reference-a", "../reference-b", "--model", "sonnet"]),
+    (["--add-dir=./reference-a", "./reference-b", "--effort", "high"],
+     ["--add-dir=reference-a", "reference-b", "--effort", "high"]),
+    (["--plugin-dir", "./plugins", "--plugin-dir=./plugin.zip"],
+     ["--plugin-dir", "plugins", "--plugin-dir=./plugin.zip"]),
+    (["--debug-file", "./logs/debug.log", "--debug-file=../trace.log"],
+     ["--debug-file", "logs/debug.log", "--debug-file=../trace.log"]),
+])
 def test_claude_evaluator_rebases_path_operands_against_routing_workspace(
     tmp_path, args, expected,
 ):

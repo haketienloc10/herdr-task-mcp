@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from test_final_evaluation import setup_graph
-from qiqi_delegate.maintenance import recover_final_evaluation
+from qiqi_delegate.maintenance import recover_final_evaluation, release_stale_claim
 
 
 def _mock_native(monkeypatch, runtime, *, workspace_create, start=None):
@@ -66,6 +66,13 @@ def test_lost_herdr_create_response_preserves_discoverable_label(
 
     # In production, operator inspects 'herdr workspace list', matches the
     # exact label and cwd, closes the workspace if present, and verifies exit.
+    # Native workspace is now stopped; release every held Git root explicitly.
+    for name in ("backend", "frontend"):
+        assert release_stale_claim(
+            workspace=runtime.root, repository=name,
+            claim_id=cleanup["write_claim_id"],
+            worker_termination_confirmed=True,
+        )["released"]
     row = recover_final_evaluation(
         workspace=runtime.root, evaluation_id=row["evaluation_id"],
         worker_termination_confirmed=True,

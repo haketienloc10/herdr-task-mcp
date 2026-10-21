@@ -90,7 +90,7 @@ def test_native_settled_capture_with_unconfirmed_close_cannot_pass(
     assert entry["status"] == "interrupted"
     assert entry["report"] is None
     assert entry["finalized_at_ns"] is None
-    assert "worker termination" in entry["detail"]
+    assert "verify termination" in entry["detail"]
     cleanup = entry["cleanup"]
     assert cleanup["cleanup_state"] == "workspace_close_unconfirmed"
     assert cleanup["workspace_id"] == "preserved-native-workspace"
