@@ -564,14 +564,24 @@ class FinalEvaluationCoordinator:
         if row["graph_run_id"] != graph_run_id:
             raise ValueError("evaluation does not belong to selected TaskGraph")
         try:
-            graph, _authored, _binding, task, _names, roots = self._eligible(graph_run_id)
+            graph, authored, binding, task, names, roots = self._eligible(graph_run_id)
+            digest_matches = self._digest_for_row(roots, row) == row["manifest_digest"]
+            # The SHA scan may run for many seconds. Re-resolve the ENTIRE
+            # eligibility/identity afterwards, not only the prior revision
+            # values, before allowing get_final_evaluation to say current.
+            (fresh_graph, fresh_authored, fresh_binding, fresh_task,
+             fresh_names, fresh_roots) = self._eligible(graph_run_id)
             current = (
-                graph["revision"] == row["graph_revision"] and
-                task["request_id"] == row["request_id"] and
-                task["revision"] == row["request_revision"] and
-                (
-                    self._digest_for_row(roots, row)
-                ) == row["manifest_digest"]
+                digest_matches
+                and graph == fresh_graph
+                and authored == fresh_authored
+                and binding == fresh_binding
+                and task == fresh_task
+                and names == fresh_names
+                and roots == fresh_roots
+                and row["graph_revision"] == fresh_graph["revision"]
+                and row["request_id"] == fresh_task["request_id"]
+                and row["request_revision"] == fresh_task["revision"]
             )
         except (RuntimeError, ValueError, OSError):
             current = False
@@ -687,12 +697,34 @@ class FinalEvaluationCoordinator:
                     # A stale/unavailable Task Request or a remapped Git root
                     # is not authorization to report a current PASS.
                     pass
+                if still_current:
+                    # Concurrent revoke_finalization (or another terminal
+                    # update) can occur during the final hash/identity scans.
+                    # Reload the EXACT chosen row rather than relying on the
+                    # old in-memory finalized_at_ns and status.
+                    try:
+                        persisted_row = self.store.get(row["evaluation_id"])
+                        still_current = (
+                            persisted_row["status"] == row["status"]
+                            and persisted_row["finalized_at_ns"] == row["finalized_at_ns"]
+                            and persisted_row["graph_run_id"] == graph_run_id
+                            and persisted_row["graph_revision"] == row["graph_revision"]
+                            and persisted_row["request_id"] == row["request_id"]
+                            and persisted_row["request_revision"] == row["request_revision"]
+                            and persisted_row["manifest_digest"] == row["manifest_digest"]
+                            and persisted_row["manifest"] == row["manifest"]
+                        )
+                    except (RuntimeError, ValueError, OSError):
+                        still_current = False
                 if not still_current:
                     row["is_current"] = False
                     row["effective_status"] = (
                         "stale" if row["status"] == "passed"
                         else row["status"]
                     )
+                    # A durable revocation must never be reported as delivered
+                    # based on a now-obsolete timestamp.
+                    row["finalized_at_ns"] = None
         except (RuntimeError, ValueError, OSError, TimeoutError):
             pass
         return {
@@ -723,18 +755,37 @@ class FinalEvaluationCoordinator:
         # and its registered repository roots after commit; using the cached
         # roots would incorrectly approve a remapped/deleted registration.
         try:
-            (fresh_graph, _fresh_authored, _fresh_binding, fresh_task,
+            (fresh_graph, fresh_authored, fresh_binding, fresh_task,
              fresh_names, fresh_roots) = self._eligible(
                 graph_run_id, expected_revision,
             )
+            digest_matches = (
+                self._digest_for_row(fresh_roots, entry) == current_digest
+            )
+            # The final hash itself can race with a Task Request revision,
+            # an authored graph edit, or a repos.yaml remap. Observe every
+            # identity again AFTER it, exactly like graph_status/read.
+            (last_graph, last_authored, last_binding, last_task,
+             last_names, last_roots) = self._eligible(
+                graph_run_id, expected_revision,
+            )
+            last_row = self.store.get(evaluation_id)
             still_current = (
-                fresh_graph["revision"] == graph["revision"]
-                and fresh_task["revision"] == task["revision"]
-                and fresh_names == _names
-                and fresh_roots == roots
-                and self._digest_for_row(
-                    fresh_roots, entry
-                ) == current_digest
+                digest_matches
+                and fresh_graph == graph == last_graph
+                and fresh_authored == _authored == last_authored
+                and fresh_binding == _binding == last_binding
+                and fresh_task == task == last_task
+                and fresh_names == _names == last_names
+                and fresh_roots == roots == last_roots
+                and last_row["graph_run_id"] == graph_run_id
+                and last_row["graph_revision"] == last_graph["revision"]
+                and last_row["request_id"] == last_task["request_id"]
+                and last_row["request_revision"] == last_task["revision"]
+                and last_row["manifest_digest"] == current_digest
+                and last_row["manifest"] == entry["manifest"]
+                and last_row["status"] == "passed"
+                and last_row["finalized_at_ns"] == persisted["finalized_at_ns"]
             )
         except Exception:
             # Missing/invalid repos.yaml, registry remaps, unavailable Git
@@ -743,10 +794,17 @@ class FinalEvaluationCoordinator:
             # final delivery.
             still_current = False
         if not still_current:
-            self.store.revoke_finalization(
-                evaluation_id,
-                reason="repository registry, graph/request or source changed during finalization",
-            )
+            # If another thread already revoked delivery, don't mask this
+            # fail-closed result by attempting to revoke it a second time.
+            try:
+                if self.store.get(evaluation_id)["finalized_at_ns"] is not None:
+                    self.store.revoke_finalization(
+                        evaluation_id,
+                        reason="repository registry, graph/request or source changed during finalization",
+                    )
+            except RuntimeError:
+                # A concurrent revocation is still a failed finalization.
+                pass
             raise RuntimeError(
                 "repository registry, graph/request or source changed during "
                 "finalization; delivery was revoked and requires reevaluation"
