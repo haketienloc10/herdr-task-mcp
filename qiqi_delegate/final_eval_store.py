@@ -225,7 +225,7 @@ class FinalEvaluationStore:
     ) -> dict[str, Any] | None:
         """Select a finalized PASS for the exact current delivery identity.
 
-        A graph can have several historical finalized product snapshots. The
+        A graph can have several historical finalized product source states. The
         newest is not necessarily current after a worktree revert (A→B→A).
         Match the same full identity used by reserve() before projecting
         delivery, rather than selecting by finalized timestamp alone.

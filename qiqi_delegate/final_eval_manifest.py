@@ -17,10 +17,6 @@ FORBIDDEN_BASENAMES = {".env", ".env.local", ".env.production", ".npmrc",
                        ".pypirc", "id_rsa", "id_ed25519", "credentials.json"}
 FORBIDDEN_PATH_PARTS = {".git", ".herdr-task-mcp", ".qiqi", ".ssh", ".aws",
                         ".venv", "node_modules", "__pycache__"}
-# Generated metadata is placed inside isolated repository copies. Collision
-# with a real tracked/untracked product file would silently overwrite bytes
-# while leaving the original SHA256 recorded in the evaluation manifest.
-RESERVED_EVALUATION_PATHS: set[str] = set()
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -30,7 +26,7 @@ def _git(root: Path, *args: str) -> bytes:
             stderr=subprocess.PIPE, check=True, timeout=30,
         ).stdout
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError("unable to produce verified Git evaluation snapshot") from exc
+        raise RuntimeError("unable to produce verified Git evaluation source") from exc
 
 
 def _git_paths(root: Path, *args: str) -> set[str]:
@@ -62,7 +58,7 @@ def _reject_gitlinks(root: Path, head: str | None) -> None:
             if metadata.startswith(b"160000 "):
                 path = raw_path.decode("utf-8")
                 raise ValueError(
-                    "evaluation snapshot cannot safely capture Git "
+                    "evaluation source cannot safely capture Git "
                     f"submodule/gitlink from {label}: {path}; "
                     "remove the submodule or implement recursive source capture"
                 )
@@ -94,7 +90,7 @@ def _reject_sparse_checkout(root: Path) -> None:
         value = mode.stdout.strip()
         if value == b"true":
             raise ValueError(
-                "evaluation snapshot refuses sparse checkout: materialize "
+                "evaluation source refuses sparse checkout: materialize "
                 "the full working tree before final evaluation"
             )
         if value != b"false":
@@ -106,7 +102,7 @@ def _reject_sparse_checkout(root: Path) -> None:
             raise RuntimeError("cannot verify tracked Git index flags")
         if record[:1] == b"S":
             raise ValueError(
-                "evaluation snapshot refuses skip-worktree tracked path: "
+                "evaluation source refuses skip-worktree tracked path: "
                 + record[2:].decode("utf-8")
             )
 
@@ -137,17 +133,12 @@ def _files(root: Path, head: str | None) -> tuple[list[str], set[str], set[str]]
         raise ValueError("evaluation source has no files")
     for name in names:
         parts = Path(name).parts
-        if any(name == reserved or name.startswith(reserved + "/")
-               for reserved in RESERVED_EVALUATION_PATHS):
-            raise ValueError(
-                "evaluation snapshot reserved metadata path collision: " + name
-            )
         if (Path(name).is_absolute() or not parts or
                 any(part in {"", ".", ".."} for part in parts) or
                 any(part in FORBIDDEN_PATH_PARTS for part in parts) or
                 Path(name).name in FORBIDDEN_BASENAMES or
                 (Path(name).name.startswith(".env.") and Path(name).name != ".env.example")):
-            raise ValueError("unsafe or sensitive file in evaluation snapshot: " + name)
+            raise ValueError("unsafe or sensitive file in evaluation source: " + name)
     return names, tracked, head_paths
 
 
@@ -162,7 +153,7 @@ def _file_present(root: Path, relative: str) -> bool:
         except FileNotFoundError:
             return False
         if stat.S_ISLNK(mode):
-            raise ValueError("evaluation snapshot refuses symlink: " + relative)
+            raise ValueError("evaluation source refuses symlink: " + relative)
         if stat.S_ISDIR(mode):
             # A directory replacing an old tracked file is a deletion of
             # that file; any new children appear as untracked source files.
@@ -235,7 +226,7 @@ def inspect_roots(roots: dict[str, Path]) -> dict[str, Any]:
                     # previous content. Classifying their absence as a
                     # deletion would allow fabricated deletion-only PASS.
                     raise ValueError(
-                        "evaluation snapshot refuses missing index-only path "
+                        "evaluation source refuses missing index-only path "
                         "without HEAD history: " + relative
                     )
                 deleted_paths.append(relative)

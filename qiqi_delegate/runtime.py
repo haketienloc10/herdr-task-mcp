@@ -216,9 +216,9 @@ def _resolve_evaluator_claude_path_args(args: list[str], route_root: Path) -> li
 
 
 def evaluator_working_directory(
-    repositories: dict[str, Path], snapshots: dict[str, Path],
+    repositories: dict[str, Path], evaluation_roots: dict[str, Path],
 ) -> Path:
-    """Stable operator-trusted CWD; never a candidate repository or snapshot."""
+    """Stable trusted CWD outside all candidate Git roots."""
     configured = os.environ.get("QIQI_EVALUATOR_CWD")
     if configured is not None and not configured.strip():
         raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
@@ -243,13 +243,13 @@ def evaluator_working_directory(
                 f"evaluator CWD ancestor contains project settings: "
                 f"{ancestor / '.claude'}"
             )
-    for root in (*repositories.values(), *snapshots.values()):
+    for root in (*repositories.values(), *evaluation_roots.values()):
         canonical = root.resolve()
         if (candidate == canonical or candidate in canonical.parents or
                 canonical in candidate.parents):
             raise ValueError(
                 "evaluator working directory must be outside registered "
-                "repositories and evaluation snapshots"
+                "repositories and evaluation source roots"
             )
     # The trust anchor must contain no project instructions/configuration.
     # Individual turns run in fresh child directories instead of sharing a
@@ -340,10 +340,10 @@ def release_evaluator_run_lock(run_cwd: Path, *, guard_held: bool = False) -> No
 
 
 def evaluator_run_directory(
-    repositories: dict[str, Path], snapshots: dict[str, Path], turn_id: str,
+    repositories: dict[str, Path], evaluation_roots: dict[str, Path], turn_id: str,
 ) -> Path:
     """Fresh per-turn native CWD below a stable operator-trusted ancestor."""
-    trusted = evaluator_working_directory(repositories, snapshots)
+    trusted = evaluator_working_directory(repositories, evaluation_roots)
     run = trusted / "runs" / ("turn-" + uuid.UUID(turn_id).hex)
     lock = _evaluator_lock_path(run)
     # The guard serializes creation against recovery's compare + unlink.
@@ -368,7 +368,7 @@ def evaluator_run_directory(
 
 
 class EvaluatorCleanupUnconfirmed(RuntimeError):
-    """An evaluator may still be running; retain its capture and source snapshots."""
+    """An evaluator may still be running; retain native capture and context."""
 
     def __init__(self, detail: str, cleanup: dict[str, str]):
         super().__init__(detail)
@@ -1133,7 +1133,7 @@ class DelegateRuntime:
                     "--disallowedTools", "mcp__*",
                     "--disable-slash-commands",
                 ]
-            # Every snapshot is passed as explicitly authorized source data.
+            # All direct Git roots are explicitly authorized as read-only review inputs.
             # The native agent starts from a neutral directory (see below);
             # otherwise CLAUDE.md/AGENTS.md in candidate code becomes startup
             # instructions before the first evaluation prompt is delivered.
@@ -1196,11 +1196,8 @@ class DelegateRuntime:
             evaluation_roots[repository] if evaluation_id is not None
             else repos[repository]
         )
-        # Evaluators execute against disposable snapshot directories, but
-        # their write claim must retain the stable, *registered* Git-root
-        # identity. The operator-only show-claim/release-claim commands resolve
-        # repos.yaml, not temporary snapshot paths (which disappear if an
-        # AgentStartupBlocked worker must be inspected after cleanup).
+        # Evaluators review live roots. Every claim retains the canonical
+        # registered Git-root identity, independent of the neutral turn CWD.
         # The registered root is also the mutex identity used by normal Peers:
         # do not allow an evaluator's preserved claim to become unrecoverable
         # and permanently block subsequent delegation.
