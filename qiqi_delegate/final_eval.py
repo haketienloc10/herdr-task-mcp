@@ -283,6 +283,24 @@ class FinalEvaluationCoordinator:
             raise
 
 
+    @staticmethod
+    async def _durable_call(callback: Any, *args: Any, **kwargs: Any):
+        """Wait out cancellation until a blocking SQLite write is committed.
+
+        Unlike shield() alone, the caller observes completion and can
+        compensate for a reservation committed during cancellation.
+        """
+        task = asyncio.create_task(
+            asyncio.to_thread(callback, *args, **kwargs)
+        )
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        return task.result(), cancelled
+
     async def start(self, graph_run_id: str, route: str,
                     expected_revision: int) -> dict[str, Any]:
         graph, authored, binding, task, names, roots = self._eligible(
@@ -322,13 +340,34 @@ class FinalEvaluationCoordinator:
                 graph, authored, binding, task, names, snap.digest,
                 source_material, live=live,
             )
-            # Keep reservation synchronous until it has committed: cancelling
-            # a background INSERT could orphan a requested attempt.
-            reserved, created = self.store.reserve(
-                graph_run_id, graph["revision"], task["request_id"],
-                task["revision"], route, snap.manifest, snap.digest,
-                snapshot_root=None if live else snap.temporary_root,
-            )
+            # Persist even if the MCP request is cancelled while SQLite
+            # waits on its write lock. Never leave a detached reserve worker
+            # behind; compensate a newly created attempt before propagating.
+            if live:
+                (reserved, created), reservation_cancelled = (
+                    await self._durable_call(
+                        self.store.reserve,
+                        graph_run_id, graph["revision"], task["request_id"],
+                        task["revision"], route, snap.manifest, snap.digest,
+                        snapshot_root=None,
+                    )
+                )
+            else:
+                reserved, created = self.store.reserve(
+                    graph_run_id, graph["revision"], task["request_id"],
+                    task["revision"], route, snap.manifest, snap.digest,
+                    snapshot_root=snap.temporary_root,
+                )
+                reservation_cancelled = False
+            if reservation_cancelled:
+                if created:
+                    await self._durable_call(
+                        self.store.complete,
+                        reserved["evaluation_id"], raw_response=None,
+                        report=None, status="errored",
+                        detail="Evaluation cancelled before native dispatch",
+                    )
+                raise asyncio.CancelledError()
             if not created:
                 # Reuse a current finalized PASS; never demote delivered state
                 # by dispatching an unnecessary second Evaluator. The store
