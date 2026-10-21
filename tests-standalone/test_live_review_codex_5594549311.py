@@ -151,3 +151,71 @@ def test_historical_pass_is_rechecked_after_intervening_mode_scan(
     assert mutated["once"]
     assert status["delivery_status"] == "not_finalized"
     assert not status["evaluation_is_current"]
+
+
+def test_latest_unfinalized_pass_rechecked_after_other_mode_scan(
+    tmp_path, monkeypatch,
+):
+    """Codex #5594643811: a cached latest PASS must never outlive a scan.
+
+    Start with finalized live B, then insert a newer *unfinalized* snapshot
+    PASS for A. Source changes A -> C during live B inspection. The live
+    candidate cannot match, but the old cached snapshot A must not be
+    returned as current either.
+    """
+    import qiqi_delegate.final_eval as evaluation
+
+    monkeypatch.setenv("QIQI_EVALUATION_MODE", "live")
+    runtime, requests, graphs, coordinator, gid = setup_graph(tmp_path)
+    source = runtime.repos()["backend"] / "orders.py"
+    state_a = source.read_bytes()
+    revision = graphs.get_graph(gid)["revision"]
+    binding = requests.graph_binding(gid)
+    task = requests.get(binding["request_id"])
+
+    source.write_bytes(state_a + b"\n# historical live B\n")
+    _fake_native(runtime, coordinator, gid, monkeypatch)
+    historical = asyncio.run(asyncio.wait_for(
+        coordinator.start(gid, "codex-evaluator", revision), timeout=50,
+    ))
+    assert historical["status"] == "passed"
+    coordinator.finalize(gid, historical["evaluation_id"], revision)
+
+    source.write_bytes(state_a)
+    with EvaluationSnapshot(runtime.repos()) as snap:
+        newest, created = coordinator.store.reserve(
+            gid, revision, task["request_id"], task["revision"],
+            "codex-evaluator", snap.manifest, snap.digest,
+        )
+        assert created
+        # Only fabricate historical DB state at the status layer. Production
+        # must still require an exact persisted native turn to emit PASS.
+        coordinator.store.complete(
+            newest["evaluation_id"], raw_response=None, report=None,
+            status="errored", detail="synthetic latest snapshot A",
+        )
+        with coordinator.store._connect() as db:
+            db.execute(
+                "UPDATE final_evaluations SET status='passed' "
+                "WHERE evaluation_id=?", (newest["evaluation_id"],),
+            )
+
+    assert coordinator.store.latest(gid)["evaluation_id"] == newest["evaluation_id"]
+    real_scan = evaluation.scan_live_roots_bounded
+    changed = {"value": False}
+
+    def scan_live_and_change_to_c(roots):
+        result = real_scan(roots)
+        if not changed["value"]:
+            changed["value"] = True
+            source.write_bytes(state_a + b"\n# changed to C\n")
+        return result
+
+    monkeypatch.setattr(evaluation, "scan_live_roots_bounded", scan_live_and_change_to_c)
+    summary = coordinator.graph_status(gid)
+    assert changed["value"]
+    assert source.read_bytes() != state_a
+    assert summary["final_evaluation_id"] == newest["evaluation_id"]
+    assert summary["final_evaluation_status"] == "stale"
+    assert summary["evaluation_is_current"] is False
+    assert summary["delivery_status"] == "not_finalized"
