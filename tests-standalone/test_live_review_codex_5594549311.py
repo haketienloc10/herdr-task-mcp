@@ -70,7 +70,10 @@ def test_live_archive_staging_keeps_mcp_loop_responsive(
         )
         assert entry["status"] == "passed"
         assert len(stamps) == 24
-        assert max(b-a for a, b in zip(stamps, stamps[1:])) < 0.3
+        # GitHub's shared runners can briefly deschedule this process.
+        # A 0.5s ceiling still detects the intentionally injected 0.65s
+        # synchronous archive delay, without failing on a ~0.38s CI jitter.
+        assert max(b-a for a, b in zip(stamps, stamps[1:])) < 0.5
 
     asyncio.run(asyncio.wait_for(run(), timeout=50))
 
