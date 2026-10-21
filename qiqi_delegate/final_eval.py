@@ -566,8 +566,22 @@ class FinalEvaluationCoordinator:
         )
         return row
 
+    @staticmethod
+    def _persisted_mode(row: dict[str, Any]) -> str:
+        manifest = row["manifest"]
+        if any(
+            info.get("inspection_mode") == "live"
+            for info in manifest.values()
+        ):
+            return "live"
+        return "snapshot"
+
     def graph_status(self, graph_run_id: str) -> dict[str, Any]:
-        """One repository scan per status call; no nested read() scans."""
+        """Check each persisted scan mode once, including historical PASSes.
+
+        A later snapshot-mode attempt does not invalidate a previously
+        delivered live-mode product whose source content has been restored.
+        """
         row = self.store.latest(graph_run_id)
         if row is None:
             return {
@@ -584,31 +598,47 @@ class FinalEvaluationCoordinator:
             graph, _authored, _binding, task, _names, roots = self._eligible(
                 graph_run_id,
             )
-            # Status is about this persisted evaluation, not the current
-            # operator default. A finalized live PASS must remain current
-            # after changing QIQI_EVALUATION_MODE to snapshot (and vice versa).
-            digest = self._digest_for_row(roots, row)
+            candidates = self.store.finalized_candidates(
+                graph_run_id, graph["revision"],
+                task["request_id"], task["revision"],
+            )
+            digest_by_mode: dict[str, str | None] = {}
 
             def is_current(candidate: dict[str, Any]) -> bool:
-                return (
+                if not (
                     candidate["graph_revision"] == graph["revision"]
                     and candidate["request_id"] == task["request_id"]
                     and candidate["request_revision"] == task["revision"]
-                    and candidate["manifest_digest"] == digest
+                ):
+                    return False
+                mode = self._persisted_mode(candidate)
+                if mode not in digest_by_mode:
+                    try:
+                        digest_by_mode[mode] = (
+                            scan_live_roots_bounded(roots)[1]
+                            if mode == "live"
+                            else manifest_digest(inspect_roots(roots))
+                        )
+                    except (RuntimeError, ValueError, OSError, TimeoutError):
+                        # An unreadable mode cannot establish a current PASS.
+                        # Still test other historical modes if available.
+                        digest_by_mode[mode] = None
+                return (
+                    digest_by_mode[mode] is not None
+                    and candidate["manifest_digest"] == digest_by_mode[mode]
                 )
 
             if is_current(row):
                 row["is_current"] = True
                 row["effective_status"] = row["status"]
-            finalized = self.store.matching_finalized(
-                graph_run_id, graph["revision"], task["request_id"],
-                task["revision"], digest,
-            )
-            if finalized is not None and is_current(finalized):
-                finalized["is_current"] = True
-                finalized["effective_status"] = finalized["status"]
-                row = finalized
-        except (RuntimeError, ValueError, OSError):
+            for candidate in candidates:
+                if is_current(candidate):
+                    finalized = self.store.get(candidate["evaluation_id"])
+                    finalized["is_current"] = True
+                    finalized["effective_status"] = finalized["status"]
+                    row = finalized
+                    break
+        except (RuntimeError, ValueError, OSError, TimeoutError):
             pass
         return {
             "final_evaluation_status": row["effective_status"],
