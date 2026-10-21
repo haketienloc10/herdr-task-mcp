@@ -8,7 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+from multiprocessing import shared_memory
 import os
+import uuid
 import pickle
 import signal
 import shutil
@@ -25,7 +27,7 @@ MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 24_000_000
 # Maximum manifest metadata transferred from the isolated scanner. The
 # project source itself is never copied and can be much larger than this.
-MAX_LIVE_MANIFEST_BYTES = 512 * 1024 * 1024
+MAX_LIVE_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_LIVE_STATUS_BYTES = 4096
 FORBIDDEN_BASENAMES = {".env", ".env.local", ".env.production", ".npmrc",
                        ".pypirc", "id_rsa", "id_ed25519", "credentials.json"}
@@ -427,28 +429,40 @@ def inspect_live_roots(roots: dict[str, Path]) -> dict[str, Any]:
 
 
 def _live_scan_worker(
-    roots: dict[str, Path], sink: Any, manifest_path: Path,
+    roots: dict[str, Path], sink: Any, manifest_name: str,
 ) -> None:
-    """Write large manifest to a bounded local file; IPC stays tiny.
+    """Transfer the manifest through OS memory, never NFS/FUSE temp files.
 
-    The child computes the *canonical* manifest SHA-256 while streaming JSON
-    to disk. No multi-megabyte pickle ever crosses the scanner control pipe.
+    The entire serialization and bounded shared-memory write occur in the
+    scanner's killable process. A random-name segment is always unlinked by
+    the supervisor after success, timeout, or cancellation.
     """
+    segment = None
     try:
         manifest = inspect_live_roots(roots)
-        digest = hashlib.sha256()
-        size = 0
         encoder = json.JSONEncoder(
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         )
-        with manifest_path.open("xb") as output:
-            for chunk in encoder.iterencode(manifest):
-                data = chunk.encode("utf-8")
-                size += len(data)
-                if size > MAX_LIVE_MANIFEST_BYTES:
-                    raise ValueError("live evaluation manifest exceeds metadata limit")
-                digest.update(data)
-                output.write(data)
+        chunks = []
+        size = 0
+        digest = hashlib.sha256()
+        for chunk in encoder.iterencode(manifest):
+            data = chunk.encode("utf-8")
+            size += len(data)
+            if size > MAX_LIVE_MANIFEST_BYTES:
+                raise ValueError("live evaluation manifest exceeds metadata limit")
+            chunks.append(data)
+            digest.update(data)
+        if size <= 0:
+            raise ValueError("empty live evaluation manifest")
+        segment = shared_memory.SharedMemory(
+            name=manifest_name, create=True, size=size,
+        )
+        offset = 0
+        for data in chunks:
+            segment.buf[offset:offset + len(data)] = data
+            offset += len(data)
+        # Only a tiny, bounded control message travels over the pipe.
         sink.send(("ok", digest.hexdigest(), size))
     except BaseException as exc:
         try:
@@ -456,17 +470,19 @@ def _live_scan_worker(
         except (OSError, EOFError, BrokenPipeError):
             pass
     finally:
+        if segment is not None:
+            segment.close()
         sink.close()
 
 def _isolated_live_scan_worker(
     roots: dict[str, Path], sink: Any, worker: Any,
-    manifest_path: Path,
+    manifest_name: str,
 ) -> None:
     """Create a scanner-owned POSIX session before it can launch git."""
     if os.name == "posix":
         os.setsid()
     if worker is None:
-        _live_scan_worker(roots, sink, manifest_path)
+        _live_scan_worker(roots, sink, manifest_name)
     else:
         worker(roots, sink)
 
@@ -537,13 +553,10 @@ def scan_live_roots_bounded(
     """
     ctx = multiprocessing.get_context("spawn")
     reader, writer = ctx.Pipe(duplex=False)
-    # Per-scan 0700 staging outside registered repositories, not a source
-    # snapshot. The directory is removed after the scanner process stops.
-    result_dir = tempfile.TemporaryDirectory(prefix="qiqi-scan-result-")
-    manifest_path = Path(result_dir.name) / "manifest.json"
+    manifest_name = "qiqi-live-" + uuid.uuid4().hex
     process = ctx.Process(
         target=_isolated_live_scan_worker,
-        args=(roots, writer, _worker, manifest_path),
+        args=(roots, writer, _worker, manifest_name),
     )
     succeeded = False
     try:
@@ -556,9 +569,8 @@ def scan_live_roots_bounded(
             remaining = expires - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("live evaluation scanner process timed out")
-            # Do NOT call recv() merely because poll() sees the first bytes
-            # of a pickle frame. Wait for process exit; incomplete frames
-            # and children stalled while sending never bypass the watchdog.
+            # Child sends only a small status after the data has already
+            # been copied into OS-managed shared memory.
             process.join(timeout=min(0.1, remaining))
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("live evaluation scan cancelled")
@@ -590,23 +602,25 @@ def scan_live_roots_bounded(
                 or not isinstance(digest, str) or len(digest) != 64
                 or any(ch not in "0123456789abcdef" for ch in digest)):
             raise RuntimeError("invalid live scanner manifest metadata")
-        # Stream the bounded result in chunks, keeping checks active while
-        # reading and verifying the exact bytes written by the scanner.
-        data = bytearray()
-        with manifest_path.open("rb") as handle:
-            while len(data) < size:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("live evaluation scan cancelled")
-                if time.monotonic() > expires:
-                    raise TimeoutError("live evaluation result transfer timed out")
-                block = handle.read(min(1024 * 1024, size - len(data)))
-                if not block:
-                    raise RuntimeError("incomplete live scanner manifest file")
-                data.extend(block)
-            if handle.read(1):
-                raise RuntimeError("oversized live scanner manifest file")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("live evaluation scan cancelled")
+        if time.monotonic() > expires:
+            raise TimeoutError("live evaluation result transfer timed out")
+        segment = shared_memory.SharedMemory(name=manifest_name)
+        try:
+            if segment.size != size:
+                raise RuntimeError("live scanner shared-memory size mismatch")
+            # Memory mapping is local OS-managed RAM, not a TMPDIR backed by
+            # remote storage; the caller never runs a blocking file read.
+            data = bytes(segment.buf[:size])
+        finally:
+            segment.close()
         if hashlib.sha256(data).hexdigest() != digest:
             raise RuntimeError("corrupted live scanner manifest transfer")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("live evaluation scan cancelled")
+        if time.monotonic() > expires:
+            raise TimeoutError("live evaluation result transfer timed out")
         manifest = json.loads(data)
         if not isinstance(manifest, dict):
             raise RuntimeError("malformed live scanner manifest")
@@ -622,7 +636,18 @@ def scan_live_roots_bounded(
                 _stop_scanner_tree(process)
             else:
                 process.join(timeout=0.2)
-        result_dir.cleanup()
+        # If a process was killed while producing its manifest, the segment
+        # might exist without a completion record. Always unlink by the
+        # supervisor-generated name after terminating the writer.
+        try:
+            segment = shared_memory.SharedMemory(name=manifest_name)
+        except FileNotFoundError:
+            pass
+        else:
+            try:
+                segment.unlink()
+            finally:
+                segment.close()
 
 
 class LiveEvaluationView:
