@@ -14,11 +14,11 @@ from typing import Any
 
 from qiqi_delegate.runtime import (
     DelegateRuntime, evaluator_lease_guard, release_evaluator_run_lock,
+    cleanup_temporary_tree,
 )
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_request import TaskRequestStore
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
-from qiqi_delegate.final_eval_snapshot import cleanup_temporary_tree
 
 
 def _validated_runtime(
@@ -272,7 +272,6 @@ def _cleanup_retained_evaluation_paths(
     targets = []
     for key, prefix in (
         ("capture_sink", "qiqi-result-"),
-        ("snapshot_root", "qiqi-final-eval-"),
     ):
         value = cleanup.get(key)
         if not value:
