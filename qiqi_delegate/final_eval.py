@@ -584,15 +584,10 @@ class FinalEvaluationCoordinator:
             graph, _authored, _binding, task, _names, roots = self._eligible(
                 graph_run_id,
             )
-            mode = os.environ.get(
-                "QIQI_EVALUATION_MODE", "live",
-            ).strip().lower()
-            if mode not in {"live", "snapshot"}:
-                raise ValueError("QIQI_EVALUATION_MODE must be live or snapshot")
-            digest = (
-                scan_live_roots_bounded(roots)[1] if mode == "live"
-                else manifest_digest(inspect_roots(roots))
-            )
+            # Status is about this persisted evaluation, not the current
+            # operator default. A finalized live PASS must remain current
+            # after changing QIQI_EVALUATION_MODE to snapshot (and vice versa).
+            digest = self._digest_for_row(roots, row)
 
             def is_current(candidate: dict[str, Any]) -> bool:
                 return (
