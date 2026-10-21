@@ -16,11 +16,25 @@ from typing import Any
 from qiqi_delegate.core import build_task_packet
 from qiqi_delegate.final_eval_snapshot import (
     EvaluationSnapshot, LiveEvaluationView, inspect_roots,
-    inspect_live_roots, scan_live_roots_bounded, manifest_digest,
+    inspect_live_roots, scan_live_roots_bounded, stage_task_archive_bounded,
+    manifest_digest,
 )
 from qiqi_delegate.task_request import copy_workspace_snapshot
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from qiqi_delegate.runtime import AgentStartupBlocked, EvaluatorCleanupUnconfirmed
+
+
+def _write_native_task_archive(
+    workspace: Path, task: dict[str, Any], cwd: Path,
+    graph_context: dict[str, Any],
+) -> None:
+    """Spawn-safe task archive worker: no SQLite/runtime state crosses IPC."""
+    from types import SimpleNamespace
+
+    proxy = SimpleNamespace(task_requests=SimpleNamespace(workspace=workspace))
+    FinalEvaluationCoordinator._materialize_task_sources(
+        proxy, task, cwd, graph_context=graph_context,
+    )
 
 
 class FinalEvaluationCoordinator:
@@ -323,9 +337,11 @@ class FinalEvaluationCoordinator:
             )
             archive = None
             if live:
-                def archive(cwd: Path) -> None:
-                    self._materialize_task_sources(
-                        task, cwd, graph_context=graph_context,
+                def archive(cwd: Path, *, cancel_event: Any = None) -> None:
+                    stage_task_archive_bounded(
+                        _write_native_task_archive,
+                        (self.task_requests.workspace, task, cwd, graph_context),
+                        cancel_event=cancel_event, timeout=120,
                     )
                 source_material = {
                     "index_path": ".qiqi-final-task-sources/index.json",
