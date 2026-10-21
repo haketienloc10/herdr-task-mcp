@@ -459,9 +459,17 @@ def _stop_scanner_tree(process: Any) -> None:
             else:
                 process.terminate()  # worker exited before setsid()
         except ProcessLookupError:
+            # The scanner leader may already have exited after launching a
+            # child: its process group can still exist with orphaned Git jobs.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.join(timeout=0.2)
             return
         except OSError:
-            process.terminate()
+            if process.is_alive():
+                process.terminate()
         process.join(timeout=0.8)
         try:
             # Descendants may outlive the supervising scanner. Kill the whole
