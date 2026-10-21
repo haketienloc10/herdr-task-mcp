@@ -15,7 +15,7 @@ from test_live_final_evaluation import _fake_native
 def _partial_ipc_header_then_stall(_roots, sink):
     # A 4-byte framed message header has arrived, but the pickle body has
     # not. Old reader.poll() -> reader.recv() hangs despite a scan deadline.
-    os.write(sink.fileno(), b"\\x00\\x01\\x00\\x00" + b"partial")
+    os.write(sink.fileno(), b"\x00\x01\x00\x00" + b"partial")
     time.sleep(30)
 
 
@@ -59,7 +59,7 @@ def test_graph_status_finds_old_live_pass_after_new_snapshot_mode_attempt(
     # Create a newer attempt in snapshot mode at source state B.
     original_file = runtime.repos()["backend"] / "orders.py"
     state_a = original_file.read_bytes()
-    original_file.write_bytes(state_a + b"\\n# different source B\\n")
+    original_file.write_bytes(state_a + b"\n# different source B\n")
     graph = graphs.get_graph(gid)
     request = coordinator.task_requests.get(
         coordinator.task_requests.graph_binding(gid)["request_id"]
