@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -1258,7 +1259,32 @@ class DelegateRuntime:
                         # Stage only the request/graph text and a small JSON
                         # hash manifest; never copy the source repositories.
                         # This remains inside the existing per-turn neutral CWD.
-                        evaluation_archive(evaluator_cwd)
+                        archive_cancel = threading.Event()
+
+                        def stage_archive() -> None:
+                            evaluation_archive(
+                                evaluator_cwd, cancel_event=archive_cancel,
+                            )
+
+                        archive_task = asyncio.create_task(
+                            asyncio.to_thread(stage_archive)
+                        )
+                        archive_cancelled = False
+                        # Wait for the killable archive child to terminate
+                        # before cleanup can touch its output directory.
+                        while not archive_task.done():
+                            try:
+                                await asyncio.shield(archive_task)
+                            except asyncio.CancelledError:
+                                archive_cancelled = True
+                                archive_cancel.set()
+                        if archive_cancelled:
+                            try:
+                                archive_task.result()
+                            except Exception:
+                                pass
+                            raise asyncio.CancelledError()
+                        archive_task.result()
                         manifest_file = evaluator_cwd / ".qiqi-evaluation-manifests.json"
 
                         def write_manifest() -> None:
