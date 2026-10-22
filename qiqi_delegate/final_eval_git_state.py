@@ -63,7 +63,7 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
     """Fingerprint Git diffs and untracked contents, without walking tracked files.
 
     This is a freshness check, not an immutable snapshot or an access sandbox.
-    Git handles tracked symlinks; flagged tracked and untracked entries are hashed individually.
+    Git handles tracked symlinks; dirty submodules are fingerprinted recursively.
     """
     if not roots:
         raise ValueError("evaluation needs at least one repository")
@@ -82,6 +82,7 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
         digest = hashlib.sha256()
         # Index and working-tree changes are represented by Git's own diff,
         # including renames, staged edits, deletions and symlink target changes.
+        gitlinks: list[bytes] = []
         for args in (
             ("diff", "--no-ext-diff", "--binary", "--cached", "--"),
             ("diff", "--no-ext-diff", "--binary", "--"),
@@ -90,6 +91,24 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
             payload = _git(root, *args)
             digest.update(len(payload).to_bytes(8, "big"))
             digest.update(payload)
+            if args[0] == "ls-files":
+                # Mode 160000 is a Git submodule: a parent diff cannot
+                # distinguish two different dirty states at the same HEAD.
+                for record in payload.split(b"\0"):
+                    header, separator, relative = record.partition(b"\t")
+                    if separator and header.startswith(b"160000 "):
+                        gitlinks.append(relative)
+        for relative in sorted(set(gitlinks)):
+            subroot = root / os.fsdecode(relative)
+            # Reuse the same lightweight Git fingerprint for submodule roots
+            # (including nested ones). Missing/uninitialized submodules fail
+            # closed rather than approving a source the evaluator cannot read.
+            sub = review_scope({"submodule": subroot})["submodule"]
+            digest.update(b"gitlink\0")
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update((sub["head"] or "").encode("ascii"))
+            digest.update(bytes.fromhex(sub["fingerprint"]))
         # Git hides skip-worktree and assume-unchanged working-tree edits
         # from diff. Fingerprint only those exceptional tracked entries; don't
         # hash the entire tracked tree or reject normal sparse checkouts.
