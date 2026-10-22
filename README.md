@@ -185,7 +185,7 @@ không áp đặt filesystem chỉ đọc. Final Evaluator không tạo reposito
 Prompt cấm thay đổi source, nhưng route permissive vẫn có thể cho phép
 native agent thực hiện side effects. Multi-root claims ngăn Peer hợp tác
 ghi vào các Git root trong lúc review; external writers không bị chặn.
-Manifest SHA256 kiểm tra thay đổi trước/sau, không bảo đảm bất biến tại
+Git fingerprint kiểm tra thay đổi trước/sau, không bảo đảm bất biến tại
 mọi thời điểm. Cần OS sandbox hoặc immutable filesystem view nếu review
 code không đáng tin cậy.
 
