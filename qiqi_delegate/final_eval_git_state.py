@@ -161,6 +161,7 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
                         + os.fsdecode(attrs[i]) + " (" +
                         os.fsdecode(attrs[i + 1]) + ")"
                     )
+        missing_assumed: list[bytes] = []
         for entry in entries:
             if not entry:
                 continue
@@ -168,7 +169,14 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
             if flag == b"S" or flag.islower():
                 digest.update(len(relative).to_bytes(8, "big"))
                 digest.update(relative)
-                digest.update(_entry_fingerprint(root, relative, allow_missing=True))
+                state = _entry_fingerprint(root, relative, allow_missing=True)
+                digest.update(state)
+                # Git does not report deletions of assume-unchanged files.
+                # Missing skip-worktree ('S'/'s') entries, however, can be
+                # intentional sparse-checkout omissions, not deletions.
+                if (flag.islower() and flag != b"s" and
+                        state in (b"missing-entry", b"missing-parent")):
+                    missing_assumed.append(relative)
         untracked = sorted(part for part in _git(
             root, "ls-files", "--others", "--exclude-standard", "-z",
         ).split(b"\0") if part)
@@ -182,13 +190,22 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
             except OSError as exc:
                 raise RuntimeError("untracked Git source changed during fingerprint: "
                                    + os.fsdecode(raw)) from exc
-        deleted = _git(root, "diff", "--no-renames", "--name-only", "--diff-filter=D", "-z", "HEAD", "--"
-                       ).split(b"\0") if head else []
+        deleted = set(_git(
+            root, "diff", "--no-renames", "--name-only", "--diff-filter=D",
+            "-z", "HEAD", "--",
+        ).split(b"\0")) if head else set()
+        if missing_assumed and head:
+            # Only HEAD-tracked paths are legitimate deletion tombstones;
+            # a newly staged file later removed was never part of HEAD.
+            head_paths = set(_git(
+                root, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--",
+            ).split(b"\0"))
+            deleted.update(path for path in missing_assumed if path in head_paths)
         scope[name] = {
             "root": str(root),
             "head": head.decode("ascii").strip() or None,
             "fingerprint": digest.hexdigest(),
             "untracked_paths": [os.fsdecode(x) for x in untracked],
-            "deleted_paths": [os.fsdecode(x) for x in deleted if x],
+            "deleted_paths": [os.fsdecode(x) for x in sorted(deleted) if x],
         }
     return scope
