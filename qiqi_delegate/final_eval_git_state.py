@@ -108,8 +108,8 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
         # including renames, staged edits, deletions and symlink target changes.
         gitlinks: list[bytes] = []
         for args in (
-            ("diff", "--no-ext-diff", "--binary", "--cached", "--"),
-            ("diff", "--no-ext-diff", "--binary", "--"),
+            ("diff", "--no-ext-diff", "--no-textconv", "--binary", "--cached", "--"),
+            ("diff", "--no-ext-diff", "--no-textconv", "--binary", "--"),
             ("ls-files", "--stage", "-z"),
         ):
             payload = _git(root, *args)
@@ -180,7 +180,7 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
             except OSError as exc:
                 raise RuntimeError("untracked Git source changed during fingerprint: "
                                    + os.fsdecode(raw)) from exc
-        deleted = _git(root, "diff", "--name-only", "--diff-filter=D", "-z", "HEAD", "--"
+        deleted = _git(root, "diff", "--no-renames", "--name-only", "--diff-filter=D", "-z", "HEAD", "--"
                        ).split(b"\0") if head else []
         scope[name] = {
             "root": str(root),
