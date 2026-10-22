@@ -89,6 +89,15 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
         if filemode.stdout.strip() == b"false":
             raise ValueError("Git core.fileMode=false hides source mode changes: "
                              + str(root))
+        autocrlf = subprocess.run(
+            ["git", "-C", str(root), "config", "--get", "core.autocrlf"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+        if autocrlf.returncode not in (0, 1):
+            raise RuntimeError("cannot inspect Git core.autocrlf: " + str(root))
+        if autocrlf.stdout.strip().lower() not in (b"", b"false"):
+            raise ValueError("Git core.autocrlf may hide source line-ending changes: "
+                             + str(root))
         head = _git(root, "rev-parse", "--verify", "HEAD") if (
             subprocess.run(["git", "-C", str(root), "rev-parse", "-q", "--verify", "HEAD"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
