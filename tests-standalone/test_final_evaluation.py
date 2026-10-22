@@ -92,6 +92,11 @@ def setup_graph(tmp_path, *, multi=True, with_request=True):
 
 
 def evidence(manifest, repo):
+    if "files" not in manifest[repo]:
+        path = {"backend": "orders.py", "frontend": "client.py"}.get(
+            repo, "orders.py",
+        )
+        return {"repository": repo, "path": path, "locator": path + ":1"}
     item = next(f for f in manifest[repo]["files"]
                 if f["path"].endswith(".py"))
     return {"repository": repo, "path": item["path"],
@@ -173,8 +178,7 @@ def test_live_manifest_includes_untracked_work_and_stale_pass_cannot_finalize(tm
     async def fake_delegate(**kwargs):
         coordinator.store.bind_turn(kwargs["evaluation_id"], "captured-native")
         state = coordinator.store.get(kwargs["evaluation_id"])
-        assert any(f["path"] == "draft_untracked.py"
-                   for f in state["manifest"]["frontend"]["files"])
+        assert "draft_untracked.py" in state["manifest"]["frontend"]["untracked_paths"]
         body = json.dumps(report(state["manifest"]))
         with sqlite3.connect(runtime.db) as db:
             db.execute(
