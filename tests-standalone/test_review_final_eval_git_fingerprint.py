@@ -216,3 +216,98 @@ def test_untracked_embedded_git_repository_rejected_before_dispatch(
         ))
     assert not launched
     assert coordinator.store.latest(gid) is None
+
+
+@pytest.mark.parametrize("attribute", ["text", "eol=lf", "ident", "crlf"])
+def test_git_checkin_conversions_are_rejected(tmp_path, monkeypatch, attribute):
+    """Git can canonicalize distinct working-tree bytes to the same diff."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    path = backend / "run.sh"
+    path.write_bytes(b"#!/bin/sh\necho ok\n")
+    _git(backend, "add", "run.sh")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track script")
+    (backend / ".gitattributes").write_text(
+        "run.sh " + attribute + "\n", encoding="utf-8",
+    )
+    if attribute == "text":
+        path.write_bytes(b"#!/bin/sh\r\necho ok\r\n")
+        invisible = subprocess.run(
+            ["git", "-C", str(backend), "diff", "--", "run.sh"],
+            check=True, capture_output=True,
+        )
+        assert invisible.stdout == b"", "Git text conversion should hide CRLF edit"
+
+    launched = []
+    async def forbidden_delegate(**kwargs):
+        launched.append(kwargs)
+        raise AssertionError("native evaluator must not launch")
+
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="Git clean filter/check-in conversion"):
+        review_scope(runtime.repos())
+    with pytest.raises(ValueError, match="Git clean filter/check-in conversion"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert not launched
+    assert coordinator.store.latest(gid) is None
+
+
+def test_working_tree_encoding_attribute_rejected(tmp_path):
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    source = backend / "encoded.txt"
+    source.write_bytes("example\n".encode("utf-16"))
+    _git(backend, "add", "encoded.txt")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track encoded source")
+    (backend / ".gitattributes").write_text(
+        "encoded.txt working-tree-encoding=UTF-16\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Git clean filter/check-in conversion"):
+        review_scope(runtime.repos())
+
+
+def test_disabled_git_filemode_rejected_before_dispatch(tmp_path, monkeypatch):
+    """Git diff ignores tracked executable-bit changes with core.fileMode=false."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track executable test")
+    before = source.stat().st_mode
+    _git(backend, "config", "core.fileMode", "false")
+    source.chmod(before ^ 0o111)
+    assert (source.stat().st_mode ^ before) & 0o111
+    invisible = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--", "orders.py"],
+        check=True, capture_output=True,
+    )
+    assert invisible.stdout == b"", "Git config should hide mode change"
+
+    launched = []
+    async def forbidden_delegate(**kwargs):
+        launched.append(kwargs)
+        raise AssertionError("native evaluator must not launch")
+
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="core.fileMode=false"):
+        review_scope(runtime.repos())
+    with pytest.raises(ValueError, match="core.fileMode=false"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert not launched
+    assert coordinator.store.latest(gid) is None
+
+
+@pytest.mark.parametrize("autocrlf", ["true", "input"])
+def test_global_auto_crlf_rejected(tmp_path, autocrlf):
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    _git(backend, "config", "core.autocrlf", autocrlf)
+    with pytest.raises(ValueError, match="core.autocrlf"):
+        review_scope(runtime.repos())
