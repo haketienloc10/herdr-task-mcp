@@ -331,7 +331,7 @@ class FinalEvaluationCoordinator:
                 and fresh_task["revision"] == task["revision"]
                 and fresh_names == _names
                 and fresh_roots == roots
-                and manifest_digest(inspect_roots(fresh_roots)) == current_digest
+                and manifest_digest(review_scope(fresh_roots)) == current_digest
             )
         except Exception:
             # Missing/invalid repos.yaml, registry remaps, unavailable Git
