@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Any
 
 
-def _git(root: Path, *args: str) -> bytes:
+def _git(root: Path, *args: str, stdin: bytes | None = None) -> bytes:
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args], check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=stdin, timeout=60,
         ).stdout
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError("cannot inspect evaluator Git root: " + str(root)) from exc
@@ -55,7 +55,11 @@ def _entry_fingerprint(root: Path, raw: bytes, *, allow_missing: bool) -> bytes:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 content.update(block)
     else:
-        content.update(str(info.st_rdev).encode("ascii"))
+        # Git can report an untracked embedded repository as one directory.
+        # Directory device metadata is not a fingerprint of its contents.
+        raise ValueError(
+            "non-file Git entry cannot be safely fingerprinted: " + os.fsdecode(raw)
+        )
     return info.st_mode.to_bytes(8, "big") + content.digest()
 
 
@@ -115,7 +119,24 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
         tagged = _git(root, "ls-files", "-v", "-z")
         digest.update(len(tagged).to_bytes(8, "big"))
         digest.update(tagged)
-        for entry in tagged.split(b"\0"):
+        entries = [entry for entry in tagged.split(b"\0") if entry]
+        # Git diff compares the clean-filtered representation. A custom
+        # filter may hide arbitrary working-tree byte changes, so fail closed
+        # rather than reintroducing a full tracked-file hash scan.
+        if entries:
+            tracked_paths = b"\0".join(entry[2:] for entry in entries) + b"\0"
+            attrs = _git(root, "check-attr", "-z", "--stdin", "filter",
+                         stdin=tracked_paths).split(b"\0")
+            if attrs[-1:] != [b""] or len(attrs[:-1]) != 3 * len(entries):
+                raise RuntimeError("invalid Git filter attribute inspection")
+            for i in range(0, len(attrs) - 1, 3):
+                if attrs[i + 1] != b"filter" or attrs[i + 2] not in (
+                        b"unspecified", b"unset"):
+                    raise ValueError(
+                        "Git clean filter may hide source changes: "
+                        + os.fsdecode(attrs[i])
+                    )
+        for entry in entries:
             if not entry:
                 continue
             flag, relative = entry[:1], entry[2:]
