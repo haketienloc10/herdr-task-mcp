@@ -14,9 +14,11 @@ from typing import Any
 
 
 def _git(root: Path, *args: str, stdin: bytes | None = None) -> bytes:
+    # Ignore untrusted FSMonitor "clean" reports during source freshness checks.
+    # The per-command override does not modify the repository configuration.
     try:
         return subprocess.run(
-            ["git", "-C", str(root), *args], check=True,
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root), *args], check=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=stdin, timeout=60,
         ).stdout
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
