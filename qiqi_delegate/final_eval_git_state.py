@@ -23,11 +23,47 @@ def _git(root: Path, *args: str) -> bytes:
         raise RuntimeError("cannot inspect evaluator Git root: " + str(root)) from exc
 
 
+def _entry_fingerprint(root: Path, raw: bytes, *, allow_missing: bool) -> bytes:
+    """Hash one exceptional Git entry, with its own unambiguous boundary."""
+    path = root
+    parts = Path(os.fsdecode(raw)).parts
+    for part in parts[:-1]:
+        path = path / part
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            mode = 0
+        if not stat.S_ISDIR(mode):
+            if allow_missing and not mode:
+                return b"missing-parent"
+            raise RuntimeError("cannot fingerprint Git path under non-directory: "
+                               + os.fsdecode(raw))
+    path = path / parts[-1]
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return b"missing-entry"
+        raise RuntimeError("untracked Git file vanished: " + os.fsdecode(raw))
+    content = hashlib.sha256()
+    if stat.S_ISLNK(info.st_mode):
+        content.update(os.fsencode(os.readlink(path)))
+    elif stat.S_ISREG(info.st_mode):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                content.update(block)
+    else:
+        content.update(str(info.st_rdev).encode("ascii"))
+    return info.st_mode.to_bytes(8, "big") + content.digest()
+
+
 def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
     """Fingerprint Git diffs and untracked contents, without walking tracked files.
 
     This is a freshness check, not an immutable snapshot or an access sandbox.
-    Git handles tracked symlinks; only the link text is hashed for untracked links.
+    Git handles tracked symlinks; flagged tracked and untracked entries are hashed individually.
     """
     if not roots:
         raise ValueError("evaluation needs at least one repository")
@@ -54,26 +90,30 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
             payload = _git(root, *args)
             digest.update(len(payload).to_bytes(8, "big"))
             digest.update(payload)
+        # Git hides skip-worktree and assume-unchanged working-tree edits
+        # from diff. Fingerprint only those exceptional tracked entries; don't
+        # hash the entire tracked tree or reject normal sparse checkouts.
+        tagged = _git(root, "ls-files", "-v", "-z")
+        digest.update(len(tagged).to_bytes(8, "big"))
+        digest.update(tagged)
+        for entry in tagged.split(b"\0"):
+            if not entry:
+                continue
+            flag, relative = entry[:1], entry[2:]
+            if flag == b"S" or flag.islower():
+                digest.update(len(relative).to_bytes(8, "big"))
+                digest.update(relative)
+                digest.update(_entry_fingerprint(root, relative, allow_missing=True))
         untracked = sorted(part for part in _git(
             root, "ls-files", "--others", "--exclude-standard", "-z",
         ).split(b"\0") if part)
         for raw in untracked:
-            path = root / os.fsdecode(raw)
             digest.update(len(raw).to_bytes(8, "big"))
             digest.update(raw)
             try:
-                info = path.lstat()
-                digest.update(info.st_mode.to_bytes(8, "big"))
-                if stat.S_ISLNK(info.st_mode):
-                    digest.update(os.fsencode(os.readlink(path)))
-                elif stat.S_ISREG(info.st_mode):
-                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                    fd = os.open(path, flags)
-                    with os.fdopen(fd, "rb") as stream:
-                        for block in iter(lambda: stream.read(1024 * 1024), b""):
-                            digest.update(block)
-                else:
-                    digest.update(str(info.st_rdev).encode("ascii"))
+                # A fixed-size per-file hash prevents adjacent file contents
+                # from being misinterpreted as each other's record headers.
+                digest.update(_entry_fingerprint(root, raw, allow_missing=False))
             except OSError as exc:
                 raise RuntimeError("untracked Git source changed during fingerprint: "
                                    + os.fsdecode(raw)) from exc
