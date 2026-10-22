@@ -311,3 +311,78 @@ def test_global_auto_crlf_rejected(tmp_path, autocrlf):
     _git(backend, "config", "core.autocrlf", autocrlf)
     with pytest.raises(ValueError, match="core.autocrlf"):
         review_scope(runtime.repos())
+
+
+def test_textconv_must_not_hide_stale_native_final_pass(tmp_path, monkeypatch):
+    """A custom diff textconv renders two different raw versions identically."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path, multi=False)
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    attrs = backend / ".gitattributes"
+    attrs.write_text("orders.py diff=constant\n", encoding="utf-8")
+    _git(backend, "add", "orders.py", ".gitattributes")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Enable source diff textconv")
+    _git(backend, "config", "diff.constant.textconv", "sed s/./X/g")
+
+    async def delegate(**kwargs):
+        coordinator.store.bind_turn(kwargs["evaluation_id"], "textconv-native")
+        captured = coordinator.store.get(kwargs["evaluation_id"])["manifest"]
+        body = json.dumps(report(captured))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("textconv-native", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", body, 200),
+            )
+        return {"state": "settled", "turn_id": "textconv-native",
+                "agent_response": body}
+
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    rev = graph_rt.get_graph(gid)["revision"]
+    evaluated = asyncio.run(coordinator.start(gid, "codex-evaluator", rev))
+    assert evaluated["status"] == "passed"
+    before = manifest_digest(review_scope(runtime.repos()))
+    source.write_text("def total(n):\n    return n * 3\n", encoding="utf-8")
+    hidden = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--no-ext-diff", "--binary", "--",
+         "orders.py"], check=True, capture_output=True,
+    )
+    assert hidden.stdout == b"", "Git textconv precondition not reproduced"
+    assert before != manifest_digest(review_scope(runtime.repos()))
+    assert coordinator.read(gid, evaluated["evaluation_id"])["effective_status"] == "stale"
+    with pytest.raises((RuntimeError, ValueError), match="PASS"):
+        coordinator.finalize(gid, evaluated["evaluation_id"], rev)
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_rename_source_is_valid_git_deletion_evidence(tmp_path, staged):
+    """No-renames tombstones include old path under staged or unstaged moves."""
+    runtime, _requests, _graph_rt, coordinator, _gid = setup_graph(tmp_path, multi=False)
+    backend = runtime.repos()["backend"]
+    old = backend / "orders.py"
+    new = backend / "orders_v2.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track original API")
+    if staged:
+        _git(backend, "mv", "orders.py", "orders_v2.py")
+    else:
+        old.rename(new)
+        _git(backend, "add", "-N", "orders_v2.py")
+    # Git can classify the move as R instead of D when renames are enabled.
+    renamed = subprocess.run(
+        ["git", "-C", str(backend), "diff", "-M", "--name-status", "HEAD", "--"],
+        check=True, capture_output=True,
+    )
+    assert b"R100" in renamed.stdout, "Expected Git rename to be detected"
+    manifest = review_scope(runtime.repos())
+    assert "orders.py" in manifest["backend"]["deleted_paths"]
+    report_payload = report(manifest)
+    report_payload["requirement_results"][0]["evidence"] = [{
+        "kind": "deleted", "repository": "backend",
+        "path": "orders.py", "locator": "git:tracked-rename-source",
+    }]
+    assert coordinator.store.validate_report(report_payload, manifest, {"R1"})[
+        "verdict"
+    ] == "pass"
