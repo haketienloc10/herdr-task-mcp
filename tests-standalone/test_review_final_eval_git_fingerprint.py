@@ -450,3 +450,114 @@ def test_bad_fsmonitor_hook_cannot_hide_native_final_source_edits(
         check=True, capture_output=True,
     ).stdout.strip()
     assert configured == str(hook).encode(), "Fingerprint must not rewrite Git config"
+
+
+def test_missing_assume_unchanged_file_produces_deletion_evidence(tmp_path):
+    """Git hides this deletion, but native v3 can still cite a real HEAD tombstone."""
+    runtime, _requests, _graph_rt, coordinator, _gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track source before deletion")
+    _git(backend, "update-index", "--assume-unchanged", "--", "orders.py")
+
+    before = manifest_digest(review_scope(runtime.repos()))
+    source.unlink()
+    invisible = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--no-renames", "--name-only",
+         "--diff-filter=D", "HEAD", "--"],
+        check=True, capture_output=True,
+    )
+    assert invisible.stdout == b"", "Precondition: Git hides the deletion"
+
+    scope = review_scope(runtime.repos())
+    assert "orders.py" in scope["backend"]["deleted_paths"]
+    assert before != manifest_digest(scope)
+    payload = report(scope)
+    payload["requirement_results"][0]["evidence"] = [{
+        "kind": "deleted", "repository": "backend",
+        "path": "orders.py", "locator": "git:assume-unchanged-deletion",
+    }]
+    assert coordinator.store.validate_report(payload, scope, {"R1"})[
+        "verdict"
+    ] == "pass"
+
+    source.write_text("def total(n):\n    return n * 2\n", encoding="utf-8")
+    assert "orders.py" not in review_scope(runtime.repos())["backend"]["deleted_paths"]
+
+
+def test_missing_skip_worktree_is_not_a_deletion_tombstone(tmp_path):
+    """Sparse-checkout omissions must not masquerade as source deletions."""
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track source before sparse omission")
+    _git(backend, "update-index", "--skip-worktree", "--", "orders.py")
+    source.unlink()
+    tagged = subprocess.run(
+        ["git", "-C", str(backend), "ls-files", "-v", "--", "orders.py"],
+        check=True, capture_output=True,
+    ).stdout
+    assert tagged.startswith(b"S ") or tagged.startswith(b"s ")
+    assert "orders.py" not in review_scope(runtime.repos())["backend"]["deleted_paths"]
+
+
+def test_missing_newly_staged_assume_unchanged_file_is_not_head_deletion(tmp_path):
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    draft = backend / "draft.py"
+    draft.write_text("NEW = True\n", encoding="utf-8")
+    _git(backend, "add", "draft.py")
+    _git(backend, "update-index", "--assume-unchanged", "--", "draft.py")
+    draft.unlink()
+    assert "draft.py" not in review_scope(runtime.repos())["backend"]["deleted_paths"]
+
+
+def test_native_pass_uses_assume_unchanged_deletion_evidence_and_stales_on_restore(
+    tmp_path, monkeypatch,
+):
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track removed API")
+    _git(backend, "update-index", "--assume-unchanged", "--", "orders.py")
+    source.unlink()
+
+    async def delegate(**kwargs):
+        coordinator.store.bind_turn(kwargs["evaluation_id"], "assumed-deletion-native")
+        scope = coordinator.store.get(kwargs["evaluation_id"])["manifest"]
+        body = report(scope)
+        body["requirement_results"][0]["evidence"] = [{
+            "kind": "deleted", "repository": "backend",
+            "path": "orders.py", "locator": "git:removed-api",
+        }]
+        capture = json.dumps(body)
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("assumed-deletion-native", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", capture, 202),
+            )
+        return {"state": "settled", "turn_id": "assumed-deletion-native",
+                "agent_response": capture}
+
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    rev = graph_rt.get_graph(gid)["revision"]
+    approved = asyncio.run(coordinator.start(gid, "codex-evaluator", rev))
+    assert approved["status"] == "passed"
+    assert coordinator.finalize(gid, approved["evaluation_id"], rev)["finalized_at_ns"]
+    source.write_text("def total(n):\n    return n * 2\n", encoding="utf-8")
+    assert coordinator.read(gid, approved["evaluation_id"])["effective_status"] == "stale"
