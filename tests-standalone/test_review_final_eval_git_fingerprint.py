@@ -386,3 +386,67 @@ def test_rename_source_is_valid_git_deletion_evidence(tmp_path, staged):
     assert coordinator.store.validate_report(report_payload, manifest, {"R1"})[
         "verdict"
     ] == "pass"
+
+
+def test_bad_fsmonitor_hook_cannot_hide_native_final_source_edits(
+    tmp_path, monkeypatch,
+):
+    """A lying FSMonitor reports tracked source clean despite changed bytes."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path, multi=False)
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track evaluator source")
+
+    hook = tmp_path / "fsmonitor-always-clean.sh"
+    hook.write_text("#!/bin/sh\nprintf 'token\\0'\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _git(backend, "config", "core.fsmonitor", str(hook))
+
+    async def delegate(**kwargs):
+        coordinator.store.bind_turn(kwargs["evaluation_id"], "fsmon-native")
+        captured = coordinator.store.get(kwargs["evaluation_id"])["manifest"]
+        body = json.dumps(report(captured))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("fsmon-native", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", body, 201),
+            )
+        return {"state": "settled", "turn_id": "fsmon-native",
+                "agent_response": body}
+
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    rev = graph_rt.get_graph(gid)["revision"]
+    evaluated = asyncio.run(coordinator.start(gid, "codex-evaluator", rev))
+    assert evaluated["status"] == "passed"
+    before = manifest_digest(review_scope(runtime.repos()))
+
+    # Reactivate FSMonitor's "clean" index bits after the safe inspection,
+    # then mutate tracked source without notifying the monitor hook.
+    subprocess.run(["git", "-C", str(backend), "status", "--short"],
+                   check=True, capture_output=True)
+    tagged = subprocess.run(
+        ["git", "-C", str(backend), "ls-files", "-f", "-z"],
+        check=True, capture_output=True,
+    ).stdout
+    assert b"h orders.py\0" in tagged, "FSMonitor precondition was not activated"
+
+    source.write_text("def total(n):\n    return n * 999\n", encoding="utf-8")
+    hidden_diff = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--no-ext-diff", "--no-textconv",
+         "--binary", "--", "orders.py"],
+        check=True, capture_output=True,
+    )
+    assert hidden_diff.stdout == b"", "FSMonitor must reproduce hidden raw edits"
+    after = manifest_digest(review_scope(runtime.repos()))
+    assert before != after, "Fingerprint must ignore dishonest FSMonitor status"
+    assert coordinator.read(gid, evaluated["evaluation_id"])["effective_status"] == "stale"
+    with pytest.raises((RuntimeError, ValueError), match="PASS"):
+        coordinator.finalize(gid, evaluated["evaluation_id"], rev)
+    configured = subprocess.run(
+        ["git", "-C", str(backend), "config", "--get", "core.fsmonitor"],
+        check=True, capture_output=True,
+    ).stdout.strip()
+    assert configured == str(hook).encode(), "Fingerprint must not rewrite Git config"
