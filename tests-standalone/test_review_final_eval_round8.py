@@ -6,6 +6,7 @@ import subprocess
 
 import pytest
 
+from qiqi_delegate.final_eval_git_state import review_scope
 from qiqi_delegate.final_eval_manifest import ( evidence_is_in_manifest, inspect_roots, manifest_digest,
 )
 from test_final_evaluation import evidence, report, setup_graph
@@ -205,7 +206,7 @@ def test_older_current_finalization_keeps_delivery_if_a_newer_attempt_exists(
     rev = graph_runtime.get_graph(gid)["revision"]
     first = asyncio.run(coordinator.start(gid, "codex-evaluator", rev))
     binding = requests.graph_binding(gid)
-    manifest = inspect_roots(runtime.repos())
+    manifest = review_scope(runtime.repos())
     newer, created = coordinator.store.reserve(
         gid, rev, binding["request_id"], binding["request_revision"],
         "codex-evaluator", manifest, manifest_digest(manifest),

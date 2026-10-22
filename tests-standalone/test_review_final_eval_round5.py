@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from qiqi_delegate.final_eval_manifest import inspect_roots, manifest_digest
+from qiqi_delegate.final_eval_git_state import review_scope
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from test_final_evaluation import setup_graph, report
 
@@ -12,7 +13,7 @@ from test_final_evaluation import setup_graph, report
 def _persist_pass(runtime, requests, graph_rt, coordinator, graph_run_id):
     graph_revision = graph_rt.get_graph(graph_run_id)["revision"]
     binding = requests.graph_binding(graph_run_id)
-    manifest = inspect_roots(runtime.repos())
+    manifest = review_scope(runtime.repos())
     entry, created = coordinator.store.reserve(
         graph_run_id, graph_revision,
         binding["request_id"], binding["request_revision"],

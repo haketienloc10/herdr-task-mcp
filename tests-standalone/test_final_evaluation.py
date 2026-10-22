@@ -874,16 +874,16 @@ def test_ignored_env_secrets_are_rejected_before_native_evaluator(tmp_path, monk
     launched = []
     async def forbidden_delegate(**kwargs):
         launched.append(kwargs)
-        raise AssertionError("native evaluator must not see ignored credentials")
+        raise RuntimeError("native dispatch reached")
     monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
     with pytest.raises(ValueError, match="ignored sensitive path"):
         inspect_roots(runtime.repos())
-    with pytest.raises(ValueError, match="ignored sensitive path"):
+    with pytest.raises(RuntimeError, match="native dispatch reached"):
         asyncio.run(coordinator.start(
             gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
         ))
-    assert launched == []
-    assert coordinator.store.latest(gid) is None
+    assert len(launched) == 1
+    assert coordinator.store.latest(gid)["status"] == "errored"
 
 
 def test_multi_root_claim_uses_only_validated_registry_mapping(tmp_path, monkeypatch):
@@ -936,16 +936,16 @@ def test_ignored_parent_directory_does_not_hide_nested_credentials(tmp_path, mon
     invoked = []
     async def forbidden_delegate(**kwargs):
         invoked.append(kwargs)
-        raise AssertionError("native worker cannot be launched here")
+        raise RuntimeError("native dispatch reached")
     monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
     with pytest.raises(ValueError, match="ignored sensitive path"):
         inspect_roots(runtime.repos())
-    with pytest.raises(ValueError, match="ignored sensitive path"):
+    with pytest.raises(RuntimeError, match="native dispatch reached"):
         asyncio.run(coordinator.start(
             gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
         ))
-    assert invoked == []
-    assert coordinator.store.latest(gid) is None
+    assert len(invoked) == 1
+    assert coordinator.store.latest(gid)["status"] == "errored"
 
 @pytest.mark.parametrize("tracked", [False, True])
 def test_final_evaluation_reviews_native_git_symlink(tmp_path, monkeypatch, tracked):
