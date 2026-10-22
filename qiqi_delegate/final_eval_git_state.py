@@ -78,6 +78,17 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
         top = Path(os.fsdecode(_git(root, "rev-parse", "--show-toplevel").strip())).resolve()
         if top != root:
             raise ValueError("evaluation root is not the exact Git root: " + str(root))
+        # With core.fileMode=false, Git ignores executable-bit changes.
+        # Reject this configuration rather than stat() every tracked file.
+        filemode = subprocess.run(
+            ["git", "-C", str(root), "config", "--bool", "--get", "core.fileMode"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+        if filemode.returncode not in (0, 1):
+            raise RuntimeError("cannot inspect Git core.fileMode: " + str(root))
+        if filemode.stdout.strip() == b"false":
+            raise ValueError("Git core.fileMode=false hides source mode changes: "
+                             + str(root))
         head = _git(root, "rev-parse", "--verify", "HEAD") if (
             subprocess.run(["git", "-C", str(root), "rev-parse", "-q", "--verify", "HEAD"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -120,21 +131,24 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
         digest.update(len(tagged).to_bytes(8, "big"))
         digest.update(tagged)
         entries = [entry for entry in tagged.split(b"\0") if entry]
-        # Git diff compares the clean-filtered representation. A custom
-        # filter may hide arbitrary working-tree byte changes, so fail closed
-        # rather than reintroducing a full tracked-file hash scan.
+        # Git diffs compare canonicalized content. Check-in attributes may
+        # hide raw working-tree changes even if the index/diff stay identical.
+        # Reject them instead of hashing all tracked worktree contents.
+        conversions = ("filter", "text", "eol", "ident", "working-tree-encoding", "crlf")
         if entries:
             tracked_paths = b"\0".join(entry[2:] for entry in entries) + b"\0"
-            attrs = _git(root, "check-attr", "-z", "--stdin", "filter",
+            attrs = _git(root, "check-attr", "-z", "--stdin", *conversions,
                          stdin=tracked_paths).split(b"\0")
-            if attrs[-1:] != [b""] or len(attrs[:-1]) != 3 * len(entries):
-                raise RuntimeError("invalid Git filter attribute inspection")
+            if (attrs[-1:] != [b""] or
+                    len(attrs[:-1]) != 3 * len(entries) * len(conversions)):
+                raise RuntimeError("invalid Git conversion attribute inspection")
             for i in range(0, len(attrs) - 1, 3):
-                if attrs[i + 1] != b"filter" or attrs[i + 2] not in (
-                        b"unspecified", b"unset"):
+                if (attrs[i + 1] not in tuple(x.encode("ascii") for x in conversions)
+                        or attrs[i + 2] not in (b"unspecified", b"unset")):
                     raise ValueError(
-                        "Git clean filter may hide source changes: "
-                        + os.fsdecode(attrs[i])
+                        "Git clean filter/check-in conversion may hide source changes: "
+                        + os.fsdecode(attrs[i]) + " (" +
+                        os.fsdecode(attrs[i + 1]) + ")"
                     )
         for entry in entries:
             if not entry:
