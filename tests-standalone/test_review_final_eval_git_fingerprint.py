@@ -145,3 +145,74 @@ def test_uninitialized_submodule_fails_freshness_closed(tmp_path):
     shutil.rmtree(subroot)
     with pytest.raises((RuntimeError, ValueError), match="Git root|repository root"):
         review_scope(runtime.repos())
+
+
+def test_clean_filter_is_rejected_before_native_dispatch(tmp_path, monkeypatch):
+    """Git diff may normalize changed raw source to identical index bytes."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    source = backend / "filtered.py"
+    source.write_text("X\n", encoding="utf-8")
+    (backend / ".gitattributes").write_text(
+        "filtered.py filter=neutral\n", encoding="utf-8",
+    )
+    _git(backend, "config", "filter.neutral.clean", "sed s/./X/g")
+    _git(backend, "add", "--", "filtered.py", ".gitattributes")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track clean-filtered source")
+    source.write_text("Y\n", encoding="utf-8")
+
+    invisible = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--", "filtered.py"],
+        check=True, capture_output=True,
+    )
+    assert invisible.stdout == b"", "precondition: Git diff hides the raw edit"
+
+    launched = []
+    async def forbidden_delegate(**kwargs):
+        launched.append(kwargs)
+        raise AssertionError("native evaluator must not launch with clean filter")
+
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="Git clean filter"):
+        review_scope(runtime.repos())
+    with pytest.raises(ValueError, match="Git clean filter"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert not launched
+    assert coordinator.store.latest(gid) is None
+
+
+def test_untracked_embedded_git_repository_rejected_before_dispatch(
+    tmp_path, monkeypatch,
+):
+    """Git collapses an embedded untracked repo to a single directory entry."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    nested = backend / "nested"
+    nested.mkdir()
+    _git(nested, "init")
+    (nested / "source.py").write_text("SOURCE = 1\n", encoding="utf-8")
+
+    listed = subprocess.run(
+        ["git", "-C", str(backend), "ls-files", "--others",
+         "--exclude-standard", "-z"],
+        check=True, capture_output=True,
+    )
+    assert b"nested/\0" in listed.stdout, "precondition: Git hides nested files"
+
+    launched = []
+    async def forbidden_delegate(**kwargs):
+        launched.append(kwargs)
+        raise AssertionError("native evaluator must not launch with hidden source")
+
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="non-file Git entry"):
+        review_scope(runtime.repos())
+    with pytest.raises(ValueError, match="non-file Git entry"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert not launched
+    assert coordinator.store.latest(gid) is None
