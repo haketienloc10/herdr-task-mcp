@@ -718,19 +718,18 @@ GitHub Actions chạy test trên Python **3.10, 3.12 và 3.13**. Workflow nằm 
 Không sửa trực tiếp dữ liệu SQLite để xử lý công việc kẹt. Dùng các lệnh bảo trì có kiểm tra ID và ghi audit.
 
 
-### Codex review follow-up — direct-root security boundary
+### Direct-root Final Evaluation — ignored-file security boundary
 
-Native `--add-dir` exposes the full registered Git root to native tools, including
-ignored files and `.git` metadata. To prevent common accidental credential
-exposure, source inspection now **fails closed** when it detects ignored
-credential filenames or ignored private directories (`.env`, `.aws`,
-`.ssh`, `.venv`, etc.). This check is **not a sandbox**: a sensitive file under
-an unexpected filename, a sensitive Git object, or a racing external writer
-remains readable by a sufficiently privileged native agent. Do not deploy
-direct-root Final Evaluation on untrusted repositories or ones with sensitive
-Git history until Herdr/adapter-level OS read isolation is available. This
-retains the requested **no repository snapshot/copy** property.
-
+Native `--add-dir` gives the evaluator access to **all files** in each
+registered Git root, including Git-ignored credentials (`.env`,
+`private/.env`, `.aws/`, etc.) and potentially sensitive `.git`
+metadata. **Final Evaluation v3 does not inspect or block ignored secrets
+before launching**. The legacy `inspect_roots()` helper still has ignored-path
+checks, but it is not used by the current coordinator. The native reviewer
+must run only on trusted repositories without secrets that it should not see,
+or inside an externally configured read-only, access-restricted OS sandbox.
+The evaluator prompt alone is not a security boundary. There is no guarantee
+that Git-ignored credentials are hidden from the native process.
 
 ### Codex follow-up — stable evaluator claim identity
 
@@ -743,7 +742,6 @@ alias. The operator must still verify native worker termination and pass
 is released and audited. The prior `--repository` selector is supported
 for callers working with currently registered Git root aliases.
 
-Ignored-path preflight now enumerates nested ignored files instead of
-collapsing whole ignored directories; it detects examples such as
-`private/.env` even when `private/` is ignored. This is defense in depth,
-not a solution to Codex's OS-level isolation finding.
+The legacy `inspect_roots()` helper can detect ignored credential
+paths such as `private/.env`, but the native v3 review path uses
+`review_scope()` and does **not** run that preflight.
