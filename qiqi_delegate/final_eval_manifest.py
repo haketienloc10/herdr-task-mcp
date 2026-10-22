@@ -206,7 +206,7 @@ def _hash_file(root: Path, relative: str) -> tuple[str, int, int]:
         after = path.lstat()
         if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
             before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
-                                   after.st_mtime_ns) or len(target) != after.st_size:
+                                   after.st_mtime_ns, after.st_ctime_ns) or len(target) != after.st_size:
             raise RuntimeError("evaluation symlink changed during inspection: " + relative)
         # Include the type so replacing a link with a regular file containing
         # identical bytes still invalidates an earlier Final PASS.
