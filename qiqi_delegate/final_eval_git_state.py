@@ -66,10 +66,35 @@ def _entry_fingerprint(root: Path, raw: bytes, *, allow_missing: bool) -> bytes:
     return info.st_mode.to_bytes(8, "big") + content.digest()
 
 
+def _tracked_mode(root: Path, raw: bytes) -> bytes:
+    """Capture worktree file type and permission bits, never file contents.
+
+    Sparse/index-only paths can be absent. Do not traverse symlinked parent
+    directories when examining a tracked path.
+    """
+    path = root
+    parts = Path(os.fsdecode(raw)).parts
+    for part in parts[:-1]:
+        path = path / part
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return b"missing-parent"
+        if not stat.S_ISDIR(mode):
+            raise RuntimeError("tracked Git path has a non-directory parent: "
+                               + os.fsdecode(raw))
+    try:
+        mode = (path / parts[-1]).lstat().st_mode
+    except FileNotFoundError:
+        return b"missing-entry"
+    return mode.to_bytes(8, "big")
+
+
 def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
-    """Fingerprint Git diffs and untracked contents, without walking tracked files.
+    """Fingerprint Git diffs, tracked worktree modes and untracked contents.
 
     This is a freshness check, not an immutable snapshot or an access sandbox.
+    No tracked file contents are read except for exceptional index flags.
     Git handles tracked symlinks; dirty submodules are fingerprinted recursively.
     """
     if not roots:
@@ -91,6 +116,18 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
             raise RuntimeError("cannot inspect Git core.fileMode: " + str(root))
         if filemode.stdout.strip() == b"false":
             raise ValueError("Git core.fileMode=false hides source mode changes: "
+                             + str(root))
+        # Under core.symlinks=false, Git treats a mode-120000 checkout as
+        # text containing the link target. Switching between a real symlink
+        # and a plain file can then leave Git's diff unchanged.
+        symlinks = subprocess.run(
+            ["git", "-C", str(root), "config", "--bool", "--get", "core.symlinks"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+        if symlinks.returncode not in (0, 1):
+            raise RuntimeError("cannot inspect Git core.symlinks: " + str(root))
+        if symlinks.stdout.strip() == b"false":
+            raise ValueError("Git core.symlinks=false hides tracked symlink changes: "
                              + str(root))
         autocrlf = subprocess.run(
             ["git", "-C", str(root), "config", "--get", "core.autocrlf"],
@@ -114,6 +151,15 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
         digest.update(len(tagged).to_bytes(8, "big"))
         digest.update(tagged)
         entries = [entry for entry in tagged.split(b"\0") if entry]
+        # Git tracks only executable-mode transitions for regular files.
+        # Inspect metadata (not bytes) for every tracked worktree entry so
+        # chmod 0600->0644, type changes, and missing sparse entries are
+        # reflected without a per-file source hash or directory walk.
+        for entry in entries:
+            relative = entry[2:]
+            mode = _tracked_mode(root, relative)
+            digest.update(len(mode).to_bytes(8, "big"))
+            digest.update(mode)
         # Git diffs compare canonicalized content. Check-in attributes may
         # hide raw working-tree changes even if the index/diff stay identical.
         # Reject them instead of hashing all tracked worktree contents.
