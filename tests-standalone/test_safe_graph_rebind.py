@@ -168,7 +168,7 @@ def test_exact_context_rebind_preserves_accept_and_readiness(tmp_path):
     before = _snapshot(runtime, gid)
     updated = _revision_only_reassessment(requests, gid)
     assert updated["revision"] == req["revision"] + 1
-    with pytest.raises(ValueError, match="stale"):
+    with pytest.raises(RuntimeError, match="stale"):
         requests.assert_graph_ready(gid)
 
     result = requests.rebind_graph(gid, revision, updated["revision"])
