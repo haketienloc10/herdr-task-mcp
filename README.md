@@ -97,8 +97,7 @@ Route hỗ trợ `agent`, `args` và `description` (không bắt buộc để gi
 `claude-balanced` (medium), `claude-high`, `claude-xhigh` và
 `claude-max`. Mỗi bộ model + effort + permission chỉ có **một** route,
 dùng chung cho mọi loại task có độ khó tương ứng. Mặc định
-`--permission-mode auto`. Hai route Codex hiện có giữ riêng do
-tham số permission khác nhau.
+`--permission-mode auto`. Route Codex được cấu hình riêng với quyền phù hợp.
 
 ~~~yaml
 routes:
@@ -109,7 +108,7 @@ routes:
   claude-high:
     agent: claude
     args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
-    description: "Phân tích, planning, testing nhiều nhánh hoặc Final Evaluation."
+    description: "Phân tích, planning, testing nhiều nhánh."
 ~~~
 
 `workspace_info()` trả `routes` (mapping name → agent như trước),
@@ -119,89 +118,14 @@ rủi ro và bằng chứng cần có, không mặc định chọn mức cao nh�
 có thể làm tăng thời gian và chi phí mà không giúp việc đơn giản.
 `TaskPacket` vẫn quy định scope, quyền sửa và acceptance criteria.
 
-**Không cần route `claude-evaluator` riêng**: sau khi TaskGraph hoàn tất,
-gọi `start_final_evaluation` với `claude-high`, hoặc `claude-xhigh`
-nếu cần đánh giá phức tạp. Vai trò Final Evaluator được quyết định bằng API
-và TaskGraph context, không phải tên route. MCP không ép chính xác một profile
-CLI nào: model, effort và permission do YAML quyết định. Nhưng evaluator
-Claude **luôn bỏ project/local settings, .mcp.json** bằng
-`--setting-sources user`, `--strict-mcp-config`, và chặn MCP/skills.
-Native Stop/StopFailure hooks được cấp qua `--settings` chỉ để
-capture kết quả. Không thêm override chính sách memory từ `--add-dir`;
-user/managed settings do operator kiểm soát trong workflow đáng tin cậy.
-Không đặt `--mcp-config` hay `--setting-sources` trong evaluator route;
-các flags này thuộc ranh giới khởi động do runtime quản lý.
-**Codex Evaluator** cũng bảo vệ thư mục khởi chạy trung lập: route cho
-Final Evaluation không được dùng `-C`, `--cd` hoặc các dạng gộp
-`-C/path`, `--cd=/path`, vì các cờ này có thể buộc Codex nạp
-`AGENTS.md` của code ứng viên. Ngoài ra, **mọi Final Evaluation phải dùng phiên native mới ở host cục bộ**, không thể dùng
-`resume`/`fork`/`queue`/`--remote` hoặc non-interactive `exec`/`e`/`review`
-đối với Codex. Codex Final Evaluator chạy TUI tương tác từ neutral CWD;
-không dùng `--skip-git-repo-check` (cờ chỉ dành cho `codex exec`), hoặc
-`--resume`/`-r`, `--continue`/`-c`, `--fork-session`,
-`--from-pr`, `--teleport`, `--session-id`, `attach`, `respawn`,
-`--cloud`/`--remote`/`--environment` đối với Claude. Claude
-Evaluator cũng chặn `-p`/`--print`, `--desktop`, `--bg`/`--background`,
-`--init-only` và các tham số print-only `--max-turns`/`--max-budget-usd`.
-Những tùy chọn này không tương thích với phiên tương tác foreground nhận
-prompt và ghi kết quả bằng Stop hooks (bao gồm các dạng `--flag=value`).
-Final Evaluation kiểm tra **cấu trúc và số lượng giá trị của từng CLI option**,
-chỉ chấp nhận các options tương thích với phiên interactive foreground;
-lệnh quản trị, non-interactive, positional prompt hoặc options chưa được
-nhận diện sẽ bị từ chối **trước khi dispatch**. Giá trị của option hợp lệ
-vẫn được giữ nguyên (ví dụ `--name attach` hoặc `--profile review`
-không phải subcommand). Claude `--add-dir` có thể nhận nhiều thư mục;
-`--restricted` của Claude, `--approve-for-me`/`--not-so-yolo`,
-`--no-daemon`/`--strict-config` của Codex là cờ không có giá trị.
-Claude Final Evaluator hỗ trợ `--ax-screen-reader` để hiển thị cho trình đọc màn hình.
-Các tùy chọn đường dẫn `--system-prompt-file`, `--append-system-prompt-file`,
-`--add-dir` (kể cả nhiều thư mục sau cùng một flag), `--plugin-dir` và
-`--debug-file` nhận đường dẫn tương đối hoặc tuyệt đối. Đối với Final
-Evaluation, đường dẫn tương đối được giải quyết từ workspace điều phối
-(nơi chứa `agent-routing.yaml`), không phải `evaluator-neutral-cwd`.
-Các đường dẫn tuyệt đối và route Peer thông thường được giữ nguyên;
-native Claude vẫn kiểm tra path/type tại thời điểm khởi chạy.
-Evaluator không chấp nhận `--permission-prompt-tool` vì tùy chọn đó chỉ
-dành cho non-interactive mode.
-Claude hỗ trợ `--advisor <model>` và `--debug` hoặc `--debug=filter`,
-cùng các aliases
-`-n`, `--allowed-tools`, `--disallowed-tools`. Các tùy chọn
-`--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`
-nhận nhiều quy tắc sau một flag. Claude `--tools` và `--betas`
-cũng nhận nhiều giá trị (ví dụ `--tools Read Glob`,
-`--betas=beta-one beta-two`); cấu trúc giá trị được kiểm tra trước khi
-khởi chạy evaluator, còn tên tool/beta được Claude xác thực khi chạy.
-Codex `--image`/`-i` hỗ trợ nhiều
-đường dẫn ảnh ngay cả khi ảnh đầu tiên gắn với flag (ví dụ
-`--image=before.png after.png`, `-ibefore.png after.png`).
-Cú pháp gán giá trị cho
-zero-arity flag như `--search=false` sẽ bị từ chối. Model, effort, permission tiếp tục
-do route YAML lựa chọn. `workspace_info().route_details.model` nhận
-diện cả `--model` và native alias `-m` (bao gồm `-mVALUE`).
-Route Peer thông thường không bị giới hạn bởi bộ kiểm tra này.
-
-Lưu ý: `--add-dir` cung cấp quyền truy cập Git root trực tiếp,
-không áp đặt filesystem chỉ đọc. Final Evaluator không tạo repository copy.
-Prompt cấm thay đổi source, nhưng route permissive vẫn có thể cho phép
-native agent thực hiện side effects. Multi-root claims ngăn Peer hợp tác
-ghi vào các Git root trong lúc review; external writers không bị chặn.
-Git fingerprint kiểm tra thay đổi trước/sau, không bảo đảm bất biến tại
-mọi thời điểm. Cần OS sandbox hoặc immutable filesystem view nếu review
-code không đáng tin cậy.
-
-Runtime sở hữu native Stop/StopFailure hooks; không thêm `--settings` hoặc
-`hooks.*` (kể cả cú pháp `--settings=...`, `--config=hooks.*`)
-vào `args`. Claude Final Evaluation từ chối `--safe-mode` vì chế độ này
-vô hiệu hóa native hooks cần thiết để capture kết quả. Route Peer thông thường
-vẫn có thể sử dụng `--safe-mode`. Installer **không ghi đè** `agent-routing.yaml`
-đã tồn tại; workspace cũ cần tự cập nhật cấu hình.
+Sau khi Lead ACCEPT tất cả node, TaskGraph đạt trạng thái `complete`.
+Không có bước đánh giá độc lập hoặc finalize riêng.
 
 ## Workflow mới: Lead → MCP → Peer (server-owned orchestration)
 
 Các high-level MCP tools **gộp việc điều phối**, không thay thế Discovery, analysis,
 TaskGraph, native capture, semantic review, retry/replan, write claim, readiness gate
-hoặc independent final evaluation. Các tool thấp hơn vẫn có thể dùng để khôi phục
-hoặc chẩn đoán.
+Các tool thấp hơn vẫn có thể dùng để khôi phục hoặc chẩn đoán.
 
 - `submit_workflow`: nhận nguyên văn `user_request`, nguồn tùy chọn, `assessment` và
   đúng một `single_task` hoặc `graph` nếu `decision=direct`. Server tạo request +
@@ -288,9 +212,8 @@ hoặc chẩn đoán.
 Server trả `task_request` compact, `graph_run_id` và `review_bundle`.
 Lead review response của Peer, đọc thêm bằng `get_review_evidence` nếu dài,
 rồi gọi `submit_decisions(graph_run_id, decisions, expected_revision,
-auto_continue=true)`. Sau khi graph complete, thực hiện **final evaluation**
-và `finalize_graph` như quy trình hiện tại; việc ACCEPT các node không thay thế
-independent evaluation.
+auto_continue=true)`. Khi tất cả node đã được Lead ACCEPT và graph đạt `complete`,
+quy trình kết thúc. Không có bước finalize riêng.
 
 ### Discovery và analysis vẫn được giữ nguyên
 
@@ -400,7 +323,7 @@ QiQi phân biệt phần `completed` và `remaining`, đối chiếu chỉ dẫn
 - Bound TaskGraph sử dụng revision guard, kiểm tra blocking unknowns và ánh xạ node với requirements; prompt Peer nhận user request, các requirements liên quan và accepted upstream response.
 - Discovery chỉ truyền những context source được `assessment.requirements[].evidence_refs` tham chiếu, không tự gửi mọi tài liệu đã nạp. Nếu cần một nguồn cho Discovery, đưa `source:id` đó vào assessment.
 - Native captured Discovery/Peer evidence có thể dài tới giới hạn capture 256.000 ký tự và vẫn được lưu đầy đủ trong `get_task_request` (kể cả khi vượt giới hạn 100.000 byte dành cho nguồn inline/file). Khi chuyển evidence vào Implementation Peer, giới hạn `TaskPacket` 100.000 ký tự vẫn áp dụng: runtime trả lỗi có hướng xử lý, **không cắt ngầm** nội dung. Lead cần tạo nguồn ngắn hơn có dẫn xuất rõ ràng hoặc replan nếu packet quá lớn.
-- `workspace_file` là **file reference**, không đưa nội dung vào SQLite hoặc `TaskPacket`. Runtime lưu đường dẫn tương đối, dung lượng và SHA256; khi giao việc, runtime sao chép **chỉ những source đã được requirement tham chiếu** vào thư mục tạm độc lập, xác minh SHA256, cấp `--add-dir` cho Peer và gửi đường dẫn snapshot. Peer đọc khi cần. Snapshot đặt quyền 0444/0555 nhưng các quyền này **không tạo sandbox bảo mật** đối với agent chạy cùng UID hoặc với route `--yolo`. Snapshot bị xóa khi dispatch kết thúc. File UTF-8 tối đa 64 MiB; file thay đổi sau khi đăng ký sẽ chặn giao việc. `get_task_source` không đọc nội dung của `workspace_file` reference-only. `repo_file` và `inline` vẫn chuyển nội dung theo giới hạn cũ. Final Evaluator cũng sao chép và xác minh các source này vào snapshot riêng.
+- `workspace_file` là **file reference**, không đưa nội dung vào SQLite hoặc `TaskPacket`. Runtime lưu đường dẫn tương đối, dung lượng và SHA256; khi giao việc, runtime sao chép **chỉ những source đã được requirement tham chiếu** vào thư mục tạm độc lập, xác minh SHA256, cấp `--add-dir` cho Peer và gửi đường dẫn snapshot. Peer đọc khi cần. Snapshot đặt quyền 0444/0555 nhưng các quyền này **không tạo sandbox bảo mật** đối với agent chạy cùng UID hoặc với route `--yolo`. Snapshot bị xóa khi dispatch kết thúc. File UTF-8 tối đa 64 MiB; file thay đổi sau khi đăng ký sẽ chặn giao việc. `get_task_source` không đọc nội dung của `workspace_file` reference-only. `repo_file` và `inline` vẫn chuyển nội dung theo giới hạn cũ.
 - Mỗi Task Request giới hạn 16 context sources. Discovery cần một slot trống cho kết quả: runtime **giữ chỗ trước khi chạy Peer** và không cho append khác chiếm vị trí đó. Nếu đã có 16 nguồn, Discovery bị từ chối trước khi dispatch; tạo request mới với các nguồn thực sự liên quan. Nếu kết quả native đã capture nhưng gắn nguồn không thành công (ví dụ revision race), response vẫn được trả kèm `attachment_error` và `turn_id` để có thể khôi phục ở request mới. Sau khi MCP process bị dừng đột ngột, lần khởi động tiếp theo sẽ tự nhận diện reservation `requested` của process đã chết và đánh dấu `interrupted` để giải phóng slot; không ảnh hưởng đến reservation của process còn sống. Nếu source đã được ghi vào SQLite trước khi crash (`attaching`), recovery đánh dấu `settled`, giữ nguyên source và `turn_id`. Nếu native capture đã được ghi vào bảng `turns` nhưng process chết **trước khi append source**, runtime vẫn có `turn_id` liên kết từ trước lúc chạy Peer; recovery tự đính kèm đầy đủ captured result, tăng revision và invalidates assessment để QiQi đánh giá lại. Chỉ khi chưa có native capture hợp lệ mới đánh dấu `interrupted`. Khi Discovery bị hủy sau native capture, bản ghi vẫn giữ `turn_id` đã bind để có thể xem và đính kèm lại evidence; cancellation không xóa turn đã capture. Khi startup recovery tự đính kèm một captured turn, revision và assessment có thể thay đổi: thao tác append/Discovery đang dùng revision cũ sẽ bị từ chối và Lead phải lấy context mới, đánh giá lại trước khi tiếp tục; runtime không cấp slot hoặc chuyển state dựa trên snapshot trước recovery. Trên Linux hệ thống dùng PID kèm thời điểm bắt đầu process để tránh nhầm PID được tái sử dụng; trên hệ điều hành thiếu `/proc` chỉ kiểm tra PID còn sống (best-effort).
 - **Rolling upgrade / Discovery không có owner PID:** Khi khởi động MCP, migration của `task_discoveries` dùng SQLite `BEGIN IMMEDIATE` và đọc lại schema trước `ALTER TABLE`, tránh lỗi nhiều process nâng cấp đồng thời. Các reservation `requested`/`attaching` cũ với `owner_pid=NULL` **không tự động thu hồi**: worker của phiên bản MCP cũ có thể vẫn đang chạy, nên slot được giữ nguyên. Operator phải kiểm tra Herdr worker/process đã dừng trước khi khôi phục chính xác một `discovery_id` bằng lệnh:
 
@@ -598,26 +521,16 @@ Trạng thái `settled` chỉ cho biết Peer đã trả kết quả. **Nó khô
   và chọn workflow recovery riêng theo bằng chứng. Không tuyên bố đã bảo toàn
   ACCEPT cho graph cũ khi thiếu proof.
 
-  Sau rebind thành công, phải chạy Final Evaluation mới (hoặc xác minh PASS
-  mới đã được lưu hợp lệ), rồi mới `finalize_graph`. PASS của request revision
-  cũ không tự trở thành PASS cho revision mới.
+  Sau rebind thành công, TaskGraph giữ các ACCEPT hợp lệ và trạng thái
+hoàn tất; không phải chạy thêm bước đánh giá độc lập.
 
-## Final Evaluation Gate — Native Multi-Root Review
+## Hoàn tất TaskGraph
 
-TaskGraph `complete` chỉ xác nhận execution hoàn thành. Mọi node phải `satisfied` với native Peer evidence trước khi có thể chạy Final Evaluation. **Lead/Peer ACCEPT không phải chứng cứ Final PASS.**
-
-1. Bind verbatim Task Request, assessment và `requirement_map` khi gọi `start_graph`. TaskGraph không được bind không đủ điều kiện Final PASS.
-2. Kết thúc các node bằng vòng `get_node_reviews` / `submit_decisions` hiện hành. Nếu có node cancelled/blocked, Final Evaluation từ chối.
-3. Gọi `start_final_evaluation(graph_run_id, route, expected_revision)`. Route `claude-high`, `claude-xhigh` hoặc Codex tùy theo `agent-routing.yaml`. Mỗi lượt sử dụng **một native session mới**, bắt đầu từ `~/.qiqi/evaluator-cwd/runs/turn-<uuid>`, không tái sử dụng phiên Lead/Peer. Trust được thiết lập một lần tại thư mục cha cho các adapter hỗ trợ kế thừa trust.
-4. Runtime xác thực Git roots thuộc TaskGraph trong `repos.yaml`, tạo **Git fingerprint** bằng diff/index, metadata quyền/loại của tracked files và nội dung non-ignored untracked files để phát hiện thay đổi. Không tạo manifest SHA256 từng file, không copy source, không từ chối symlink Git thông thường. Một transaction cấp claim cho **tất cả** Git root; native agent đọc source trực tiếp qua `--add-dir`.
-5. Trong CWD trung lập, runtime tạo `context/context.json`, `context/source_index.json` và file nguồn Task Request được tham chiếu. Context chứa verbatim user request, requirements, requirement mapping, graph objective/acceptance criteria, lịch sử node attempts, Lead decisions, Git root fingerprints. Tất cả Lead/Peer reports chỉ là claims cần xác minh. Nguồn đính kèm `workspace_file` có thể được copy riêng lẻ để bảo toàn nội dung; **không có repository snapshot/copy**.
-6. Evaluator phải review implementation thực tế ở **mọi Git root thuộc TaskGraph**, gồm mọi module liên quan, contract nội repository lẫn liên repository. Phải đối chiếu request, requirements, node evidence, producer/consumer interface, schema và data flow. Report gồm `verdict`, `requirement_results`, `cross_repository_checks`, `verification_runs`, `findings`, `unknowns`. Evidence yêu cầu `{repository,path,locator}`; deletion yêu cầu `{kind:"deleted",repository,path,locator}` nằm trong danh sách tracked deletions từ Git.
-7. Native captured PASS **chưa phải Final PASS**. `FinalEvaluationStore.validate_report()` kiểm tra schema, coverage, repository scope và evidence locators (không tự chứng minh từng locator trỏ tới nội dung đã đọc). Kết quả phải thuộc native turn đã settled. Git fingerprint được so sánh sau native review và khi finalize; source thay đổi hoặc worker cleanup chưa xác nhận đều không được PASS.
-8. Dùng `get_final_evaluation(graph_run_id, evaluation_id?)` để đọc evidence. Nếu FAIL/INCONCLUSIVE, Lead sửa hoặc reconcile rồi đánh giá lại toàn bộ graph. Chỉ gọi `finalize_graph(graph_run_id, evaluation_id, expected_revision)` khi PASS vẫn current. Các PASS cũ (policy v1/v2) lưu để audit nhưng không được tái sử dụng với policy v3.
-
-**Concurrency/recovery:** Runtime giữ lock cho tất cả registered roots trong một transaction; chỉ nhả sau khi Herdr workspace đã đóng. Nếu native worker vẫn có thể tồn tại, giữ claims và evaluator CWD để operator kiểm tra. Phải xác nhận worker termination, release từng exact Git root claim, sau đó dùng `recover-final-evaluation`; capture đơn lẻ không thể phục hồi thành PASS.
-
-**Giới hạn bảo mật và tính nhất quán:** `--add-dir` không phải filesystem sandbox. Evaluator có thể nhìn thấy file được Git ignore, symlink và nội dung ngoài Git root nếu native permissions cho phép; operator phải chạy trên workspace đáng tin cậy. Git fingerprint cũng duyệt **submodule worktrees theo gitlinks** bằng cùng phép tính Git diff/index/untracked; submodule chưa checkout bị từ chối thay vì công nhận source chưa đọc. Để tránh PASS sai, V3 từ chối tracked paths có Git check-in transformations (`filter`, `text`, `eol`, `ident`, `working-tree-encoding`, `crlf`) và root đặt `core.autocrlf`, `core.fileMode=false` hoặc `core.symlinks=false`, vì Git diff có thể che thay đổi nội dung, mode hoặc symlink. Untracked embedded Git repositories cũng bị từ chối thay vì chỉ hash metadata thư mục. Trước khi chạy Git worktree diff, Final Evaluation kiểm tra các tracked-path attributes và từ chối check-in conversions có thể chạy clean filter tùy ý. Các lệnh Git thu thập fingerprint luôn dùng `-c core.fsmonitor=false -c core.trustctime=true` để không tin báo cáo “clean” từ FSMonitor hook hoặc bỏ qua ctime; cấu hình Git trong repository không bị thay đổi. Git fingerprint là **best-effort freshness check**, không phải immutable snapshot hay chứng cứ từng file: dùng Git diff/index, chỉ đọc metadata mode/loại của tracked files (không hash nội dung của từng tracked file) và hash non-ignored untracked files; không bao phủ nội dung ignored files hay thay đổi thoáng qua rồi hoàn nguyên. Ghi source bị cấm trong prompt nhưng permission thực tế vẫn phụ thuộc `agent-routing.yaml`. Write claims chặn QiQi writers hợp tác, không chặn process bên ngoài. Nếu cần bảo đảm read-only, dùng filesystem sandbox bên ngoài. Report từ LLM là đánh giá độc lập, không phải chứng minh máy móc rằng từng locator đã được đọc.
+TaskGraph chuyển sang `complete` khi tất cả node đã được Lead quyết định
+ACCEPT và đạt trạng thái `satisfied`. Lead kiểm tra bằng chứng từ
+`get_review_bundle`, `get_review_evidence` hoặc `get_node_reviews` trước
+khi gửi `submit_decisions`. Nếu node bị block hoặc cần retry/replan, tiếp tục
+dùng các quyết định hiện có để hoàn tất hoặc xử lý lỗi.
 
 ## Native capture và trạng thái lỗi
 
@@ -703,7 +616,6 @@ GitHub Actions chạy test trên Python **3.10, 3.12 và 3.13**. Workflow nằm 
 | Đường dẫn | Vai trò |
 |---|---|
 | `qiqi_delegate/install.py` | Tạo cấu hình MCP và quy tắc Lead dùng chung cho Claude/Codex |
-| `qiqi_delegate/evaluator_routes.py` | Profile CLI an toàn cho Codex/Claude Final Evaluator |
 | `qiqi_delegate/server.py` | Khai báo MCP tools |
 | `qiqi_delegate/core.py` | Kiểm tra TaskPacket và phân tích native capture |
 | `qiqi_delegate/result_hook.py` | Ghi sự kiện native Stop |
@@ -716,32 +628,3 @@ GitHub Actions chạy test trên Python **3.10, 3.12 và 3.13**. Workflow nằm 
 | `tests-standalone/` | Regression tests của runtime Python |
 
 Không sửa trực tiếp dữ liệu SQLite để xử lý công việc kẹt. Dùng các lệnh bảo trì có kiểm tra ID và ghi audit.
-
-
-### Direct-root Final Evaluation — ignored-file security boundary
-
-Native `--add-dir` gives the evaluator access to **all files** in each
-registered Git root, including Git-ignored credentials (`.env`,
-`private/.env`, `.aws/`, etc.) and potentially sensitive `.git`
-metadata. **Final Evaluation v3 does not inspect or block ignored secrets
-before launching**. The legacy `inspect_roots()` helper still has ignored-path
-checks, but it is not used by the current coordinator. The native reviewer
-must run only on trusted repositories without secrets that it should not see,
-or inside an externally configured read-only, access-restricted OS sandbox.
-The evaluator prompt alone is not a security boundary. There is no guarantee
-that Git-ignored credentials are hidden from the native process.
-
-### Codex follow-up — stable evaluator claim identity
-
-When a native Evaluator starts and becomes blocked, recovery output uses
-`release-claim --claim-repository <persisted-key> --claim-id <turn-id>`
-for **each** held Git root. The persisted key identifies the immutable
-`write_claims.repository` primary key, **not** the current `repos.yaml`
-alias. The operator must still verify native worker termination and pass
-`--worker-termination-confirmed`; only a matching exact row/claim pair
-is released and audited. The prior `--repository` selector is supported
-for callers working with currently registered Git root aliases.
-
-The legacy `inspect_roots()` helper can detect ignored credential
-paths such as `private/.env`, but the native v3 review path uses
-`review_scope()` and does **not** run that preflight.
