@@ -137,8 +137,9 @@ def test_retry_feedback_and_resume_intent_survive_graph_restart(tmp_path):
         ("claude", ["--resume", "native-session-1"]),
     ],
 )
+@pytest.mark.parametrize("mismatch_on_resume", [False, True])
 def test_runtime_resume_uses_native_session_and_preserves_capture(
-    tmp_path, monkeypatch, adapter, expected_resume_args,
+    tmp_path, monkeypatch, adapter, expected_resume_args, mismatch_on_resume,
 ):
     control = tmp_path / "control"
     control.mkdir()
@@ -160,6 +161,7 @@ def test_runtime_resume_uses_native_session_and_preserves_capture(
     prompts = []
     captures = []
     workspace_ids = []
+    closed_workspaces = []
 
     async def server_ready():
         return None
@@ -180,10 +182,15 @@ def test_runtime_resume_uses_native_session_and_preserves_capture(
     async def prompt_agent(_name, prompt, agent_adapter):
         assert agent_adapter == adapter
         prompts.append(prompt)
+        native = (
+            "native-session-2"
+            if mismatch_on_resume and len(prompts) == 2
+            else "native-session-1"
+        )
         return "done", {
             "agent_status": "done",
             "agent_session": {
-                "kind": "id", "agent": adapter, "value": "native-session-1",
+                "kind": "id", "agent": adapter, "value": native,
             },
         }
 
@@ -199,6 +206,7 @@ def test_runtime_resume_uses_native_session_and_preserves_capture(
     async def run_command(*args, **_kwargs):
         assert args[:2] == ("workspace", "close")
         assert args[2] in workspace_ids
+        closed_workspaces.append(args[2])
         return 0, "", ""
 
     monkeypatch.setattr(runtime, "_ensure_herdr_server", server_ready)
@@ -215,10 +223,32 @@ def test_runtime_resume_uses_native_session_and_preserves_capture(
     first = asyncio.run(runtime.delegate(
         repository="backend", route="codex-balanced", packet=packet,
     ))
-    second = asyncio.run(runtime.delegate(
-        repository="backend", route="codex-balanced", packet=packet,
-        session_id=first["session_id"],
-    ))
+    async def resume():
+        return await runtime.delegate(
+            repository="backend", route="codex-balanced", packet=packet,
+            session_id=first["session_id"],
+        )
+
+    if mismatch_on_resume:
+        with pytest.raises(RuntimeError, match="RESUME native session identity mismatch"):
+            asyncio.run(resume())
+        assert len(prompts) == 2
+        assert starts[0][-2:] != expected_resume_args
+        assert starts[1][-2:] == expected_resume_args
+        assert captures == ["native-session-1"]
+        # Failed resume must not create a turn or session for the wrong identity,
+        # and a successfully closed Herdr workspace must release its claim.
+        assert closed_workspaces == workspace_ids
+        with sqlite3.connect(runtime.db) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+            assert conn.execute("SELECT DISTINCT session_id FROM turns").fetchone() == (
+                "native-session-1",
+            )
+            assert conn.execute("SELECT COUNT(*) FROM write_claims").fetchone()[0] == 0
+        return
+
+    second = asyncio.run(resume())
     assert first["state"] == second["state"] == "settled"
     assert first["session_id"] == second["session_id"] == "native-session-1"
     assert first["turn_id"] != second["turn_id"]
@@ -229,6 +259,7 @@ def test_runtime_resume_uses_native_session_and_preserves_capture(
     # Characterize current behavior: resume re-renders the same full task prompt.
     assert prompts[0] == prompts[1]
     assert "## Repository execution boundary" in prompts[1]
+    assert closed_workspaces == workspace_ids
 
     with sqlite3.connect(runtime.db) as conn:
         rows = conn.execute(
