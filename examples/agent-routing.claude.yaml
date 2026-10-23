@@ -25,7 +25,8 @@ routes:
   claude-critical:
     agent: claude
     args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "max"]
-  # Final evaluation độc lập (chỉ đọc). Server chỉ chấp nhận ĐÚNG bộ args này, không thêm --model/--effort.
+  # Final Evaluation dùng route do bạn cấu hình; --model và --effort được phép.
+  # Read-only là yêu cầu trong prompt, không phải filesystem sandbox.
   claude-evaluator:
     agent: claude
     args:
