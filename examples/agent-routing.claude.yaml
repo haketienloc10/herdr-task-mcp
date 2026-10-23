@@ -20,18 +20,8 @@ routes:
   claude-deep:
     agent: claude
     args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "xhigh"]
-  # HẠN CHẾ DÙNG (tốn token nhất, chậm nhất): chỉ cho task rủi ro cao, final evaluation.
-  # Task rủi ro cao, final evaluation
+  # HẠN CHẾ DÙNG (tốn token nhất, chậm nhất): chỉ cho task rủi ro cao.
+  # Task rủi ro cao
   claude-critical:
     agent: claude
     args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "max"]
-  # Final evaluation độc lập (chỉ đọc). Server chỉ chấp nhận ĐÚNG bộ args này, không thêm --model/--effort.
-  claude-evaluator:
-    agent: claude
-    args:
-      - "--model"
-      - "claude-sonnet-5-5"
-      - "--effort"
-      - "medium"
-      - "--permission-mode"
-      - "auto"
