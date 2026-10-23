@@ -18,7 +18,6 @@ from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_graph import GraphNode
 from qiqi_delegate.task_graph_validation import validate_task_graph
 from qiqi_delegate.task_request import TaskRequestStore
-from qiqi_delegate.final_eval import FinalEvaluationCoordinator
 
 class Fact(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -168,7 +167,6 @@ graph_runtime = GraphRuntime(
     repository_key=lambda name: str(runtime.repos()[name]),
     readiness_guard=task_requests.assert_graph_ready,
 )
-final_evaluation = FinalEvaluationCoordinator(runtime, graph_runtime, task_requests)
 mcp = MCPServer(
     "QiQi Delegate (standalone)",
     instructions=(
@@ -195,12 +193,8 @@ mcp = MCPServer(
         "Use get_review_evidence for further exact response chunks before ACCEPT. "
         "Keep start_graph, delegate_next and get_node_reviews for recovery or legacy flows. "
         "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
-        "After all TaskGraph nodes are satisfied, graph_state complete only means "
-        "execution complete: call start_final_evaluation with a deliberately configured "
-        "user-configured evaluator route, get_final_evaluation, "
-        "and only then finalize_graph with a current independently evaluated PASS. "
-        "Peer reports and Lead ACCEPT are "
-        "not substitutes for final source verification. "
+        "TaskGraph state complete requires explicit Lead ACCEPT for all nodes; "
+        "the completed graph is the terminal workflow result. "
         "Use one TaskPacket schema for analysis, coding, testing and documentation; "
         "tailor acceptance_criteria and constraints to the objective, including mixed tasks. "
         "Before coding choose SINGLE_TASK (one Peer) or MULTI_TASK (multiple repo tasks); "
@@ -1164,7 +1158,6 @@ async def get_graph(graph_run_id: str) -> dict[str, Any]:
     result["task_request_binding"] = task_requests.graph_binding(graph_run_id)
     if result["task_request_binding"] is None:
         result["task_readiness_policy"] = "legacy_unassessed"
-    result.update(final_evaluation.graph_status(graph_run_id))
     return result
 
 @mcp.tool()
@@ -1187,39 +1180,6 @@ async def rebind_graph(
     """
     return task_requests.rebind_graph(
         graph_run_id, expected_graph_revision, expected_request_revision,
-    )
-
-
-@mcp.tool()
-@_public_tool_errors
-async def start_final_evaluation(
-    graph_run_id: str, route: str, expected_revision: int,
-) -> dict[str, Any]:
-    """One fresh Codex/Claude Evaluator over all live TaskGraph Git roots.
-
-    Evaluator CLI policy comes from agent-routing.yaml. A permissive CLI
-    is not a read-only sandbox; original Git roots are never evaluator cwd.
-    """
-    return await final_evaluation.start(graph_run_id, route, expected_revision)
-
-
-@mcp.tool()
-@_public_tool_errors
-async def get_final_evaluation(
-    graph_run_id: str, evaluation_id: str | None = None,
-) -> dict[str, Any]:
-    """Inspect complete independent evaluator evidence and stale/finalized status."""
-    return final_evaluation.read(graph_run_id, evaluation_id)
-
-
-@mcp.tool()
-@_public_tool_errors
-async def finalize_graph(
-    graph_run_id: str, evaluation_id: str, expected_revision: int,
-) -> dict[str, Any]:
-    """Explicitly close delivery ONLY after current independent graph-level PASS."""
-    return final_evaluation.finalize(
-        graph_run_id, evaluation_id, expected_revision,
     )
 
 
