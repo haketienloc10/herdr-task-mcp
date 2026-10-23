@@ -327,7 +327,8 @@ def test_unmapped_legacy_claim_blocks_writes_until_exact_manual_recovery(tmp_pat
 
 def test_exact_claim_repository_recovers_removed_alias_without_guessing(tmp_path):
     runtime = setup_workspace(tmp_path)
-    runtime._claim_many(("backend", "frontend"), "turn:old", expected_roots=runtime.repos())
+    runtime._claim("backend", "turn:old")
+    runtime._claim("frontend", "turn:old")
     (tmp_path / "repos.yaml").write_text(
         "repositories:\n"
         "  - name: renamed_backend\n    path: backend\n"

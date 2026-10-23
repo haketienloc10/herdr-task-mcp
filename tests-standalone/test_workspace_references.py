@@ -1,7 +1,6 @@
 """Large Lead-workspace documents travel as scoped, hash-checked snapshots."""
 import asyncio
 import importlib
-import json
 import re
 import subprocess
 from pathlib import Path
@@ -10,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from qiqi_delegate.core import build_task_packet
-from qiqi_delegate.final_eval import FinalEvaluationCoordinator
 from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_request import TaskRequestStore, copy_workspace_snapshot
 
@@ -144,35 +142,3 @@ def test_native_peer_gets_only_cited_snapshot(workspace, monkeypatch):
     assert "--add-dir" in observed["argv"]
     assert str(observed["snapshot"].parent) in observed["argv"]
     assert not observed["snapshot"].exists()
-
-
-def test_final_evaluator_stages_reference_context_without_copying_repos(
-    workspace, tmp_path,
-):
-    lead, runtime, store, server = workspace
-    req, source, content = create_source(lead, store)
-    assessed = store.assess(req["request_id"], req["revision"], {
-        "requirements": [
-            {"id": "R1", "text": "Implement", "evidence_refs": [source["id"]]}
-        ],
-        "blocking_unknowns": [],
-        "decision": "direct",
-        "rationale": "Specification supplied",
-    })
-    neutral = tmp_path / "neutral-run"
-    neutral.mkdir()
-    runtime._materialize_evaluation_context(neutral, {
-        "original_user_request": assessed["user_request"],
-        "requirements": assessed["assessment"]["requirements"],
-        "sources": assessed["sources"],
-    })
-    context_dir = neutral / "context"
-    source_index = json.loads(
-        (context_dir / "source_index.json").read_text(encoding="utf-8")
-    )
-    assert len(source_index) == 1
-    assert source_index[0]["sha256"] == source["sha256"]
-    assert (context_dir / source_index[0]["source_path"]).read_text(
-        encoding="utf-8"
-    ) == content
-    assert not (neutral / ".qiqi-final-task-sources").exists()

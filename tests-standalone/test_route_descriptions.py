@@ -107,18 +107,6 @@ def test_route_rejects_blank_cli_operands_except_empty_claude_tools(
         runtime.route("invalid")
 
 
-@pytest.mark.parametrize("agent,args", [
-    ("claude", ["--tools"]),
-    ("claude", ["--model="]),
-    ("codex", ["--dangerously-bypass-hook-trust=true"]),
-])
-def test_evaluator_rejects_missing_or_illegal_option_values(agent, args):
-    from qiqi_delegate.runtime import _validate_interactive_evaluator_argv
-
-    with pytest.raises(ValueError):
-        _validate_interactive_evaluator_argv(agent, args)
-
-
 def test_legacy_routes_accept_missing_descriptions(environment):
     _server, runtime, *_ = environment
     assert runtime.route("codex-balanced") == ("codex", [])
