@@ -5,6 +5,7 @@ preserve the legacy paths unless an explicit later PR changes their contract.
 """
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -120,6 +121,11 @@ def test_current_role_specific_prompt_boundaries(
     role, kwargs, boundary, must_include,
 ):
     prompt = render_task_prompt(_packet(), **kwargs)
+    # Pin the entire rendered string, including every instruction and its order.
+    # These fixtures describe legacy behavior; update only for an approved change.
+    golden_file = Path(__file__).parent / "fixtures" / "task_prompt_baseline.json"
+    goldens = json.loads(golden_file.read_text(encoding="utf-8"))
+    assert prompt == goldens[role]
     assert prompt.startswith("Repository task delegated by QiQi\n\n")
     assert "## Evidence and response quality" in prompt
     assert prompt.count(boundary) == 1
