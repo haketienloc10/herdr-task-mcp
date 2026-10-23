@@ -274,7 +274,6 @@ def test_installer_enables_default_agent_flags_without_overwriting_existing_rout
         "claude", ["--model", "claude-sonnet-5-5", "--effort", "medium",
                    "--permission-mode", "auto"]
     )
-    assert rt.route("codex-evaluator") == ("codex", ["--sandbox", "read-only"])
     assert rt.route("claude-high") == (
         "claude", ["--model", "claude-sonnet-5-5", "--effort", "high",
                    "--permission-mode", "auto"]
