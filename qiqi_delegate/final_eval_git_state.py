@@ -14,11 +14,12 @@ from typing import Any
 
 
 def _git(root: Path, *args: str, stdin: bytes | None = None) -> bytes:
-    # Ignore untrusted FSMonitor "clean" reports during source freshness checks.
-    # The per-command override does not modify the repository configuration.
+    # Ignore FSMonitor reports and honor ctime even if the repository disables it.
+    # Per-command overrides do not modify repository configuration.
     try:
         return subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "-C", str(root), *args], check=True,
+            ["git", "-c", "core.fsmonitor=false", "-c", "core.trustctime=true",
+             "-C", str(root), *args], check=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=stdin, timeout=60,
         ).stdout
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -106,6 +107,35 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
                            check=False, timeout=30).returncode == 0
         ) else b""
         digest = hashlib.sha256()
+        # Git hides skip-worktree and assume-unchanged working-tree edits
+        # from diff. Fingerprint only those exceptional tracked entries; don't
+        # hash the entire tracked tree or reject normal sparse checkouts.
+        tagged = _git(root, "ls-files", "-v", "-z")
+        digest.update(len(tagged).to_bytes(8, "big"))
+        digest.update(tagged)
+        entries = [entry for entry in tagged.split(b"\0") if entry]
+        # Git diffs compare canonicalized content. Check-in attributes may
+        # hide raw working-tree changes even if the index/diff stay identical.
+        # Reject them instead of hashing all tracked worktree contents.
+        conversions = ("filter", "text", "eol", "ident", "working-tree-encoding", "crlf")
+        if entries:
+            tracked_paths = b"\0".join(entry[2:] for entry in entries) + b"\0"
+            attrs = _git(root, "check-attr", "-z", "--stdin", *conversions,
+                         stdin=tracked_paths).split(b"\0")
+            if (attrs[-1:] != [b""] or
+                    len(attrs[:-1]) != 3 * len(entries) * len(conversions)):
+                raise RuntimeError("invalid Git conversion attribute inspection")
+            for i in range(0, len(attrs) - 1, 3):
+                if (attrs[i + 1] not in tuple(x.encode("ascii") for x in conversions)
+                        or attrs[i + 2] not in (b"unspecified", b"unset")):
+                    raise ValueError(
+                        "Git clean filter/check-in conversion may hide source changes: "
+                        + os.fsdecode(attrs[i]) + " (" +
+                        os.fsdecode(attrs[i + 1]) + ")"
+                    )
+        # Perform potentially executable Git worktree diff only *after*
+        # checking all tracked attributes. A configured clean filter can run
+        # arbitrary code during diff, even if the evaluation later rejects it.
         # Index and working-tree changes are represented by Git's own diff,
         # including renames, staged edits, deletions and symlink target changes.
         gitlinks: list[bytes] = []
@@ -135,32 +165,6 @@ def review_scope(roots: dict[str, Path]) -> dict[str, Any]:
             digest.update(relative)
             digest.update((sub["head"] or "").encode("ascii"))
             digest.update(bytes.fromhex(sub["fingerprint"]))
-        # Git hides skip-worktree and assume-unchanged working-tree edits
-        # from diff. Fingerprint only those exceptional tracked entries; don't
-        # hash the entire tracked tree or reject normal sparse checkouts.
-        tagged = _git(root, "ls-files", "-v", "-z")
-        digest.update(len(tagged).to_bytes(8, "big"))
-        digest.update(tagged)
-        entries = [entry for entry in tagged.split(b"\0") if entry]
-        # Git diffs compare canonicalized content. Check-in attributes may
-        # hide raw working-tree changes even if the index/diff stay identical.
-        # Reject them instead of hashing all tracked worktree contents.
-        conversions = ("filter", "text", "eol", "ident", "working-tree-encoding", "crlf")
-        if entries:
-            tracked_paths = b"\0".join(entry[2:] for entry in entries) + b"\0"
-            attrs = _git(root, "check-attr", "-z", "--stdin", *conversions,
-                         stdin=tracked_paths).split(b"\0")
-            if (attrs[-1:] != [b""] or
-                    len(attrs[:-1]) != 3 * len(entries) * len(conversions)):
-                raise RuntimeError("invalid Git conversion attribute inspection")
-            for i in range(0, len(attrs) - 1, 3):
-                if (attrs[i + 1] not in tuple(x.encode("ascii") for x in conversions)
-                        or attrs[i + 2] not in (b"unspecified", b"unset")):
-                    raise ValueError(
-                        "Git clean filter/check-in conversion may hide source changes: "
-                        + os.fsdecode(attrs[i]) + " (" +
-                        os.fsdecode(attrs[i + 1]) + ")"
-                    )
         missing_assumed: list[bytes] = []
         for entry in entries:
             if not entry:
