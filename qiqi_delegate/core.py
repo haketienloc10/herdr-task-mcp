@@ -376,7 +376,6 @@ def render_task_prompt(packet: TaskPacket, *,
     )
 
     if discovery_repositories is not None:
-    elif discovery_repositories is not None:
         # Discovery is prompt-only no-write: --yolo/--add-dir are not a sandbox.
         roots = ", ".join(discovery_repositories)
         sections.append(
