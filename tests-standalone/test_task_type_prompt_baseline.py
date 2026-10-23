@@ -68,6 +68,32 @@ def test_legacy_packet_json_and_optional_fields_are_stable():
     assert build_task_packet(**packet.as_dict()) == packet
 
 
+def test_minimal_legacy_packet_omits_all_optional_prompt_sections():
+    """No empty headings may appear when older callers omit optional fields."""
+    packet = build_task_packet(
+        objective="Fix retry", scope=["api"], acceptance_criteria=["Response stable"],
+    )
+    golden_file = Path(__file__).parent / "fixtures" / "task_prompt_baseline.json"
+    expected = json.loads(golden_file.read_text(encoding="utf-8"))[
+        "minimal_implementation"
+    ]
+    prompt = render_task_prompt(packet)
+    assert prompt == expected
+    for heading in (
+        "## Out of scope",
+        "## Trusted facts",
+        "## Claims to investigate",
+        "## Constraints",
+        "## Known unknowns",
+    ):
+        assert heading not in prompt
+    assert prompt.index("## Repository objective") < prompt.index("## Scope")
+    assert prompt.index("## Scope") < prompt.index("## Acceptance criteria")
+    assert prompt.index("## Acceptance criteria") < prompt.index(
+        "## Evidence and response quality"
+    )
+
+
 def test_prompt_common_sections_have_stable_order_and_provenance():
     prompt = render_task_prompt(_packet())
     headings = [
