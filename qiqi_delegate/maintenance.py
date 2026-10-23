@@ -364,7 +364,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.action == "show-claim":
-        elif args.action == "show-claim":
             output = show_claim(
                 workspace=args.workspace, repository=args.repository,
                 claim_repository=args.claim_repository,
