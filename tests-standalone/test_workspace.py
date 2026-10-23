@@ -307,7 +307,18 @@ def test_installer_enables_default_agent_flags_without_overwriting_existing_rout
         (Path(__file__).resolve().parents[1] / "examples" /
          "agent-routing.claude.yaml").read_text(encoding="utf-8")
     )
-    assert example["routes"] == claude_routes
+    # The operator-editable example may use task-oriented route names and
+    # additional evaluator profiles. Validate its CLI shape, not an exact copy
+    # of the installer's independent starter route set.
+    assert example["routes"]
+    for route in example["routes"].values():
+        assert route["agent"] == "claude"
+        args = route["args"]
+        assert "--model" in args and args[args.index("--model") + 1]
+        assert "--effort" in args and args[args.index("--effort") + 1] in {
+            "low", "medium", "high", "xhigh", "max",
+        }
+        assert "--permission-mode" in args
 
     routing = tmp_path / "agent-routing.yaml"
     custom = (
