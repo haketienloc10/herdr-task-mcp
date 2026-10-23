@@ -45,7 +45,7 @@ def _snapshot(runtime, graph_id):
 
 
 def test_mcp_definition_and_binding_are_read_together(tmp_path, monkeypatch):
-    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     binding = requests.graph_binding(gid)
     authored = gr._graph_for_run(gid).as_dict()
     graph_revision = gr.get_graph(gid)["revision"]
@@ -65,14 +65,14 @@ def test_mcp_definition_and_binding_are_read_together(tmp_path, monkeypatch):
 
 
 def test_atomic_definition_returns_none_for_legacy_unbound_graph(tmp_path):
-    _runtime, _requests, gr, _eval, gid = setup_graph(tmp_path, with_request=False)
+    _runtime, _requests, gr, gid = setup_graph(tmp_path, with_request=False)
     result = gr.store.get_graph_definition(gid, include_binding=True)
     assert result["task_request_binding"] is None
     assert result["graph"] == gr._graph_for_run(gid).as_dict()
 
 
 def test_graph_and_binding_snapshot_stays_consistent_under_concurrent_commits(tmp_path):
-    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     baseline = requests.graph_binding(gid)["request_revision"]
     authored = gr._graph_for_run(gid).as_dict()
     started = threading.Event()
@@ -124,7 +124,7 @@ def test_graph_and_binding_snapshot_stays_consistent_under_concurrent_commits(tm
 
 
 def test_get_graph_definition_recovers_exact_authored_packets_after_restart(tmp_path):
-    runtime, requests, gr, _coordinator, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     initial = gr._graph_for_run(gid).as_dict()
     before = _snapshot(runtime, gid)
     restored = gr.store.get_graph_definition(gid)
@@ -146,7 +146,7 @@ def test_get_graph_definition_recovers_exact_authored_packets_after_restart(tmp_
 
 @pytest.mark.parametrize("damage", ["missing", "mismatched"])
 def test_get_graph_definition_fails_closed_on_legacy_or_tampered_data(tmp_path, damage):
-    runtime, _requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, _requests, gr, gid = setup_graph(tmp_path)
     with sqlite3.connect(runtime.db) as db:
         if damage == "missing":
             db.execute(
@@ -162,7 +162,7 @@ def test_get_graph_definition_fails_closed_on_legacy_or_tampered_data(tmp_path, 
 
 
 def test_exact_context_rebind_preserves_accept_and_readiness(tmp_path):
-    runtime, requests, gr, _unused, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     bound, req = _binding_data(requests, gid)
     revision = gr.get_graph(gid)["revision"]
     before = _snapshot(runtime, gid)
@@ -188,7 +188,7 @@ def test_exact_context_rebind_preserves_accept_and_readiness(tmp_path):
 
 @pytest.mark.parametrize("mutation", ["rationale", "requirement", "new_source"])
 def test_rebind_refuses_changed_context_without_touching_accept(tmp_path, mutation):
-    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     bound, req = _binding_data(requests, gid)
     original = req["assessment"]
     if mutation == "new_source":
@@ -222,7 +222,7 @@ def test_rebind_refuses_changed_context_without_touching_accept(tmp_path, mutati
 
 
 def test_legacy_binding_has_no_provable_context_and_fails_closed(tmp_path):
-    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     with sqlite3.connect(runtime.db) as db:
         db.execute(
             "DELETE FROM task_graph_binding_snapshots WHERE graph_run_id=?", (gid,),
@@ -236,7 +236,7 @@ def test_legacy_binding_has_no_provable_context_and_fails_closed(tmp_path):
 
 @pytest.mark.parametrize("change", ["stale_graph_revision", "running_wave", "node_not_accepted"])
 def test_rebind_refuses_non_quiescent_or_incomplete_graph(tmp_path, change):
-    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     updated = _revision_only_reassessment(requests, gid)
     revision = gr.get_graph(gid)["revision"]
     with sqlite3.connect(runtime.db) as db:
@@ -259,7 +259,7 @@ def test_rebind_refuses_non_quiescent_or_incomplete_graph(tmp_path, change):
 
 
 def _graph_with_unreferenced_file_source(tmp_path):
-    runtime, requests, gr, _unused, gid = setup_graph(tmp_path, with_request=False)
+    runtime, requests, gr, gid = setup_graph(tmp_path, with_request=False)
     source_file = runtime.repos()["backend"] / "contract.txt"
     source_file.write_text("baseline contract", encoding="utf-8")
     req = requests.create(
@@ -322,7 +322,7 @@ def _revised_graph(gr, gid):
 
 @pytest.mark.parametrize("failure", ["request_advanced", "wrong_bound_revision"])
 def test_reconciliation_rolls_back_graph_when_binding_fails(tmp_path, failure):
-    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     binding, req = _binding_data(requests, gid)
     before = _snapshot(runtime, gid)
     current_revision = gr.get_graph(gid)["revision"]
@@ -356,7 +356,7 @@ def test_reconciliation_rolls_back_graph_when_binding_fails(tmp_path, failure):
 
 
 def test_reconciliation_commits_graph_and_binding_atomically(tmp_path):
-    runtime, requests, gr, _eval, gid = setup_graph(tmp_path)
+    runtime, requests, gr, gid = setup_graph(tmp_path)
     binding, req = _binding_data(requests, gid)
     updated = _revision_only_reassessment(requests, gid)
     current_revision = gr.get_graph(gid)["revision"]
