@@ -1,4 +1,4 @@
-"""TaskGraph fixture shared by regression tests; no evaluator dependency."""
+"""Shared TaskGraph fixture for standalone regression tests."""
 import sqlite3
 from test_task_readiness import workspace
 from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
@@ -68,6 +68,6 @@ def setup_graph(tmp_path, *, multi=True, with_request=True):
                 "runtime_state='idle', turn_id=? WHERE graph_run_id=? AND node_id=?",
                 ("turn-" + node["node_id"], gid, node["node_id"]),
             )
-    return runtime, requests, graph_rt, None, gid
+    return runtime, requests, graph_rt, gid
 
 
