@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 from qiqi_delegate.final_eval_manifest import inspect_roots, manifest_digest
+from qiqi_delegate.final_eval_git_state import review_scope
 from qiqi_delegate.runtime import AgentStartupBlocked
 from test_final_evaluation import setup_graph, report
 
@@ -91,7 +92,7 @@ def test_preserved_agent_startup_is_interrupted_and_requires_operator(tmp_path, 
 def test_finalization_revoked_if_source_changes_during_commit(tmp_path, monkeypatch):
     runtime, requests, graph_runtime, coordinator, gid = setup_graph(tmp_path)
     binding = requests.graph_binding(gid)
-    manifest = inspect_roots(runtime.repos())
+    manifest = review_scope(runtime.repos())
     rev = graph_runtime.get_graph(gid)["revision"]
     reserved, created = coordinator.store.reserve(
         gid, rev, binding["request_id"], binding["request_revision"],

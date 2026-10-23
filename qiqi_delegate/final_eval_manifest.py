@@ -167,7 +167,7 @@ def _reject_sensitive_ignored_files(root: Path) -> None:
 
 
 def _file_present(root: Path, relative: str) -> bool:
-    """Distinguish legitimate tracked deletion from unsafe symlink traversal."""
+    """Inspect a Git worktree entry without following symbolic links."""
     path = root
     components = Path(relative).parts
     for index, component in enumerate(components):
@@ -177,10 +177,11 @@ def _file_present(root: Path, relative: str) -> bool:
         except FileNotFoundError:
             return False
         if stat.S_ISLNK(mode):
-            raise ValueError("evaluation source refuses symlink: " + relative)
+            # Git stores a leaf symlink as an entry in its own right. If a
+            # directory was replaced with a symlink, its old tracked children
+            # are deletions; never traverse the replacement's target.
+            return index == len(components) - 1
         if stat.S_ISDIR(mode):
-            # A directory replacing an old tracked file is a deletion of
-            # that file; any new children appear as untracked source files.
             if index == len(components) - 1:
                 return False
         elif index != len(components) - 1:
@@ -189,13 +190,28 @@ def _file_present(root: Path, relative: str) -> bool:
 
 
 def _hash_file(root: Path, relative: str) -> tuple[str, int, int]:
-    """Stream a live file without copying it; detect concurrent in-place mutation."""
+    """Hash a regular file or Git symlink entry without following links."""
     path = root
-    for component in Path(relative).parts:
+    components = Path(relative).parts
+    for component in components[:-1]:
         path = path / component
         if stat.S_ISLNK(path.lstat().st_mode):
-            raise ValueError("evaluation refuses symlink: " + relative)
+            raise RuntimeError("evaluation path changed during inspection: " + relative)
+    path = path / components[-1]
     before = path.lstat()
+    if stat.S_ISLNK(before.st_mode):
+        # Git tracks the link text, not the contents of its destination.
+        # Never dereference a link while building the source manifest.
+        target = os.fsencode(os.readlink(path))
+        after = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+            before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
+                                   after.st_mtime_ns, after.st_ctime_ns) or len(target) != after.st_size:
+            raise RuntimeError("evaluation symlink changed during inspection: " + relative)
+        # Include the type so replacing a link with a regular file containing
+        # identical bytes still invalidates an earlier Final PASS.
+        return (hashlib.sha256(target).hexdigest(), len(target),
+                stat.S_IFLNK | stat.S_IMODE(after.st_mode))
     if not stat.S_ISREG(before.st_mode):
         raise ValueError("evaluation source is not a regular file: " + relative)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)

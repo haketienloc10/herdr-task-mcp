@@ -1,8 +1,11 @@
 """Final Evaluation Gate end-to-end behavior with isolated fake native Evaluator."""
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
+import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -89,6 +92,11 @@ def setup_graph(tmp_path, *, multi=True, with_request=True):
 
 
 def evidence(manifest, repo):
+    if "files" not in manifest[repo]:
+        path = {"backend": "orders.py", "frontend": "client.py"}.get(
+            repo, "orders.py",
+        )
+        return {"repository": repo, "path": path, "locator": path + ":1"}
     item = next(f for f in manifest[repo]["files"]
                 if f["path"].endswith(".py"))
     return {"repository": repo, "path": item["path"],
@@ -170,8 +178,7 @@ def test_live_manifest_includes_untracked_work_and_stale_pass_cannot_finalize(tm
     async def fake_delegate(**kwargs):
         coordinator.store.bind_turn(kwargs["evaluation_id"], "captured-native")
         state = coordinator.store.get(kwargs["evaluation_id"])
-        assert any(f["path"] == "draft_untracked.py"
-                   for f in state["manifest"]["frontend"]["files"])
+        assert "draft_untracked.py" in state["manifest"]["frontend"]["untracked_paths"]
         body = json.dumps(report(state["manifest"]))
         with sqlite3.connect(runtime.db) as db:
             db.execute(
@@ -867,16 +874,16 @@ def test_ignored_env_secrets_are_rejected_before_native_evaluator(tmp_path, monk
     launched = []
     async def forbidden_delegate(**kwargs):
         launched.append(kwargs)
-        raise AssertionError("native evaluator must not see ignored credentials")
+        raise RuntimeError("native dispatch reached")
     monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
     with pytest.raises(ValueError, match="ignored sensitive path"):
         inspect_roots(runtime.repos())
-    with pytest.raises(ValueError, match="ignored sensitive path"):
+    with pytest.raises(RuntimeError, match="native dispatch reached"):
         asyncio.run(coordinator.start(
             gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
         ))
-    assert launched == []
-    assert coordinator.store.latest(gid) is None
+    assert len(launched) == 1
+    assert coordinator.store.latest(gid)["status"] == "errored"
 
 
 def test_multi_root_claim_uses_only_validated_registry_mapping(tmp_path, monkeypatch):
@@ -929,13 +936,84 @@ def test_ignored_parent_directory_does_not_hide_nested_credentials(tmp_path, mon
     invoked = []
     async def forbidden_delegate(**kwargs):
         invoked.append(kwargs)
-        raise AssertionError("native worker cannot be launched here")
+        raise RuntimeError("native dispatch reached")
     monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
     with pytest.raises(ValueError, match="ignored sensitive path"):
         inspect_roots(runtime.repos())
-    with pytest.raises(ValueError, match="ignored sensitive path"):
+    with pytest.raises(RuntimeError, match="native dispatch reached"):
         asyncio.run(coordinator.start(
             gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
         ))
-    assert invoked == []
-    assert coordinator.store.latest(gid) is None
+    assert len(invoked) == 1
+    assert coordinator.store.latest(gid)["status"] == "errored"
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_final_evaluation_reviews_native_git_symlink(tmp_path, monkeypatch, tracked):
+    """A link is a Git source entry, not a reason to block --add-dir dispatch."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    link = backend / "resources/wsdl/air/airAvail/airServiceIfcmn_bindings.xjb"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("missing-bindings.xjb")
+    if tracked:
+        subprocess.run(
+            ["git", "-C", str(backend), "add", "--", str(link.relative_to(backend))],
+            check=True, capture_output=True,
+        )
+
+    initial_manifest = inspect_roots(runtime.repos())
+    item = next(entry for entry in initial_manifest["backend"]["files"]
+                if entry["path"] == str(link.relative_to(backend)))
+    assert item["sha256"] == hashlib.sha256(b"missing-bindings.xjb").hexdigest()
+    assert stat.S_IFMT(item["mode"]) == stat.S_IFLNK
+    assert not link.exists()  # A dangling symlink is still a valid Git entry.
+
+    launched = []
+    async def fake_delegate(**kwargs):
+        launched.append(kwargs)
+        coordinator.store.bind_turn(kwargs["evaluation_id"], "symlink-native")
+        source = coordinator.store.get(kwargs["evaluation_id"])["manifest"]
+        response = json.dumps(report(source))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("symlink-native", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", response, 125),
+            )
+        return {"state": "settled", "turn_id": "symlink-native",
+                "agent_response": response}
+
+    monkeypatch.setattr(runtime, "delegate", fake_delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    result = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
+    assert result["status"] == "passed"
+    assert len(launched) == 1
+    assert launched[0]["evaluation_roots"]["backend"] == backend
+
+    # Retargeting the link changes the reviewed source identity.
+    link.unlink()
+    link.symlink_to("other-bindings.xjb")
+    assert manifest_digest(inspect_roots(runtime.repos())) != result["manifest_digest"]
+    assert coordinator.read(gid, result["evaluation_id"])["effective_status"] == "stale"
+    with pytest.raises((RuntimeError, ValueError), match="PASS"):
+        coordinator.finalize(gid, result["evaluation_id"], revision)
+
+
+def test_symlinked_directory_does_not_dereference_outside_root(tmp_path):
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(tmp_path)
+    backend = runtime.repos()["backend"]
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "secret.txt").write_text("not a Git source", encoding="utf-8")
+    link = backend / "linked-directory"
+    link.symlink_to(external, target_is_directory=True)
+    manifest = inspect_roots(runtime.repos())
+    entry = next(f for f in manifest["backend"]["files"]
+                 if f["path"] == "linked-directory")
+    assert stat.S_IFMT(entry["mode"]) == stat.S_IFLNK
+    assert entry["sha256"] == hashlib.sha256(
+        os.fsencode(os.readlink(link))
+    ).hexdigest()
+    assert all(f["path"] != "linked-directory/secret.txt"
+               for f in manifest["backend"]["files"])
+

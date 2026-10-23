@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.core import build_task_packet
-from qiqi_delegate.final_eval_manifest import inspect_roots, manifest_digest
+from qiqi_delegate.final_eval_manifest import manifest_digest
+from qiqi_delegate.final_eval_git_state import review_scope
 from qiqi_delegate.final_eval_store import FinalEvaluationStore
 from qiqi_delegate.runtime import AgentStartupBlocked, EvaluatorCleanupUnconfirmed
 
@@ -124,8 +125,8 @@ class FinalEvaluationCoordinator:
                 "reports are historical claims, NEVER Final PASS evidence.",
                 "Trace integrations and public contracts between modules inside "
                 "one repository and between different repositories.",
-                "Use exact repository/path, current manifest sha256 and locator "
-                "for every successful claim (or verified deleted-path tombstones).",
+                "Cite repository/path and a precise locator for each successful claim; "
+                "identify tracked deletions without inventing evidence.",
                 "Return EXACTLY one JSON object with keys verdict, requirement_results, "
                 "cross_repository_checks, verification_runs, findings, unknowns.",
                 "Use FAIL or INCONCLUSIVE if a required contract or evidence is missing.",
@@ -138,14 +139,14 @@ class FinalEvaluationCoordinator:
                 "Do not write, commit, install dependencies, push or deploy within "
                 "any registered Git root. Do not run tests that produce files there.",
                 "Do not claim tests ran without observed execution evidence.",
-                "For file evidence use {repository,path,sha256,locator}; for a tracked "
-                "deleted path use {kind:'deleted',repository,path,locator}. "
-                "A deleted path must appear in manifest.deleted_paths.",
+                "For evidence use {repository,path,locator}; for a tracked deletion "
+                "use {kind:'deleted',repository,path,locator}. "
+                "Do not invent file content, tests or deletion evidence.",
                 "For multi-repo PASS, cross_repository_checks must prove at least "
                 "one actual interface comparison and collectively cover every root. "
                 "Also inspect contracts between modules of the same root.",
                 "Do not infer PASS from a complete TaskGraph or Lead/Peer ACCEPT.",
-                "Captured manifest digest: " + digest,
+                "Captured Git source fingerprint: " + digest,
             ],
         )
 
@@ -155,7 +156,7 @@ class FinalEvaluationCoordinator:
             graph_run_id, expected_revision,
         )
         self.runtime.route(route)
-        manifest = inspect_roots(roots)
+        manifest = review_scope(roots)
         digest = manifest_digest(manifest)
         context = self._context(graph_run_id, graph, authored, binding, task,
                                 names, manifest, digest)
@@ -176,7 +177,7 @@ class FinalEvaluationCoordinator:
                     "turn_id": reserved["turn_id"]}
         eid = reserved["evaluation_id"]
         try:
-            if manifest_digest(inspect_roots(roots)) != digest:
+            if manifest_digest(review_scope(roots)) != digest:
                 raise RuntimeError("evaluation source changed before dispatch")
             response = await self.runtime.delegate(
                 repository=names[0], route=route, packet=packet,
@@ -235,7 +236,7 @@ class FinalEvaluationCoordinator:
                 )
                 status = {"pass": "passed", "fail": "failed",
                           "inconclusive": "inconclusive"}[report["verdict"]]
-                if status == "passed" and manifest_digest(inspect_roots(roots)) != digest:
+                if status == "passed" and manifest_digest(review_scope(roots)) != digest:
                     status = "inconclusive"
                     detail = "Git roots changed during native evaluation"
             except (ValueError, RuntimeError, OSError, TypeError, KeyError) as exc:
@@ -256,11 +257,11 @@ class FinalEvaluationCoordinator:
         try:
             graph, _authored, _binding, task, _names, roots = self._eligible(graph_run_id)
             current = (
-                row.get("policy_version") == 2 and
+                row.get("policy_version") == 3 and
                 graph["revision"] == row["graph_revision"] and
                 task["request_id"] == row["request_id"] and
                 task["revision"] == row["request_revision"] and
-                manifest_digest(inspect_roots(roots)) == row["manifest_digest"]
+                manifest_digest(review_scope(roots)) == row["manifest_digest"]
             )
         except (RuntimeError, ValueError, OSError):
             current = False
@@ -282,7 +283,7 @@ class FinalEvaluationCoordinator:
             graph, _authored, _binding, task, _names, roots = self._eligible(
                 graph_run_id,
             )
-            digest = manifest_digest(inspect_roots(roots))
+            digest = manifest_digest(review_scope(roots))
             finalized = self.store.matching_finalized(
                 graph_run_id, graph["revision"], task["request_id"],
                 task["revision"], digest,
@@ -312,7 +313,7 @@ class FinalEvaluationCoordinator:
         if (entry.get("status") != "passed" or not entry.get("is_current")
                 or entry.get("finalized_at_ns")):
             raise ValueError("current independent final evaluation PASS is required")
-        current_digest = manifest_digest(inspect_roots(roots))
+        current_digest = manifest_digest(review_scope(roots))
         persisted = self.store.finalize(
             evaluation_id, graph["revision"], task["revision"], current_digest,
         )
@@ -330,7 +331,7 @@ class FinalEvaluationCoordinator:
                 and fresh_task["revision"] == task["revision"]
                 and fresh_names == _names
                 and fresh_roots == roots
-                and manifest_digest(inspect_roots(fresh_roots)) == current_digest
+                and manifest_digest(review_scope(fresh_roots)) == current_digest
             )
         except Exception:
             # Missing/invalid repos.yaml, registry remaps, unavailable Git

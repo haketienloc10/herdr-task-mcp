@@ -185,7 +185,7 @@ không áp đặt filesystem chỉ đọc. Final Evaluator không tạo reposito
 Prompt cấm thay đổi source, nhưng route permissive vẫn có thể cho phép
 native agent thực hiện side effects. Multi-root claims ngăn Peer hợp tác
 ghi vào các Git root trong lúc review; external writers không bị chặn.
-Manifest SHA256 kiểm tra thay đổi trước/sau, không bảo đảm bất biến tại
+Git fingerprint kiểm tra thay đổi trước/sau, không bảo đảm bất biến tại
 mọi thời điểm. Cần OS sandbox hoặc immutable filesystem view nếu review
 code không đáng tin cậy.
 
@@ -609,15 +609,15 @@ TaskGraph `complete` chỉ xác nhận execution hoàn thành. Mọi node phải
 1. Bind verbatim Task Request, assessment và `requirement_map` khi gọi `start_graph`. TaskGraph không được bind không đủ điều kiện Final PASS.
 2. Kết thúc các node bằng vòng `get_node_reviews` / `submit_decisions` hiện hành. Nếu có node cancelled/blocked, Final Evaluation từ chối.
 3. Gọi `start_final_evaluation(graph_run_id, route, expected_revision)`. Route `claude-high`, `claude-xhigh` hoặc Codex tùy theo `agent-routing.yaml`. Mỗi lượt sử dụng **một native session mới**, bắt đầu từ `~/.qiqi/evaluator-cwd/runs/turn-<uuid>`, không tái sử dụng phiên Lead/Peer. Trust được thiết lập một lần tại thư mục cha cho các adapter hỗ trợ kế thừa trust.
-4. Runtime kiểm tra các Git root thuộc TaskGraph trong `repos.yaml`, tạo **manifest SHA256 trực tiếp trên working tree** (bao gồm staged, unstaged và non-ignored untracked files). Không sao chép repository, không tạo `.qiqi-evaluation-manifest.json` trong source. Một transaction cấp claim cho **tất cả** Git root trong scope; native agent được cấp quyền đọc thông qua `--add-dir`.
-5. Trong CWD trung lập, runtime tạo `context/context.json`, `context/source_index.json` và file nguồn Task Request được tham chiếu. Context chứa verbatim user request, requirements, requirement mapping, graph objective/acceptance criteria, lịch sử node attempts, Lead decisions, Git root manifest. Tất cả Lead/Peer reports chỉ là claims cần xác minh. Nguồn đính kèm `workspace_file` có thể được copy riêng lẻ để bảo toàn nội dung; **không có repository snapshot/copy**.
-6. Evaluator phải review implementation thực tế ở **mọi Git root thuộc TaskGraph**, gồm mọi module liên quan, contract nội repository lẫn liên repository. Phải đối chiếu request, requirements, node evidence, producer/consumer interface, schema và data flow. Report gồm `verdict`, `requirement_results`, `cross_repository_checks`, `verification_runs`, `findings`, `unknowns`. File evidence yêu cầu `{repository,path,sha256,locator}`; deletion yêu cầu `{kind:"deleted",repository,path,locator}` nằm trong manifest.
-7. Native captured PASS **chưa phải Final PASS**. `FinalEvaluationStore.validate_report()` kiểm tra coverage và evidence, kết quả phải thuộc đúng native turn đã settled. Report còn phải khớp graph/request revision và Git manifest sau khi native review kết thúc. Worker cleanup chưa xác nhận, stale code hoặc report thiếu bằng chứng đều không được PASS.
-8. Dùng `get_final_evaluation(graph_run_id, evaluation_id?)` để đọc evidence. Nếu FAIL/INCONCLUSIVE, Lead sửa hoặc reconcile rồi đánh giá lại toàn bộ graph. Chỉ gọi `finalize_graph(graph_run_id, evaluation_id, expected_revision)` khi PASS vẫn current. Các PASS cũ từ snapshot-copy (`policy_version=1`) lưu audit nhưng **không thể tái sử dụng** ở native direct-root policy v2.
+4. Runtime xác thực Git roots thuộc TaskGraph trong `repos.yaml`, tạo **Git fingerprint** bằng diff/index, metadata quyền/loại của tracked files và nội dung non-ignored untracked files để phát hiện thay đổi. Không tạo manifest SHA256 từng file, không copy source, không từ chối symlink Git thông thường. Một transaction cấp claim cho **tất cả** Git root; native agent đọc source trực tiếp qua `--add-dir`.
+5. Trong CWD trung lập, runtime tạo `context/context.json`, `context/source_index.json` và file nguồn Task Request được tham chiếu. Context chứa verbatim user request, requirements, requirement mapping, graph objective/acceptance criteria, lịch sử node attempts, Lead decisions, Git root fingerprints. Tất cả Lead/Peer reports chỉ là claims cần xác minh. Nguồn đính kèm `workspace_file` có thể được copy riêng lẻ để bảo toàn nội dung; **không có repository snapshot/copy**.
+6. Evaluator phải review implementation thực tế ở **mọi Git root thuộc TaskGraph**, gồm mọi module liên quan, contract nội repository lẫn liên repository. Phải đối chiếu request, requirements, node evidence, producer/consumer interface, schema và data flow. Report gồm `verdict`, `requirement_results`, `cross_repository_checks`, `verification_runs`, `findings`, `unknowns`. Evidence yêu cầu `{repository,path,locator}`; deletion yêu cầu `{kind:"deleted",repository,path,locator}` nằm trong danh sách tracked deletions từ Git.
+7. Native captured PASS **chưa phải Final PASS**. `FinalEvaluationStore.validate_report()` kiểm tra schema, coverage, repository scope và evidence locators (không tự chứng minh từng locator trỏ tới nội dung đã đọc). Kết quả phải thuộc native turn đã settled. Git fingerprint được so sánh sau native review và khi finalize; source thay đổi hoặc worker cleanup chưa xác nhận đều không được PASS.
+8. Dùng `get_final_evaluation(graph_run_id, evaluation_id?)` để đọc evidence. Nếu FAIL/INCONCLUSIVE, Lead sửa hoặc reconcile rồi đánh giá lại toàn bộ graph. Chỉ gọi `finalize_graph(graph_run_id, evaluation_id, expected_revision)` khi PASS vẫn current. Các PASS cũ (policy v1/v2) lưu để audit nhưng không được tái sử dụng với policy v3.
 
 **Concurrency/recovery:** Runtime giữ lock cho tất cả registered roots trong một transaction; chỉ nhả sau khi Herdr workspace đã đóng. Nếu native worker vẫn có thể tồn tại, giữ claims và evaluator CWD để operator kiểm tra. Phải xác nhận worker termination, release từng exact Git root claim, sau đó dùng `recover-final-evaluation`; capture đơn lẻ không thể phục hồi thành PASS.
 
-**Giới hạn bảo mật và tính nhất quán:** `--add-dir` không phải filesystem sandbox. Quy tắc không ghi repository chỉ là instruction; native CLI permission còn phụ thuộc `agent-routing.yaml`. Git manifests được hash trước dispatch, sau native response và khi finalization, nhưng không tạo atomic filesystem snapshot. Write claims chỉ chặn writer dùng chung QiQi runtime; external writer có thể thay đổi files giữa các lần hash. Nếu cần bảo đảm hard read-only hoặc immutable source view, triển khai OS-level sandbox / filesystem view độc lập. File nguồn và node evidence là untrusted data, không được thực thi hay dùng làm hướng dẫn cho Evaluator.
+**Giới hạn bảo mật và tính nhất quán:** `--add-dir` không phải filesystem sandbox. Evaluator có thể nhìn thấy file được Git ignore, symlink và nội dung ngoài Git root nếu native permissions cho phép; operator phải chạy trên workspace đáng tin cậy. Git fingerprint cũng duyệt **submodule worktrees theo gitlinks** bằng cùng phép tính Git diff/index/untracked; submodule chưa checkout bị từ chối thay vì công nhận source chưa đọc. Để tránh PASS sai, V3 từ chối tracked paths có Git check-in transformations (`filter`, `text`, `eol`, `ident`, `working-tree-encoding`, `crlf`) và root đặt `core.autocrlf`, `core.fileMode=false` hoặc `core.symlinks=false`, vì Git diff có thể che thay đổi nội dung, mode hoặc symlink. Untracked embedded Git repositories cũng bị từ chối thay vì chỉ hash metadata thư mục. Trước khi chạy Git worktree diff, Final Evaluation kiểm tra các tracked-path attributes và từ chối check-in conversions có thể chạy clean filter tùy ý. Các lệnh Git thu thập fingerprint luôn dùng `-c core.fsmonitor=false -c core.trustctime=true` để không tin báo cáo “clean” từ FSMonitor hook hoặc bỏ qua ctime; cấu hình Git trong repository không bị thay đổi. Git fingerprint là **best-effort freshness check**, không phải immutable snapshot hay chứng cứ từng file: dùng Git diff/index, chỉ đọc metadata mode/loại của tracked files (không hash nội dung của từng tracked file) và hash non-ignored untracked files; không bao phủ nội dung ignored files hay thay đổi thoáng qua rồi hoàn nguyên. Ghi source bị cấm trong prompt nhưng permission thực tế vẫn phụ thuộc `agent-routing.yaml`. Write claims chặn QiQi writers hợp tác, không chặn process bên ngoài. Nếu cần bảo đảm read-only, dùng filesystem sandbox bên ngoài. Report từ LLM là đánh giá độc lập, không phải chứng minh máy móc rằng từng locator đã được đọc.
 
 ## Native capture và trạng thái lỗi
 
@@ -718,19 +718,18 @@ GitHub Actions chạy test trên Python **3.10, 3.12 và 3.13**. Workflow nằm 
 Không sửa trực tiếp dữ liệu SQLite để xử lý công việc kẹt. Dùng các lệnh bảo trì có kiểm tra ID và ghi audit.
 
 
-### Codex review follow-up — direct-root security boundary
+### Direct-root Final Evaluation — ignored-file security boundary
 
-Native `--add-dir` exposes the full registered Git root to native tools, including
-ignored files and `.git` metadata. To prevent common accidental credential
-exposure, source inspection now **fails closed** when it detects ignored
-credential filenames or ignored private directories (`.env`, `.aws`,
-`.ssh`, `.venv`, etc.). This check is **not a sandbox**: a sensitive file under
-an unexpected filename, a sensitive Git object, or a racing external writer
-remains readable by a sufficiently privileged native agent. Do not deploy
-direct-root Final Evaluation on untrusted repositories or ones with sensitive
-Git history until Herdr/adapter-level OS read isolation is available. This
-retains the requested **no repository snapshot/copy** property.
-
+Native `--add-dir` gives the evaluator access to **all files** in each
+registered Git root, including Git-ignored credentials (`.env`,
+`private/.env`, `.aws/`, etc.) and potentially sensitive `.git`
+metadata. **Final Evaluation v3 does not inspect or block ignored secrets
+before launching**. The legacy `inspect_roots()` helper still has ignored-path
+checks, but it is not used by the current coordinator. The native reviewer
+must run only on trusted repositories without secrets that it should not see,
+or inside an externally configured read-only, access-restricted OS sandbox.
+The evaluator prompt alone is not a security boundary. There is no guarantee
+that Git-ignored credentials are hidden from the native process.
 
 ### Codex follow-up — stable evaluator claim identity
 
@@ -743,7 +742,6 @@ alias. The operator must still verify native worker termination and pass
 is released and audited. The prior `--repository` selector is supported
 for callers working with currently registered Git root aliases.
 
-Ignored-path preflight now enumerates nested ignored files instead of
-collapsing whole ignored directories; it detects examples such as
-`private/.env` even when `private/` is ignored. This is defense in depth,
-not a solution to Codex's OS-level isolation finding.
+The legacy `inspect_roots()` helper can detect ignored credential
+paths such as `private/.env`, but the native v3 review path uses
+`review_scope()` and does **not** run that preflight.

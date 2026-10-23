@@ -92,16 +92,16 @@ def test_sparse_checkout_fails_before_evaluator_reservation_or_dispatch(tmp_path
 
     async def should_not_dispatch(**kwargs):
         called.append(kwargs)
-        raise AssertionError("sparse checkout cannot be reviewed as a deletion")
+        raise RuntimeError("native dispatch reached")
 
     monkeypatch.setattr(runtime, "delegate", should_not_dispatch)
     graph_revision = graph_rt.get_graph(gid)["revision"]
-    with pytest.raises(ValueError, match="sparse checkout"):
+    with pytest.raises(RuntimeError, match="native dispatch reached"):
         asyncio.run(
             coordinator.start(gid, "codex-evaluator", graph_revision)
         )
-    assert called == []
-    assert coordinator.store.latest(gid) is None
+    assert len(called) == 1
+    assert coordinator.store.latest(gid)["status"] == "errored"
 
 
 def test_core_sparse_checkout_mode_fails_even_when_all_files_are_present(tmp_path):

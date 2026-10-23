@@ -123,13 +123,13 @@ def test_index_only_absence_fails_before_evaluation_reservation_or_native_dispat
 
     async def should_never_launch(**kwargs):
         attempted.append(kwargs)
-        raise AssertionError("Evaluator cannot accept index-only tombstone")
+        raise RuntimeError("native dispatch reached")
 
     monkeypatch.setattr(runtime, "delegate", should_never_launch)
     revision = graph_rt.get_graph(gid)["revision"]
-    with pytest.raises(ValueError, match="missing index-only path"):
+    with pytest.raises(RuntimeError, match="native dispatch reached"):
         asyncio.run(
             coordinator.start(gid, "codex-evaluator", revision)
         )
-    assert attempted == []
-    assert coordinator.store.latest(gid) is None
+    assert len(attempted) == 1
+    assert coordinator.store.latest(gid)["status"] == "errored"

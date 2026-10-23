@@ -10,13 +10,13 @@ import os
 import sqlite3
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from qiqi_delegate.final_eval_manifest import evidence_is_in_manifest
 from qiqi_delegate.task_request import _owner_alive, _process_start_token
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 ACTIVE = ("requested", "evaluating")
 FINISHED = ("passed", "failed", "inconclusive", "errored", "interrupted")
 
@@ -236,7 +236,7 @@ class FinalEvaluationStore:
                 "WHERE graph_run_id=? AND status='passed' "
                 "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
                 "AND request_id=? AND request_revision=? "
-                "AND manifest_digest=? AND policy_version=2 "
+                "AND manifest_digest=? AND policy_version=3 "
                 "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
                 (graph_run_id, graph_revision, request_id,
                  request_revision, digest),
@@ -276,7 +276,7 @@ class FinalEvaluationStore:
                 "WHERE graph_run_id=? AND status='passed' "
                 "AND finalized_at_ns IS NOT NULL AND graph_revision=? "
                 "AND request_id=? AND request_revision=? "
-                "AND manifest_digest=? AND policy_version=2 "
+                "AND manifest_digest=? AND policy_version=3 "
                 "ORDER BY finalized_at_ns DESC, rowid DESC LIMIT 1",
                 (graph_run_id, graph_revision, request_id,
                  request_revision, digest),
@@ -323,7 +323,7 @@ class FinalEvaluationStore:
                     "request_revision,route,manifest_json,manifest_digest,"
                     "policy_version,status,cleanup_json,owner_pid,owner_start_token,"
                     "created_at_ns,updated_at_ns) "
-                    "VALUES (?,?,?,?,?,?,?,?,2,'requested',?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,3,'requested',?,?,?,?,?)",
                     (return_id, graph_run_id, graph_revision, request_id,
                      request_revision, route, json.dumps(manifest, sort_keys=True),
                      digest, None,
@@ -398,38 +398,48 @@ class FinalEvaluationStore:
         if any(not isinstance(x, str) or not x.strip() for x in unknowns):
             raise ValueError("unknowns must contain nonempty strings")
         observed = set()
+        has_file_manifest = all(
+            isinstance(row.get("files"), list) for row in manifest.values()
+        )
         def check_evidence(items: Any, *, mandatory: bool) -> None:
             if not isinstance(items, list) or (mandatory and not items):
                 raise ValueError("evaluation evidence is absent")
             for item in items:
                 if not isinstance(item, dict):
                     raise ValueError("evaluation evidence must be an object")
-                # Existing file evidence is unchanged. For a deliberate
-                # tracked deletion, use a *disjoint* tagged representation:
-                # {kind: "deleted", repository, path, locator}. SHA256 is
-                # invalid for absent files, and a fabricated tombstone fails
-                # membership against manifest.deleted_paths.
                 deletion = item.get("kind") == "deleted"
                 expected_fields = (
                     {"kind", "repository", "path", "locator"} if deletion
                     else {"repository", "path", "sha256", "locator"}
+                    if has_file_manifest else {"repository", "path", "locator"}
                 )
                 if set(item) != expected_fields:
-                    raise ValueError("malformed file or deletion evidence fields")
-                if (any(not isinstance(item[k], str) or not item[k].strip()
-                        for k in ("repository", "path", "locator"))
-                        or (not deletion and (
-                            not isinstance(item["sha256"], str)
-                            or not item["sha256"].strip()
-                        ))
-                        or not evidence_is_in_manifest(
-                            manifest, item["repository"], item["path"],
-                            None if deletion else item["sha256"],
-                            kind="deleted" if deletion else "file",
-                        )):
-                    raise ValueError(
-                        "evidence does not match captured repository manifest"
-                    )
+                    raise ValueError("malformed evaluation evidence fields")
+                if any(not isinstance(item[k], str) or not item[k].strip()
+                       for k in ("repository", "path", "locator")):
+                    raise ValueError("malformed evaluation evidence location")
+                relative = item["path"]
+                parts = PurePosixPath(relative).parts
+                if (item["repository"] not in manifest or
+                        not parts or PurePosixPath(relative).is_absolute() or
+                        any(part in {".", ".."} for part in parts) or
+                        "\\" in relative):
+                    raise ValueError("invalid evaluation evidence repository/path")
+                if has_file_manifest:
+                    if (not deletion and (not isinstance(item["sha256"], str)
+                                          or not item["sha256"].strip())):
+                        raise ValueError("malformed file hash evidence")
+                    if not evidence_is_in_manifest(
+                        manifest, item["repository"], relative,
+                        None if deletion else item["sha256"],
+                        kind="deleted" if deletion else "file",
+                    ):
+                        raise ValueError(
+                            "evidence does not match captured repository manifest"
+                        )
+                elif deletion and relative not in manifest[item["repository"]].get(
+                        "deleted_paths", ()):
+                    raise ValueError("deletion evidence is absent from Git diff")
         for item in requirements:
             if not isinstance(item, dict) or set(item) != {
                 "requirement_id", "status", "evidence", "rationale"
