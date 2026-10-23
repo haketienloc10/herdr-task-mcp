@@ -288,7 +288,7 @@ def test_installer_enables_default_agent_flags_without_overwriting_existing_rout
         "claude-low", "claude-balanced", "claude-high",
         "claude-xhigh", "claude-max",
     }
-    assert len(config["routes"]) == 7  # Five Claude, two Codex
+    assert len(config["routes"]) == 6  # Five Claude, one Codex
     assert all(route["description"] for route in claude_routes.values())
     assert all("--permission-mode" in route["args"] and
                route["args"][route["args"].index("--permission-mode") + 1] == "auto"
