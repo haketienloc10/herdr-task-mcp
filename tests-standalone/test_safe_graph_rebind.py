@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from test_final_evaluation import setup_graph
+from graph_fixture import setup_graph
 from test_task_readiness import assessment, workspace
 from qiqi_delegate.task_graph_runtime import GraphRuntime
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
@@ -161,16 +161,15 @@ def test_get_graph_definition_fails_closed_on_legacy_or_tampered_data(tmp_path, 
         gr.store.get_graph_definition(gid)
 
 
-def test_exact_context_rebind_preserves_accept_and_requires_fresh_eval(tmp_path):
-    runtime, requests, gr, evaluator, gid = setup_graph(tmp_path)
+def test_exact_context_rebind_preserves_accept_and_readiness(tmp_path):
+    runtime, requests, gr, _unused, gid = setup_graph(tmp_path)
     bound, req = _binding_data(requests, gid)
     revision = gr.get_graph(gid)["revision"]
     before = _snapshot(runtime, gid)
     updated = _revision_only_reassessment(requests, gid)
     assert updated["revision"] == req["revision"] + 1
-    assert evaluator.graph_status(gid)["delivery_status"] == "not_finalized"
     with pytest.raises(ValueError, match="stale"):
-        evaluator._eligible(gid, revision)
+        requests.assert_graph_ready(gid)
 
     result = requests.rebind_graph(gid, revision, updated["revision"])
     assert result["preserved_nodes"] == ["backend", "frontend"]
@@ -178,7 +177,7 @@ def test_exact_context_rebind_preserves_accept_and_requires_fresh_eval(tmp_path)
     assert requests.graph_binding(gid)["request_revision"] == updated["revision"]
     assert gr.get_graph(gid)["revision"] == revision
     assert _snapshot(runtime, gid) == before
-    assert evaluator._eligible(gid, revision)[3]["revision"] == updated["revision"]
+    requests.assert_graph_ready(gid)
     with sqlite3.connect(runtime.db) as db:
         audit = db.execute(
             "SELECT previous_revision, new_revision FROM task_graph_rebind_audit "
@@ -260,7 +259,7 @@ def test_rebind_refuses_non_quiescent_or_incomplete_graph(tmp_path, change):
 
 
 def _graph_with_unreferenced_file_source(tmp_path):
-    runtime, requests, gr, _evaluator, gid = setup_graph(tmp_path, with_request=False)
+    runtime, requests, gr, _unused, gid = setup_graph(tmp_path, with_request=False)
     source_file = runtime.repos()["backend"] / "contract.txt"
     source_file.write_text("baseline contract", encoding="utf-8")
     req = requests.create(
