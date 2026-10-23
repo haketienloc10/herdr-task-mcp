@@ -561,3 +561,95 @@ def test_native_pass_uses_assume_unchanged_deletion_evidence_and_stales_on_resto
     assert coordinator.finalize(gid, approved["evaluation_id"], rev)["finalized_at_ns"]
     source.write_text("def total(n):\n    return n * 2\n", encoding="utf-8")
     assert coordinator.read(gid, approved["evaluation_id"])["effective_status"] == "stale"
+
+
+
+def test_rejected_clean_filter_does_not_execute_during_review_scope(
+    tmp_path, monkeypatch,
+):
+    """A clean filter can have side effects in git diff; reject it first."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track source without filters")
+
+    marker = tmp_path / "executed-by-clean-filter"
+    hook = tmp_path / "write-external-marker.sh"
+    hook.write_text(
+        "#!/bin/sh\ncat >/dev/null\n"
+        f"printf invoked > '{marker}'\n"
+        "printf 'normalized\\n'\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    (backend / ".gitattributes").write_text(
+        "orders.py filter=unsafe\n", encoding="utf-8",
+    )
+    _git(backend, "config", "filter.unsafe.clean", str(hook))
+    source.write_text("def total(n):\n    return n * 33\n", encoding="utf-8")
+
+    # Verify an unguarded diff really does execute the clean filter.
+    subprocess.run(
+        ["git", "-C", str(backend), "diff", "--no-ext-diff",
+         "--no-textconv", "--binary", "--", "orders.py"],
+        check=True, capture_output=True,
+    )
+    assert marker.exists(), "precondition: Git diff executed configured filter"
+    marker.unlink()
+
+    launched = []
+    async def forbidden_delegate(**kwargs):
+        launched.append(kwargs)
+        raise AssertionError("unsafe native dispatch")
+
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="Git clean filter/check-in conversion"):
+        review_scope(runtime.repos())
+    assert not marker.exists(), "review_scope must reject before Git diff"
+    with pytest.raises(ValueError, match="Git clean filter/check-in conversion"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert not marker.exists(), "native preflight must not run clean filter"
+    assert not launched
+    assert coordinator.store.latest(gid) is None
+
+
+def test_trustctime_override_detects_same_size_restored_mtime(tmp_path):
+    """Per-command override must ignore a repository's core.trustctime=false."""
+    import os
+    from qiqi_delegate.final_eval_git_state import _git as safe_git
+
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    _git(backend, "add", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track source before rewrite")
+    _git(backend, "config", "core.trustctime", "false")
+    assert subprocess.run(
+        ["git", "-C", str(backend), "config", "--bool", "--get", "core.trustctime"],
+        check=True, capture_output=True,
+    ).stdout.strip() == b"false"
+    assert safe_git(backend, "config", "--bool", "--get", "core.trustctime"
+                    ).strip() == b"true"
+
+    before = manifest_digest(review_scope(runtime.repos()))
+    stat_before = source.stat()
+    original = source.read_bytes()
+    changed = original.replace(b"n * 2", b"n * 3")
+    assert len(changed) == len(original) and changed != original
+    source.write_bytes(changed)
+    os.utime(source, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+    assert source.stat().st_mtime_ns == stat_before.st_mtime_ns
+    assert before != manifest_digest(review_scope(runtime.repos()))
+    assert subprocess.run(
+        ["git", "-C", str(backend), "config", "--bool", "--get", "core.trustctime"],
+        check=True, capture_output=True,
+    ).stdout.strip() == b"false"
