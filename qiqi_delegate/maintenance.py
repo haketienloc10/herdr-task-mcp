@@ -2,23 +2,17 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
-import os
-import re
-import tempfile
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from qiqi_delegate.runtime import (
-    DelegateRuntime, evaluator_lease_guard, release_evaluator_run_lock,
-    cleanup_temporary_tree,
+    DelegateRuntime,
 )
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
 from qiqi_delegate.task_request import TaskRequestStore
-from qiqi_delegate.final_eval_store import FinalEvaluationStore
 
 
 def _validated_runtime(
@@ -52,7 +46,7 @@ def _claim_lookup(
 ) -> tuple[list[Any], str]:
     """Find a claim by current root alias OR its immutable SQLite row identity.
 
-    The latter is for evaluator recovery after repos.yaml has been remapped.
+    The latter is for worker recovery after repos.yaml has been remapped.
     Never resolve --claim-repository through the mutable registry.
     """
     if (repository is None) == (claim_repository is None):
@@ -164,7 +158,7 @@ def release_stale_claim(
         holder = matches[0]
         # A mutable alias may have been remapped between the first lookup
         # and BEGIN IMMEDIATE. Never release a *different* root's claim,
-        # especially when an evaluator claim_id is shared by all roots.
+        # especially when an worker claim_id is shared by all roots.
         identities = {(row["repository"], row["repository_root"]) for row in rows}
         if (holder["repository"], holder["repository_root"]) not in identities:
             raise RuntimeError("claim mapping changed during recovery")
@@ -294,135 +288,6 @@ def recover_ownerless_discovery(
     )
 
 
-def show_final_evaluation(*, workspace: Path, evaluation_id: str) -> dict[str, Any]:
-    if not workspace.is_dir():
-        raise ValueError("workspace directory missing")
-    runtime = DelegateRuntime(workspace)
-    return FinalEvaluationStore(runtime.db).inspect_interrupted(evaluation_id)
-
-
-def _recovery_lease_guard(cleanup: dict[str, Any] | None):
-    """Lock the exact trusted runs root before reading or mutating a lease."""
-    value = (cleanup or {}).get("evaluator_cwd")
-    if not value:
-        return contextlib.nullcontext()
-    if not isinstance(value, str):
-        raise ValueError("invalid evaluator CWD recovery metadata")
-    configured = os.environ.get("QIQI_EVALUATOR_CWD")
-    if configured is not None and not configured.strip():
-        raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
-    trusted = (Path(configured).expanduser() if configured is not None
-               else Path.home() / ".qiqi" / "evaluator-cwd")
-    path = Path(value)
-    if (not trusted.is_absolute() or not path.is_absolute()
-            or not re.fullmatch(r"turn-[0-9a-f]{32}", path.name)
-            or path.parent.resolve() != trusted.resolve() / "runs"
-            or path.is_symlink()):
-        raise ValueError("unsafe retained evaluator CWD cleanup path")
-    return evaluator_lease_guard(path.parent)
-
-
-def _cleanup_retained_evaluation_paths(
-    cleanup: dict[str, Any] | None, *, guard_held: bool = False,
-) -> None:
-    """Remove only QiQi-generated temporary trees after verified worker exit."""
-    if not cleanup:
-        return
-    temp_root = Path(tempfile.gettempdir()).resolve()
-    targets = []
-    for key, prefix in (
-        ("capture_sink", "qiqi-result-"),
-    ):
-        value = cleanup.get(key)
-        if not value:
-            continue
-        if not isinstance(value, str):
-            raise ValueError("invalid retained evaluator path metadata")
-        path = Path(value)
-        if (not path.is_absolute() or path.parent.resolve() != temp_root or
-                not path.name.startswith(prefix) or path.is_symlink()):
-            raise ValueError("unsafe retained evaluator cleanup path")
-        targets.append(path)
-
-    evaluator_cwd = None
-    value = cleanup.get("evaluator_cwd")
-    if value:
-        if not isinstance(value, str):
-            raise ValueError("invalid retained evaluator CWD metadata")
-        configured = os.environ.get("QIQI_EVALUATOR_CWD")
-        if configured is not None and not configured.strip():
-            raise ValueError("QIQI_EVALUATOR_CWD must not be empty")
-        trusted = (Path(configured).expanduser() if configured is not None
-                   else Path.home() / ".qiqi" / "evaluator-cwd")
-        if not trusted.is_absolute():
-            raise ValueError("QIQI_EVALUATOR_CWD must be an absolute path")
-        path = Path(value)
-        # The child path is generated from a UUID. Never delete arbitrary
-        # content under the operator's trusted ancestor.
-        if (not path.is_absolute() or path.is_symlink() or
-                path.parent.resolve() != trusted.resolve() / "runs" or
-                not re.fullmatch(r"turn-[0-9a-f]{32}", path.name)):
-            raise ValueError("unsafe retained evaluator CWD cleanup path")
-        # This run's active lease must never belong to another evaluator.
-        lease = path.parent / ".qiqi-active"
-        if lease.is_symlink():
-            raise ValueError("unsafe evaluator lease symlink")
-        if lease.exists() and lease.read_text(encoding="utf-8").strip() != path.name:
-            raise ValueError("evaluator lease belongs to another active worker")
-        evaluator_cwd = path
-        targets.append(path)
-
-    # The caller's guard must encompass verification, every deletion, lease
-    # unlink, and the final SQLite transition. A second recovery cannot
-    # remove a newly created worker's lease between compare and unlink.
-    if evaluator_cwd is not None and not guard_held:
-        with _recovery_lease_guard(cleanup):
-            return _cleanup_retained_evaluation_paths(cleanup, guard_held=True)
-    for path in targets:
-        if path.exists():
-            cleanup_temporary_tree(path)
-    if evaluator_cwd is not None:
-        release_evaluator_run_lock(evaluator_cwd, guard_held=True)
-
-
-def recover_final_evaluation(
-    *, workspace: Path, evaluation_id: str,
-    worker_termination_confirmed: bool,
-) -> dict[str, Any]:
-    if not worker_termination_confirmed:
-        raise ValueError("verify evaluator worker termination before recovery")
-    if not workspace.is_dir():
-        raise ValueError("workspace directory missing")
-    runtime = DelegateRuntime(workspace)
-    store = FinalEvaluationStore(runtime.db)
-    previous = store.inspect_interrupted(evaluation_id)
-    with _recovery_lease_guard(previous.get("cleanup")):
-        # Re-read inside the inter-process guard: a concurrent recovery may
-        # already have completed and a new evaluator may own the lease.
-        previous = store.inspect_interrupted(evaluation_id)
-        if previous["status"] != "interrupted":
-            raise ValueError("only an interrupted evaluation can be released")
-        # Hold the evaluator lease until every root claim is released.
-        turn_id = previous.get("turn_id")
-        if turn_id:
-            with runtime._connect() as db:
-                held = db.execute(
-                    "SELECT repository FROM write_claims WHERE claim_id=?",
-                    ("turn:" + turn_id,),
-                ).fetchall()
-            if held:
-                raise RuntimeError(
-                    "release ALL evaluator Git-root claims after worker termination: "
-                    + ", ".join(row["repository"] for row in held)
-                )
-        _cleanup_retained_evaluation_paths(
-            previous.get("cleanup"), guard_held=True,
-        )
-        return store.release_interrupted(
-            evaluation_id, worker_termination_confirmed=True,
-        )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Operator-only QiQi maintenance; not an MCP tool",
@@ -447,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     release_selector.add_argument("--repository", help="Current root alias")
     release_selector.add_argument(
         "--claim-repository",
-        help="Exact persisted claim key; use for blocked evaluator recovery",
+        help="Exact persisted claim key; use for blocked worker recovery",
     )
     release.add_argument("--claim-id", required=True)
     release.add_argument(
@@ -496,32 +361,9 @@ def main(argv: list[str] | None = None) -> int:
         help="I have verified the old MCP/Herdr Discovery worker has stopped",
     )
 
-    inspection = actions.add_parser(
-        "show-final-evaluation",
-        help="Inspect exact final evaluator attempt including interrupted native turn",
-    )
-    inspection.add_argument("--workspace", required=True, type=Path)
-    inspection.add_argument("--evaluation-id", required=True)
-
-    recheck = actions.add_parser(
-        "recover-final-evaluation",
-        help="Clear one interrupted evaluator only after confirming worker termination",
-    )
-    recheck.add_argument("--workspace", required=True, type=Path)
-    recheck.add_argument("--evaluation-id", required=True)
-    recheck.add_argument("--worker-termination-confirmed", action="store_true")
-
     args = parser.parse_args(argv)
     try:
-        if args.action == "show-final-evaluation":
-            output = show_final_evaluation(
-                workspace=args.workspace, evaluation_id=args.evaluation_id,
-            )
-        elif args.action == "recover-final-evaluation":
-            output = recover_final_evaluation(
-                workspace=args.workspace, evaluation_id=args.evaluation_id,
-                worker_termination_confirmed=args.worker_termination_confirmed,
-            )
+        if args.action == "show-claim":
         elif args.action == "show-claim":
             output = show_claim(
                 workspace=args.workspace, repository=args.repository,
