@@ -653,3 +653,122 @@ def test_trustctime_override_detects_same_size_restored_mtime(tmp_path):
         ["git", "-C", str(backend), "config", "--bool", "--get", "core.trustctime"],
         check=True, capture_output=True,
     ).stdout.strip() == b"false"
+
+
+
+def test_core_symlinks_false_rejected_before_evaluator_dispatch(
+    tmp_path, monkeypatch,
+):
+    """Git ignores symlink-vs-text-checkout changes under core.symlinks=false."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    target = backend / "target.txt"
+    target.write_text("real target content\n", encoding="utf-8")
+    link = backend / "bindings.xjb"
+    link.symlink_to("target.txt")
+    _git(backend, "add", "--", "bindings.xjb")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track symlink")
+
+    _git(backend, "config", "core.symlinks", "false")
+    link.unlink()
+    link.write_text("target.txt", encoding="utf-8")
+    as_plain = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--", "bindings.xjb"],
+        check=True, capture_output=True,
+    ).stdout
+    link.unlink()
+    link.symlink_to("target.txt")
+    as_link = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--", "bindings.xjb"],
+        check=True, capture_output=True,
+    ).stdout
+    assert as_plain == as_link == b"", "Git diff must hide the type switch"
+    assert link.read_text(encoding="utf-8") == "real target content\n"
+
+    launched = []
+    async def forbidden_delegate(**kwargs):
+        launched.append(kwargs)
+        raise AssertionError("unsafe native dispatch")
+
+    monkeypatch.setattr(runtime, "delegate", forbidden_delegate)
+    with pytest.raises(ValueError, match="core.symlinks=false"):
+        review_scope(runtime.repos())
+    with pytest.raises(ValueError, match="core.symlinks=false"):
+        asyncio.run(coordinator.start(
+            gid, "codex-evaluator", graph_rt.get_graph(gid)["revision"],
+        ))
+    assert not launched
+    assert coordinator.store.latest(gid) is None
+
+
+def test_tracked_read_permission_change_invalidates_final_pass(
+    tmp_path, monkeypatch,
+):
+    """Git's regular-file index modes cannot see chmod 0600 -> 0644."""
+    runtime, _requests, graph_rt, coordinator, gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    source = backend / "orders.py"
+    source.chmod(0o600)
+    _git(backend, "add", "--", "orders.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track permission-sensitive source")
+
+    async def delegate(**kwargs):
+        coordinator.store.bind_turn(kwargs["evaluation_id"], "permissions-native")
+        scope = coordinator.store.get(kwargs["evaluation_id"])["manifest"]
+        body = json.dumps(report(scope))
+        with sqlite3.connect(runtime.db) as db:
+            db.execute(
+                "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("permissions-native", "native-evaluator", "backend",
+                 "codex-evaluator", "settled", body, 203),
+            )
+        return {"state": "settled", "turn_id": "permissions-native",
+                "agent_response": body}
+
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    revision = graph_rt.get_graph(gid)["revision"]
+    passed = asyncio.run(coordinator.start(gid, "codex-evaluator", revision))
+    assert passed["status"] == "passed"
+    before = manifest_digest(review_scope(runtime.repos()))
+
+    source.chmod(0o644)
+    hidden = subprocess.run(
+        ["git", "-C", str(backend), "diff", "--", "orders.py"],
+        check=True, capture_output=True,
+    )
+    assert hidden.stdout == b"", "Git diff should not see 0600 -> 0644"
+    changed = manifest_digest(review_scope(runtime.repos()))
+    assert changed != before
+    assert coordinator.read(gid, passed["evaluation_id"])["effective_status"] == "stale"
+    with pytest.raises((RuntimeError, ValueError), match="PASS"):
+        coordinator.finalize(gid, passed["evaluation_id"], revision)
+
+    source.chmod(0o600)
+    assert manifest_digest(review_scope(runtime.repos())) == before
+
+
+def test_tracked_metadata_handles_missing_sparse_parent(tmp_path):
+    """Metadata inspection must not break supported missing index-only paths."""
+    runtime, _requests, _graph_rt, _coordinator, _gid = setup_graph(
+        tmp_path, multi=False,
+    )
+    backend = runtime.repos()["backend"]
+    missing = backend / "excluded" / "source.py"
+    missing.parent.mkdir()
+    missing.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(backend, "add", "excluded/source.py")
+    _git(backend, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-m", "Track optional source")
+    _git(backend, "update-index", "--skip-worktree", "--", "excluded/source.py")
+    missing.unlink()
+    missing.parent.rmdir()
+    stable = manifest_digest(review_scope(runtime.repos()))
+    assert stable == manifest_digest(review_scope(runtime.repos()))
+    assert "excluded/source.py" not in review_scope(runtime.repos())[
+        "backend"]["deleted_paths"]
