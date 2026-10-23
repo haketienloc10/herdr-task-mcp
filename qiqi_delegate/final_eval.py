@@ -29,7 +29,7 @@ def _parse_native_report(raw: str) -> Any:
     candidate = raw.strip()
     if candidate.startswith("```"):
         fenced = re.fullmatch(
-            r"```(?:json)?[ \\t]*\\r?\\n(?P<body>.*?)\\r?\\n```",
+            r"```(?:json)?[ \t]*\r?\n(?P<body>.*?)\r?\n```",
             candidate, flags=re.IGNORECASE | re.DOTALL,
         )
         if fenced is None:
