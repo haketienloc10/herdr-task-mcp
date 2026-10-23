@@ -1,28 +1,38 @@
-# One Claude route per model and effort. Pick the lowest sufficient effort.
-# All Claude routes default to --permission-mode auto; this is not a read-only sandbox.
-# Final Evaluation is selected via start_final_evaluation API, not by route name.
+# Routes and arguments belong to this workspace, not any child repository.
+# These defaults reduce interactive approval; change args here or in the
+# generated agent-routing.yaml if the workspace requires stricter permissions.
+# Tên route theo loại công việc; model cố định claude-sonnet-5-5, chỉ đổi --effort.
 routes:
-  claude-low:
+  # Tra cứu đơn giản, sửa nhỏ, cập nhật tài liệu
+  claude-lookup:
     agent: claude
-    args: ["--model", "claude-sonnet-5-5", "--effort", "low", "--permission-mode", "auto"]
-    description: "Tra cứu nhanh, tìm file/symbol, xác minh dữ kiện nhỏ; không cần suy luận nhiều bước."
-
-  claude-balanced:
+    args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "low"]
+  # Implementation và testing thông thường
+  claude-coding:
     agent: claude
-    args: ["--model", "claude-sonnet-5-5", "--effort", "medium", "--permission-mode", "auto"]
-    description: "Mặc định cho coding, bugfix, tài liệu, test đơn giản khi phạm vi và tiêu chí rõ ràng."
-
-  claude-high:
+    args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "medium"]
+  # Discovery, phân tích luồng, review
+  claude-analysis:
     agent: claude
-    args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
-    description: "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh và Final Evaluation thông thường."
-
-  claude-xhigh:
+    args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "high"]
+  # HẠN CHẾ DÙNG (tốn token, chậm): chỉ khi claude-analysis đã thử mà chưa đủ.
+  # Bug khó, thay đổi liên module, refactor
+  claude-deep:
     agent: claude
-    args: ["--model", "claude-sonnet-5-5", "--effort", "xhigh", "--permission-mode", "auto"]
-    description: "Full discovery, debug khó, refactor lớn, security review và Final Evaluation nhiều contract."
-
-  claude-max:
+    args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "xhigh"]
+  # HẠN CHẾ DÙNG (tốn token nhất, chậm nhất): chỉ cho task rủi ro cao, final evaluation.
+  # Task rủi ro cao, final evaluation
+  claude-critical:
     agent: claude
-    args: ["--model", "claude-sonnet-5-5", "--effort", "max", "--permission-mode", "auto"]
-    description: "Chỉ chọn khi vấn đề đặc biệt khó hoặc rủi ro cao mà high/xhigh chưa đủ; tốn nhiều tài nguyên."
+    args: ["--permission-mode", "auto", "--model", "claude-sonnet-5-5", "--effort", "max"]
+  # Final Evaluation dùng route do bạn cấu hình; --model và --effort được phép.
+  # Read-only là yêu cầu trong prompt, không phải filesystem sandbox.
+  claude-evaluator:
+    agent: claude
+    args:
+      - "--model"
+      - "claude-sonnet-5-5"
+      - "--effort"
+      - "medium"
+      - "--permission-mode"
+      - "auto"
