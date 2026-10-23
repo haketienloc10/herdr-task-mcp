@@ -36,7 +36,7 @@ RULES = """## Quy tắc điều phối qua qiqi_delegate
 - Khi direct, submit_workflow tự dispatch wave đầu; get_review_bundle mặc định dùng ngân sách TỔNG 32000 ký tự JSON (max_total_chars; cho phép 1024..64000), tối đa 8 review/trang. Server tự phân bổ evidence: một Peer response 12000 ký tự có thể nhận đủ trong một call nếu vừa ngân sách. max_chars_per_review là trần tùy chọn 1..64000 cho mỗi review, KHÔNG phải tổng ngân sách; không tự áp trần 8000 hoặc tăng vô hạn.
 - Nếu get_review_bundle trả response_truncated=true, đọc đúng node_id, attempt_id và next_offset bằng get_review_evidence(max_chars 1..24000), lặp theo next_offset đến null trước khi quyết định ACCEPT. Nếu next_review_offset khác null, lấy trang sau với expected_revision đúng bằng revision trang đầu để tránh bỏ sót evidence khi graph thay đổi. Không ACCEPT chỉ vì preview cho thấy settled.
 - Nếu submit_workflow, continue_workflow hoặc submit_decisions(auto_continue=true) trả review_bundle_error và review_bundle.incomplete=true, graph và Peer/Lead decision ĐÃ được lưu; KHÔNG submit lại workflow hoặc quyết định vì sẽ gây duplicate. Dùng graph_run_id/revision/review_locators trong fallback để đọc đúng attempt bằng get_review_evidence hoặc gọi get_review_bundle(max_total_chars=64000) khi metadata vừa. Bản thân get_review_bundle vẫn fail-closed nếu một review có metadata vượt ngân sách tối đa.
-- Dùng submit_decisions(auto_continue=true) để server tự dispatch các runnable wave an toàn sau quyết định; không bỏ semantic review, ACCEPT checkpoint, final independent evaluation, claim hoặc revision guard.
+- Dùng submit_decisions(auto_continue=true) để server tự dispatch các runnable wave an toàn sau quyết định; không bỏ semantic review, ACCEPT checkpoint, claim hoặc revision guard.
 - Chỉ gọi Discovery khi thiếu thông tin ảnh hưởng đến kế hoạch. Nếu đủ rõ thì chọn readiness `direct`; nếu thiếu một fact thì `targeted_discovery`; nếu chưa hiểu hệ thống thì `full_discovery`; nếu ý định user mơ hồ thì báo blocker hoặc hỏi lại.
 - Với workflow mới, chỉ tạo graph khi assessment `direct` và ánh xạ node với requirement IDs; với workflow cũ không có task_request_id phải coi là legacy_unassessed, không tuyên bố đã qua gate.
 - Discovery được phép điều tra nhiều Git root đã đăng ký thông qua delegate_discovery/--add-dir; đây là ngoại lệ CHỈ để đọc. Cấm sửa/tạo/xóa file, commit, chạy command gây side effect. Với --yolo, cấm ghi bằng prompt KHÔNG phải sandbox.
@@ -411,7 +411,6 @@ def claude_config(existing: str, python: Path, root: Path,
 
 ROUTES = """# One Claude route per model and effort. Pick the lowest sufficient effort.
 # All Claude routes default to --permission-mode auto; this is not a read-only sandbox.
-# Final Evaluation is selected via start_final_evaluation API, not by route name.
 routes:
   claude-low:
     agent: claude
@@ -426,12 +425,12 @@ routes:
   claude-high:
     agent: claude
     args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]
-    description: "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh và Final Evaluation thông thường."
+    description: "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh."
 
   claude-xhigh:
     agent: claude
     args: ["--model", "claude-sonnet-5-5", "--effort", "xhigh", "--permission-mode", "auto"]
-    description: "Full discovery, debug khó, refactor lớn, security review và Final Evaluation nhiều contract."
+    description: "Full discovery, debug khó, refactor lớn, security review."
 
   claude-max:
     agent: claude
@@ -443,11 +442,6 @@ routes:
     agent: codex
     args: ["--yolo"]
     description: "Tác vụ Codex với --yolo, chỉ dùng với repository đáng tin cậy."
-
-  codex-evaluator:
-    agent: codex
-    args: ["--sandbox", "read-only"]
-    description: "Final Evaluation bằng Codex có sandbox read-only; người dùng có thể đổi args."
 
 """
 
