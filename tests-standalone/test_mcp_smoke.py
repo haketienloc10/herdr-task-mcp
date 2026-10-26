@@ -841,3 +841,49 @@ def test_native_ambiguous_capture_flows_into_graph(tmp_path, monkeypatch):
     with rt._connect() as db:
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 0
+
+
+def test_retired_evaluator_tools_are_not_registered_over_mcp(tmp_path):
+    """Inspect the public tools/list contract, not just Python attributes."""
+    env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path))
+    messages = [
+        {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "qiqi-evaluator-regression", "version": "1"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    proc = subprocess.run(
+        [sys.executable, "-m", "qiqi_delegate.server"],
+        input="".join(json.dumps(message) + "\n" for message in messages),
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    replies = []
+    for line in proc.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("id") == 2:
+            replies.append(message)
+    assert len(replies) == 1, (
+        f"MCP tools/list missing: stdout={proc.stdout[-2000:]!r}; "
+        f"stderr={proc.stderr[-4000:]!r}"
+    )
+    response = replies[0]
+    assert "result" in response, response
+    names = {tool["name"] for tool in response["result"]["tools"]}
+    assert {"submit_workflow", "start_graph", "submit_decisions"} <= names
+    assert not names.intersection({
+        "start_final_evaluation",
+        "get_final_evaluation",
+        "finalize_graph",
+        "show_final_evaluation",
+        "recover_final_evaluation",
+    })
+    assert not any("evaluat" in name.lower() for name in names)
