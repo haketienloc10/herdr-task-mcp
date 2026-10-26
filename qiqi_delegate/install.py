@@ -696,15 +696,27 @@ def migrate_legacy_evaluator_routes(existing: str) -> tuple[str, list[str], list
         ),
     )
     for name, old_description, new_description in guidance:
+        effort = "high" if name == "claude-high" else "xhigh"
         route = routes.get(name)
-        if not isinstance(route, dict) or route.get("agent") != "claude":
+        if route != {
+            "agent": "claude",
+            "args": [
+                "--model", "claude-sonnet-5-5", "--effort", effort,
+                "--permission-mode", "auto",
+            ],
+            "description": old_description,
+        }:
             continue
-        if route.get("description") != old_description:
-            continue
-        old_line = "    description: " + '"' + old_description + '"' + newline
-        new_line = "    description: " + '"' + new_description + '"' + newline
-        if old_line in existing:
-            existing = existing.replace(old_line, new_line, 1)
+        old_block = (
+            "  " + name + ":" + newline
+            + "    agent: claude" + newline
+            + '    args: ["--model", "claude-sonnet-5-5", "--effort", "'
+            + effort + '", "--permission-mode", "auto"]' + newline
+            + '    description: "' + old_description + '"' + newline
+        )
+        new_block = old_block.replace(old_description, new_description)
+        if old_block in existing:
+            existing = existing.replace(old_block, new_block, 1)
 
     remaining = sorted(
         name for name in routes
@@ -741,7 +753,7 @@ async def install_workspace(root: Path, python: Path | None = None,
     c_old = codex.read_text(encoding="utf-8") if codex.exists() else ""
     m_old = claude.read_text(encoding="utf-8") if claude.exists() else ""
     route_file = root / "agent-routing.yaml"
-    route_old = route_file.read_text(encoding="utf-8") if route_file.exists() else None
+    route_old = route_file.read_bytes().decode("utf-8") if route_file.exists() else None
     route_new, removed_routes, retained_routes = (
         migrate_legacy_evaluator_routes(route_old)
         if route_old is not None else (None, [], [])
