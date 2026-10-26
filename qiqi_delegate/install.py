@@ -635,6 +635,86 @@ def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def migrate_legacy_evaluator_routes(existing: str) -> tuple[str, list[str], list[str]]:
+    """Remove only installer-owned legacy evaluator settings, preserving custom routes.
+
+    The old route was installed as user-editable YAML. Do not rewrite that YAML
+    with safe_dump or remove an overridden route solely because of its name.
+    """
+    import yaml
+
+    try:
+        document = yaml.safe_load(existing)
+    except yaml.YAMLError as exc:
+        raise ValueError("agent-routing.yaml has invalid YAML; refusing migration") from exc
+    if not isinstance(document, dict) or not isinstance(document.get("routes"), dict):
+        return existing, [], []
+
+    routes = document["routes"]
+    old_codex_route = {
+        "agent": "codex",
+        "args": ["--sandbox", "read-only"],
+        "description": (
+            "Final Evaluation bằng Codex có sandbox read-only; "
+            "người dùng có thể đổi args."
+        ),
+    }
+    old_stanza = (
+        '  codex-evaluator:\n'
+        '    agent: codex\n'
+        '    args: ["--sandbox", "read-only"]\n'
+        '    description: "Final Evaluation bằng Codex có sandbox read-only; '
+        'người dùng có thể đổi args."\n'
+    )
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    removed: list[str] = []
+    if routes.get("codex-evaluator") == old_codex_route:
+        exact_stanza = old_stanza.replace("\n", newline)
+        if exact_stanza in existing:
+            existing = existing.replace(exact_stanza, "", 1)
+            removed.append("codex-evaluator")
+
+    # Older generated route files also carried stale Final Evaluation guidance.
+    # Change only exact installer defaults, never user-authored descriptions.
+    outdated_comment = (
+        "# Final Evaluation is selected via start_final_evaluation API, "
+        "not by route name." + newline
+    )
+    existing = existing.replace(outdated_comment, "", 1)
+    guidance = (
+        (
+            "claude-high",
+            "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh "
+            "và Final Evaluation thông thường.",
+            "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh.",
+        ),
+        (
+            "claude-xhigh",
+            "Full discovery, debug khó, refactor lớn, security review "
+            "và Final Evaluation nhiều contract.",
+            "Full discovery, debug khó, refactor lớn, security review.",
+        ),
+    )
+    for name, old_description, new_description in guidance:
+        route = routes.get(name)
+        if not isinstance(route, dict) or route.get("agent") != "claude":
+            continue
+        if route.get("description") != old_description:
+            continue
+        old_line = "    description: " + '"' + old_description + '"' + newline
+        new_line = "    description: " + '"' + new_description + '"' + newline
+        if old_line in existing:
+            existing = existing.replace(old_line, new_line, 1)
+
+    remaining = sorted(
+        name for name in routes
+        if isinstance(name, str)
+        and ("evaluator" in name.casefold() or "final-eval" in name.casefold())
+        and name not in removed
+    )
+    return existing, removed, remaining
+
+
 async def install_workspace(root: Path, python: Path | None = None,
                             herdr_session: str | None = None) -> dict:
     root = root.resolve(strict=True)
@@ -660,6 +740,12 @@ async def install_workspace(root: Path, python: Path | None = None,
     lead_old = claude_rules.read_bytes() if claude_rules.exists() else b""
     c_old = codex.read_text(encoding="utf-8") if codex.exists() else ""
     m_old = claude.read_text(encoding="utf-8") if claude.exists() else ""
+    route_file = root / "agent-routing.yaml"
+    route_old = route_file.read_text(encoding="utf-8") if route_file.exists() else None
+    route_new, removed_routes, retained_routes = (
+        migrate_legacy_evaluator_routes(route_old)
+        if route_old is not None else (None, [], [])
+    )
     # Complete all validations before modifying any file.
     herdr_session = (
         _validate_herdr_session(herdr_session)
@@ -677,6 +763,8 @@ async def install_workspace(root: Path, python: Path | None = None,
         claude: m_new.encode("utf-8"),
         root / ".herdr-task-mcp" / ".gitignore": b"*\n!.gitignore\n",
     }
+    if route_new is not None and route_new != route_old:
+        files[route_file] = route_new.encode("utf-8")
     for name, value in (("repos.yaml", REPOS), ("agent-routing.yaml", ROUTES)):
         path = root / name
         if not path.exists():
@@ -684,7 +772,9 @@ async def install_workspace(root: Path, python: Path | None = None,
     _commit_workspace_files(root, files)
     return {"workspace": str(root), "mcp": SERVER,
             "agents_marker": START, "python": str(python),
-            "herdr_session": herdr_session}
+            "herdr_session": herdr_session,
+            "removed_evaluator_routes": removed_routes,
+            "retained_evaluator_routes": retained_routes}
 
 def main():
     import argparse
