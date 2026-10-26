@@ -1236,3 +1236,96 @@ def test_claude_import_refuses_symlink(tmp_path):
     with pytest.raises(ValueError, match="symlink"):
         asyncio.run(install_workspace(tmp_path))
     assert not (tmp_path / "AGENTS.md").exists()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_installer_migrates_default_legacy_evaluator_route(tmp_path, newline):
+    """Upgrade old generated YAML without reformatting the other user routes."""
+    original = (
+        "# Keep this custom header\n"
+        "# Final Evaluation is selected via start_final_evaluation API, not by route name.\n"
+        "routes:\n"
+        "  my-custom:\n"
+        "    agent: claude\n"
+        '    args: ["--model", "custom-model"]\n'
+        "    description: Keep my custom configuration\n"
+        "  claude-high:\n"
+        "    agent: claude\n"
+        '    args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]\n'
+        '    description: "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh và Final Evaluation thông thường."\n'
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "read-only"]\n'
+        '    description: "Final Evaluation bằng Codex có sandbox read-only; người dùng có thể đổi args."\n'
+        "\n"
+    ).replace("\n", newline)
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_bytes(original.encode("utf-8"))
+
+    result = asyncio.run(install_workspace(tmp_path))
+    migrated = route_file.read_bytes().decode("utf-8")
+    assert result["removed_evaluator_routes"] == ["codex-evaluator"]
+    assert result["retained_evaluator_routes"] == []
+    assert "codex-evaluator" not in migrated
+    assert "start_final_evaluation" not in migrated
+    assert "Final Evaluation thông thường" not in migrated
+    assert "    description: Keep my custom configuration" + newline in migrated
+    assert "    args: [\"--model\", \"custom-model\"]" + newline in migrated
+    assert migrated.startswith("# Keep this custom header" + newline)
+    assert newline in migrated
+
+    again = asyncio.run(install_workspace(tmp_path))
+    assert again["removed_evaluator_routes"] == []
+    assert again["retained_evaluator_routes"] == []
+    assert route_file.read_bytes().decode("utf-8") == migrated
+
+
+def test_installer_preserves_and_reports_custom_evaluator_routes(tmp_path):
+    """An operator-customized route must not be silently deleted."""
+    original = (
+        "routes:\n"
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "workspace-write"]\n'
+        "    description: Custom evaluator route\n"
+        "  claude-evaluator:\n"
+        "    agent: claude\n"
+        "    args: []\n"
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+
+    result = asyncio.run(install_workspace(tmp_path))
+    assert result["removed_evaluator_routes"] == []
+    assert result["retained_evaluator_routes"] == [
+        "claude-evaluator", "codex-evaluator",
+    ]
+    assert route_file.read_text(encoding="utf-8") == original
+
+
+def test_installer_does_not_remove_reformatted_legacy_evaluator_route(tmp_path):
+    """No YAML serializer fallback: preserve formatting requiring user review."""
+    original = (
+        "routes:\n"
+        "  codex-evaluator: {agent: codex, args: [--sandbox, read-only], "
+        'description: "Final Evaluation bằng Codex có sandbox read-only; người dùng có thể đổi args."}\n'
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+
+    result = asyncio.run(install_workspace(tmp_path))
+    assert result["removed_evaluator_routes"] == []
+    assert result["retained_evaluator_routes"] == ["codex-evaluator"]
+    assert route_file.read_text(encoding="utf-8") == original
+
+
+def test_invalid_legacy_routes_fail_before_installer_writes(tmp_path):
+    original = b"# Existing user policy\n"
+    (tmp_path / "AGENTS.md").write_bytes(original)
+    (tmp_path / "agent-routing.yaml").write_text("routes: [\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="agent-routing.yaml has invalid YAML"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "AGENTS.md").read_bytes() == original
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
