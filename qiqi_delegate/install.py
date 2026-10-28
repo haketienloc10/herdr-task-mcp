@@ -706,6 +706,17 @@ def migrate_legacy_evaluator_routes(existing: str) -> tuple[str, list[str], list
         {"agent": "codex", "args": codex_args, "description": codex_description},
         codex_base + '    description: "' + codex_description + '"\n',
     )
+    grouped_codex_description = (
+        "Final Evaluation bằng Codex với profile read-only do user có thể sửa."
+    )
+    remove_default_route(
+        "codex-evaluator",
+        {
+            "agent": "codex", "args": codex_args,
+            "description": grouped_codex_description,
+        },
+        codex_base + '    description: "' + grouped_codex_description + '"\n',
+    )
 
     # The October 2026 installer also generated an exact restricted Claude route.
     legacy_claude_args = [
@@ -721,6 +732,26 @@ def migrate_legacy_evaluator_routes(existing: str) -> tuple[str, list[str], list
         '  claude-evaluator:\n'
         '    agent: claude\n'
         '    args: ' + json.dumps(legacy_claude_args) + '\n',
+    )
+    # The grouped effort-based defaults also shipped a YAML-aliased route.
+    grouped_claude_description = (
+        "Final Evaluation độc lập khi TaskGraph hoàn tất; "
+        "đọc snapshot, đối chiếu toàn bộ requirements."
+    )
+    grouped_claude_args = [
+        "--model", "claude-sonnet-5-5", "--effort", "high",
+        "--permission-mode", "auto",
+    ]
+    remove_default_route(
+        "claude-evaluator",
+        {
+            "agent": "claude", "args": grouped_claude_args,
+            "description": grouped_claude_description,
+        },
+        '  claude-evaluator:\n'
+        '    agent: claude\n'
+        '    args: *sonnet_high_auto\n'
+        '    description: "' + grouped_claude_description + '"\n',
     )
 
     # Remove the exact obsolete installer comment, not arbitrary user guidance.
