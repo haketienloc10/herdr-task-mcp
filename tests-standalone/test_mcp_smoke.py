@@ -843,39 +843,71 @@ def test_native_ambiguous_capture_flows_into_graph(tmp_path, monkeypatch):
         assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 0
 
 
+
 def test_retired_evaluator_tools_are_not_registered_over_mcp(tmp_path):
-    """Inspect the public tools/list contract, not just Python attributes."""
+    """Complete the MCP handshake before asking for tools/list over live stdio."""
     env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path))
-    messages = [
-        {
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "qiqi-evaluator-regression", "version": "1"},
-            },
+    initialize = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "qiqi-evaluator-regression", "version": "1"},
         },
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-    ]
-    proc = subprocess.run(
-        [sys.executable, "-m", "qiqi_delegate.server"],
-        input="".join(json.dumps(message) + "\n" for message in messages),
-        env=env, capture_output=True, text=True, timeout=20,
-    )
-    replies = []
-    for line in proc.stdout.splitlines():
+    }
+
+    async def query_tools():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "qiqi_delegate.server",
+            env=env, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=1024 * 1024,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+
+        async def response_for(request_id):
+            async def read_reply():
+                while line := await proc.stdout.readline():
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if message.get("id") == request_id:
+                        return message
+                stderr = await proc.stderr.read()
+                raise AssertionError(
+                    f"MCP closed before response {request_id}: "
+                    f"stderr={stderr.decode(errors='replace')[-4000:]}"
+                )
+            return await asyncio.wait_for(read_reply(), timeout=20)
+
         try:
-            message = json.loads(line)
-        except ValueError:
-            continue
-        if message.get("id") == 2:
-            replies.append(message)
-    assert len(replies) == 1, (
-        f"MCP tools/list missing: stdout={proc.stdout[-2000:]!r}; "
-        f"stderr={proc.stderr[-4000:]!r}"
-    )
-    response = replies[0]
+            proc.stdin.write((json.dumps(initialize) + "\n").encode())
+            await proc.stdin.drain()
+            first = await response_for(1)
+            assert "result" in first, first
+
+            # Closing stdin immediately after sending all three frames races
+            # the MCP server's EOF shutdown against tools/list processing.
+            messages = (
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            )
+            proc.stdin.write(
+                "".join(json.dumps(message) + "\n" for message in messages).encode()
+            )
+            await proc.stdin.drain()
+            return await response_for(2)
+        finally:
+            proc.stdin.close()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+    response = asyncio.run(query_tools())
     assert "result" in response, response
     names = {tool["name"] for tool in response["result"]["tools"]}
     assert {"submit_workflow", "start_graph", "submit_decisions"} <= names
