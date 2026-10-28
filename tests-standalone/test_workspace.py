@@ -1457,3 +1457,39 @@ def test_migration_reports_underscore_evaluation_route_names(tmp_path):
         "codex_final_eval", "final_evaluation",
     ]
     assert route_file.read_text(encoding="utf-8") == original
+
+
+def test_migrate_historical_grouped_evaluator_routes(tmp_path):
+    """The Oct 15 grouped defaults used a YAML alias and another Codex description."""
+    original = (
+        "# Historical grouped route config\n"
+        "routes:\n"
+        "  claude-analysis:\n"
+        "    agent: claude\n"
+        '    args: &sonnet_high_auto ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]\n'
+        '    description: "Phân tích kiến trúc, luồng code hoặc contract nhiều bước với chứng cứ file:line."\n'
+        "  claude-evaluator:\n"
+        "    agent: claude\n"
+        "    args: *sonnet_high_auto\n"
+        '    description: "Final Evaluation độc lập khi TaskGraph hoàn tất; đọc snapshot, đối chiếu toàn bộ requirements."\n'
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "read-only"]\n'
+        '    description: "Final Evaluation bằng Codex với profile read-only do user có thể sửa."\n'
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+
+    result = asyncio.run(install_workspace(tmp_path))
+    migrated = route_file.read_text(encoding="utf-8")
+    assert result["removed_evaluator_routes"] == ["codex-evaluator", "claude-evaluator"]
+    assert result["retained_evaluator_routes"] == []
+    assert migrated == (
+        "# Historical grouped route config\n"
+        "routes:\n"
+        "  claude-analysis:\n"
+        "    agent: claude\n"
+        '    args: &sonnet_high_auto ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]\n'
+        '    description: "Phân tích kiến trúc, luồng code hoặc contract nhiều bước với chứng cứ file:line."\n'
+    )
+    assert asyncio.run(install_workspace(tmp_path))["removed_evaluator_routes"] == []
