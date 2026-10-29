@@ -635,6 +635,186 @@ def _commit_workspace_files(root: Path, files: dict[Path, bytes]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def migrate_legacy_evaluator_routes(existing: str) -> tuple[str, list[str], list[str]]:
+    """Migrate exact historical installer defaults, preserving custom YAML routes.
+
+    The legacy YAML is user-editable. Match both the parsed route and its exact
+    installer-authored stanza before removal, and never serialize other routes.
+    """
+    import yaml
+    from yaml.nodes import MappingNode, ScalarNode
+
+    try:
+        document = yaml.safe_load(existing)
+        root_node = yaml.compose(existing)
+    except yaml.YAMLError as exc:
+        raise ValueError("agent-routing.yaml has invalid YAML; refusing migration") from exc
+    if not isinstance(document, dict) or not isinstance(document.get("routes"), dict):
+        return existing, [], []
+
+    def entries(node: MappingNode, scope: str) -> dict[str, tuple]:
+        found: dict[str, tuple] = {}
+        for key, value in node.value:
+            if not isinstance(key, ScalarNode):
+                continue
+            if key.value in found:
+                raise ValueError(
+                    f"agent-routing.yaml has duplicate YAML key {key.value!r} "
+                    f"in {scope}; refusing migration"
+                )
+            found[key.value] = (key, value)
+        return found
+
+    if not isinstance(root_node, MappingNode):
+        return existing, [], []
+    root_entries = entries(root_node, "document")
+    route_node = root_entries.get("routes", (None, None))[1]
+    if not isinstance(route_node, MappingNode):
+        return existing, [], []
+    route_entries = entries(route_node, "routes")
+    routes = document["routes"]
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    edits: list[tuple[int, int, str]] = []
+    removed: list[str] = []
+
+    def remove_default_route(name: str, expected: dict, block: str) -> None:
+        if routes.get(name) != expected or name not in route_entries:
+            return
+        key_node, _value_node = route_entries[name]
+        line_start = existing.rfind("\n", 0, key_node.start_mark.index) + 1
+        exact = block.replace("\n", newline)
+        if existing.startswith(exact, line_start):
+            edits.append((line_start, line_start + len(exact), ""))
+            removed.append(name)
+
+    # Both defaults were shipped: the earlier Codex profile had no description.
+    codex_base = (
+        '  codex-evaluator:\n'
+        '    agent: codex\n'
+        '    args: ["--sandbox", "read-only"]\n'
+    )
+    codex_args = ["--sandbox", "read-only"]
+    remove_default_route(
+        "codex-evaluator", {"agent": "codex", "args": codex_args}, codex_base,
+    )
+    codex_description = (
+        "Final Evaluation bằng Codex có sandbox read-only; "
+        "người dùng có thể đổi args."
+    )
+    remove_default_route(
+        "codex-evaluator",
+        {"agent": "codex", "args": codex_args, "description": codex_description},
+        codex_base + '    description: "' + codex_description + '"\n',
+    )
+    grouped_codex_description = (
+        "Final Evaluation bằng Codex với profile read-only do user có thể sửa."
+    )
+    remove_default_route(
+        "codex-evaluator",
+        {
+            "agent": "codex", "args": codex_args,
+            "description": grouped_codex_description,
+        },
+        codex_base + '    description: "' + grouped_codex_description + '"\n',
+    )
+
+    # The October 2026 installer also generated an exact restricted Claude route.
+    legacy_claude_args = [
+        "--restricted", "--permission-mode", "dontAsk",
+        "--tools", "Read,Glob,Grep",
+        "--allowedTools", "Read,Glob,Grep",
+        "--disallowedTools", "mcp__*",
+        "--strict-mcp-config", "--disable-slash-commands",
+    ]
+    remove_default_route(
+        "claude-evaluator",
+        {"agent": "claude", "args": legacy_claude_args},
+        '  claude-evaluator:\n'
+        '    agent: claude\n'
+        '    args: ' + json.dumps(legacy_claude_args) + '\n',
+    )
+    # The grouped effort-based defaults also shipped a YAML-aliased route.
+    grouped_claude_description = (
+        "Final Evaluation độc lập khi TaskGraph hoàn tất; "
+        "đọc snapshot, đối chiếu toàn bộ requirements."
+    )
+    grouped_claude_args = [
+        "--model", "claude-sonnet-5-5", "--effort", "high",
+        "--permission-mode", "auto",
+    ]
+    remove_default_route(
+        "claude-evaluator",
+        {
+            "agent": "claude", "args": grouped_claude_args,
+            "description": grouped_claude_description,
+        },
+        '  claude-evaluator:\n'
+        '    agent: claude\n'
+        '    args: *sonnet_high_auto\n'
+        '    description: "' + grouped_claude_description + '"\n',
+    )
+
+    # Remove the exact obsolete installer comment, not arbitrary user guidance.
+    old_comment = (
+        "# Final Evaluation is selected via start_final_evaluation API, "
+        "not by route name." + newline
+    )
+    comment_at = existing.find(old_comment)
+    if comment_at >= 0 and (comment_at == 0 or existing[comment_at - 1] == "\n"):
+        edits.append((comment_at, comment_at + len(old_comment), ""))
+
+    # Description ownership is independent of CLI arguments: users may change
+    # model/effort while retaining the exact obsolete installer description.
+    guidance = (
+        (
+            "claude-high",
+            "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh "
+            "và Final Evaluation thông thường.",
+            "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh.",
+        ),
+        (
+            "claude-xhigh",
+            "Full discovery, debug khó, refactor lớn, security review "
+            "và Final Evaluation nhiều contract.",
+            "Full discovery, debug khó, refactor lớn, security review.",
+        ),
+    )
+    for name, old_description, new_description in guidance:
+        route = routes.get(name)
+        route_entry = route_entries.get(name)
+        if not isinstance(route, dict) or route.get("description") != old_description:
+            continue
+        if route_entry is None or not isinstance(route_entry[1], MappingNode):
+            continue
+        route_fields = entries(route_entry[1], name)
+        description_entry = route_fields.get("description")
+        if description_entry is None:
+            continue
+        value_node = description_entry[1]
+        before = existing[value_node.start_mark.index:value_node.end_mark.index]
+        if before.count(old_description) == 1:
+            edits.append((
+                value_node.start_mark.index, value_node.end_mark.index,
+                before.replace(old_description, new_description, 1),
+            ))
+
+    # All source positions refer to the original YAML; apply from the end to
+    # keep offsets stable and avoid accidentally editing an unrelated stanza.
+    for start, end, replacement in sorted(edits, reverse=True):
+        existing = existing[:start] + replacement + existing[end:]
+
+    migrated = yaml.safe_load(existing)
+    remaining_routes = migrated.get("routes", {}) if isinstance(migrated, dict) else {}
+    remaining = sorted(
+        name for name in remaining_routes
+        if isinstance(name, str)
+        and (
+            "evaluator" in name.casefold().replace("_", "-")
+            or "final-eval" in name.casefold().replace("_", "-")
+        )
+    ) if isinstance(remaining_routes, dict) else []
+    return existing, removed, remaining
+
 async def install_workspace(root: Path, python: Path | None = None,
                             herdr_session: str | None = None) -> dict:
     root = root.resolve(strict=True)
@@ -660,6 +840,12 @@ async def install_workspace(root: Path, python: Path | None = None,
     lead_old = claude_rules.read_bytes() if claude_rules.exists() else b""
     c_old = codex.read_text(encoding="utf-8") if codex.exists() else ""
     m_old = claude.read_text(encoding="utf-8") if claude.exists() else ""
+    route_file = root / "agent-routing.yaml"
+    route_old = route_file.read_bytes().decode("utf-8") if route_file.exists() else None
+    route_new, removed_routes, retained_routes = (
+        migrate_legacy_evaluator_routes(route_old)
+        if route_old is not None else (None, [], [])
+    )
     # Complete all validations before modifying any file.
     herdr_session = (
         _validate_herdr_session(herdr_session)
@@ -677,6 +863,8 @@ async def install_workspace(root: Path, python: Path | None = None,
         claude: m_new.encode("utf-8"),
         root / ".herdr-task-mcp" / ".gitignore": b"*\n!.gitignore\n",
     }
+    if route_new is not None and route_new != route_old:
+        files[route_file] = route_new.encode("utf-8")
     for name, value in (("repos.yaml", REPOS), ("agent-routing.yaml", ROUTES)):
         path = root / name
         if not path.exists():
@@ -684,7 +872,9 @@ async def install_workspace(root: Path, python: Path | None = None,
     _commit_workspace_files(root, files)
     return {"workspace": str(root), "mcp": SERVER,
             "agents_marker": START, "python": str(python),
-            "herdr_session": herdr_session}
+            "herdr_session": herdr_session,
+            "removed_evaluator_routes": removed_routes,
+            "retained_evaluator_routes": retained_routes}
 
 def main():
     import argparse

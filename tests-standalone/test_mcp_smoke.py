@@ -841,3 +841,81 @@ def test_native_ambiguous_capture_flows_into_graph(tmp_path, monkeypatch):
     with rt._connect() as db:
         assert db.execute("SELECT count(*) FROM turns").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM write_claims").fetchone()[0] == 0
+
+
+
+def test_retired_evaluator_tools_are_not_registered_over_mcp(tmp_path):
+    """Complete the MCP handshake before asking for tools/list over live stdio."""
+    env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path))
+    initialize = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "qiqi-evaluator-regression", "version": "1"},
+        },
+    }
+
+    async def query_tools():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "qiqi_delegate.server",
+            env=env, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=1024 * 1024,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+
+        async def response_for(request_id):
+            async def read_reply():
+                while line := await proc.stdout.readline():
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if message.get("id") == request_id:
+                        return message
+                stderr = await proc.stderr.read()
+                raise AssertionError(
+                    f"MCP closed before response {request_id}: "
+                    f"stderr={stderr.decode(errors='replace')[-4000:]}"
+                )
+            return await asyncio.wait_for(read_reply(), timeout=20)
+
+        try:
+            proc.stdin.write((json.dumps(initialize) + "\n").encode())
+            await proc.stdin.drain()
+            first = await response_for(1)
+            assert "result" in first, first
+
+            # Closing stdin immediately after sending all three frames races
+            # the MCP server's EOF shutdown against tools/list processing.
+            messages = (
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            )
+            proc.stdin.write(
+                "".join(json.dumps(message) + "\n" for message in messages).encode()
+            )
+            await proc.stdin.drain()
+            return await response_for(2)
+        finally:
+            proc.stdin.close()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+    response = asyncio.run(query_tools())
+    assert "result" in response, response
+    names = {tool["name"] for tool in response["result"]["tools"]}
+    assert {"submit_workflow", "start_graph", "submit_decisions"} <= names
+    assert not names.intersection({
+        "start_final_evaluation",
+        "get_final_evaluation",
+        "finalize_graph",
+        "show_final_evaluation",
+        "recover_final_evaluation",
+    })
+    assert not any("evaluat" in name.lower() for name in names)

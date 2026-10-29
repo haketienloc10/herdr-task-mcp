@@ -1236,3 +1236,260 @@ def test_claude_import_refuses_symlink(tmp_path):
     with pytest.raises(ValueError, match="symlink"):
         asyncio.run(install_workspace(tmp_path))
     assert not (tmp_path / "AGENTS.md").exists()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_installer_migrates_default_legacy_evaluator_route(tmp_path, newline):
+    """Upgrade old generated YAML without reformatting the other user routes."""
+    original = (
+        "# Keep this custom header\n"
+        "# Final Evaluation is selected via start_final_evaluation API, not by route name.\n"
+        "routes:\n"
+        "  my-custom:\n"
+        "    agent: claude\n"
+        '    args: ["--model", "custom-model"]\n'
+        "    description: Keep my custom configuration\n"
+        "  claude-high:\n"
+        "    agent: claude\n"
+        '    args: ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]\n'
+        '    description: "Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh và Final Evaluation thông thường."\n'
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "read-only"]\n'
+        '    description: "Final Evaluation bằng Codex có sandbox read-only; người dùng có thể đổi args."\n'
+        "\n"
+    ).replace("\n", newline)
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_bytes(original.encode("utf-8"))
+
+    result = asyncio.run(install_workspace(tmp_path))
+    migrated = route_file.read_bytes().decode("utf-8")
+    assert result["removed_evaluator_routes"] == ["codex-evaluator"]
+    assert result["retained_evaluator_routes"] == []
+    assert "codex-evaluator" not in migrated
+    assert "start_final_evaluation" not in migrated
+    assert "Final Evaluation thông thường" not in migrated
+    assert "    description: Keep my custom configuration" + newline in migrated
+    assert "    args: [\"--model\", \"custom-model\"]" + newline in migrated
+    assert migrated.startswith("# Keep this custom header" + newline)
+    assert newline in migrated
+
+    again = asyncio.run(install_workspace(tmp_path))
+    assert again["removed_evaluator_routes"] == []
+    assert again["retained_evaluator_routes"] == []
+    assert route_file.read_bytes().decode("utf-8") == migrated
+
+
+def test_installer_preserves_and_reports_custom_evaluator_routes(tmp_path):
+    """An operator-customized route must not be silently deleted."""
+    original = (
+        "routes:\n"
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "workspace-write"]\n'
+        "    description: Custom evaluator route\n"
+        "  claude-evaluator:\n"
+        "    agent: claude\n"
+        "    args: []\n"
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+
+    result = asyncio.run(install_workspace(tmp_path))
+    assert result["removed_evaluator_routes"] == []
+    assert result["retained_evaluator_routes"] == [
+        "claude-evaluator", "codex-evaluator",
+    ]
+    assert route_file.read_text(encoding="utf-8") == original
+
+
+def test_installer_does_not_remove_reformatted_legacy_evaluator_route(tmp_path):
+    """No YAML serializer fallback: preserve formatting requiring user review."""
+    original = (
+        "routes:\n"
+        "  codex-evaluator: {agent: codex, args: [--sandbox, read-only], "
+        'description: "Final Evaluation bằng Codex có sandbox read-only; người dùng có thể đổi args."}\n'
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+
+    result = asyncio.run(install_workspace(tmp_path))
+    assert result["removed_evaluator_routes"] == []
+    assert result["retained_evaluator_routes"] == ["codex-evaluator"]
+    assert route_file.read_text(encoding="utf-8") == original
+
+
+def test_invalid_legacy_routes_fail_before_installer_writes(tmp_path):
+    original = b"# Existing user policy\n"
+    (tmp_path / "AGENTS.md").write_bytes(original)
+    (tmp_path / "agent-routing.yaml").write_text("routes: [\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="agent-routing.yaml has invalid YAML"):
+        asyncio.run(install_workspace(tmp_path))
+    assert (tmp_path / "AGENTS.md").read_bytes() == original
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_migrate_both_historical_installer_evaluator_routes(tmp_path, newline):
+    """October 2026 shipped both evaluator routes without descriptions."""
+    old_claude_args = [
+        "--restricted", "--permission-mode", "dontAsk",
+        "--tools", "Read,Glob,Grep",
+        "--allowedTools", "Read,Glob,Grep",
+        "--disallowedTools", "mcp__*",
+        "--strict-mcp-config", "--disable-slash-commands",
+    ]
+    original = (
+        "routes:\n"
+        "  codex-balanced:\n"
+        "    agent: codex\n"
+        '    args: ["--yolo"]\n'
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "read-only"]\n'
+        "  claude-evaluator:\n"
+        "    agent: claude\n"
+        "    args: " + json.dumps(old_claude_args) + "\n"
+    ).replace("\n", newline)
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_bytes(original.encode("utf-8"))
+
+    result = asyncio.run(install_workspace(tmp_path))
+    migrated = route_file.read_bytes().decode("utf-8")
+    assert result["removed_evaluator_routes"] == ["codex-evaluator", "claude-evaluator"]
+    assert result["retained_evaluator_routes"] == []
+    assert "  codex-evaluator:" not in migrated
+    assert "  claude-evaluator:" not in migrated
+    assert "  codex-balanced:" + newline in migrated
+    assert '    args: ["--yolo"]' + newline in migrated
+
+    second = asyncio.run(install_workspace(tmp_path))
+    assert second["removed_evaluator_routes"] == []
+    assert route_file.read_bytes().decode("utf-8") == migrated
+
+
+def test_migration_rejects_duplicate_route_keys_before_writing(tmp_path):
+    """PyYAML normally keeps only the last duplicate, so fail closed."""
+    original = (
+        "routes:\n"
+        "  codex-evaluator:\n"
+        "    agent: claude\n"
+        "    args: []\n"
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "read-only"]\n'
+        '    description: "Final Evaluation bằng Codex có sandbox read-only; người dùng có thể đổi args."\n'
+    )
+    path = tmp_path / "agent-routing.yaml"
+    path.write_text(original, encoding="utf-8")
+    agents = tmp_path / "AGENTS.md"
+    agents.write_bytes(b"Preserve these rules.\n")
+
+    with pytest.raises(ValueError, match="duplicate YAML key"):
+        asyncio.run(install_workspace(tmp_path))
+    assert path.read_text(encoding="utf-8") == original
+    assert agents.read_bytes() == b"Preserve these rules.\n"
+    assert not (tmp_path / ".codex").exists()
+
+
+def test_migration_rejects_duplicate_routes_mapping(tmp_path):
+    from qiqi_delegate.install import migrate_legacy_evaluator_routes
+
+    with pytest.raises(ValueError, match="duplicate YAML key"):
+        migrate_legacy_evaluator_routes(
+            "routes:\n  unrelated: {agent: codex, args: []}\n"
+            "routes:\n  codex-evaluator: {agent: codex, args: []}\n"
+        )
+
+
+def test_migration_updates_legacy_description_with_custom_cli_args(tmp_path):
+    """Description ownership does not depend on model, effort or permission."""
+    original = (
+        "routes:\n"
+        "  claude-high:\n"
+        "    agent: claude\n"
+        '    args: ["--model", "custom-model", "--effort", "low"]\n'
+        "    description: 'Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh và Final Evaluation thông thường.'\n"
+        "  claude-xhigh:\n"
+        "    agent: claude\n"
+        '    args: ["--model", "my-xhigh", "--effort", "xhigh"]\n'
+        '    description: "Full discovery, debug khó, refactor lớn, security review và Final Evaluation nhiều contract."\n'
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+
+    result = asyncio.run(install_workspace(tmp_path))
+    migrated = route_file.read_text(encoding="utf-8")
+    assert result["removed_evaluator_routes"] == []
+    assert result["retained_evaluator_routes"] == []
+    assert 'args: ["--model", "custom-model", "--effort", "low"]' in migrated
+    assert 'args: ["--model", "my-xhigh", "--effort", "xhigh"]' in migrated
+    assert "và Final Evaluation thông thường" not in migrated
+    assert "và Final Evaluation nhiều contract" not in migrated
+    assert "    description: 'Phân tích, planning, discovery có trọng tâm, testing nhiều nhánh.'" in migrated
+    assert '    description: "Full discovery, debug khó, refactor lớn, security review."' in migrated
+
+    again = asyncio.run(install_workspace(tmp_path))
+    assert route_file.read_text(encoding="utf-8") == migrated
+    assert again["removed_evaluator_routes"] == []
+
+
+def test_migration_reports_underscore_evaluation_route_names(tmp_path):
+    original = (
+        "routes:\n"
+        "  final_evaluation:\n"
+        "    agent: codex\n"
+        "    args: []\n"
+        "  codex_final_eval:\n"
+        "    agent: codex\n"
+        "    args: []\n"
+        "  custom-route:\n"
+        "    agent: codex\n"
+        "    args: []\n"
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+    result = asyncio.run(install_workspace(tmp_path))
+    assert result["removed_evaluator_routes"] == []
+    assert result["retained_evaluator_routes"] == [
+        "codex_final_eval", "final_evaluation",
+    ]
+    assert route_file.read_text(encoding="utf-8") == original
+
+
+def test_migrate_historical_grouped_evaluator_routes(tmp_path):
+    """The Oct 15 grouped defaults used a YAML alias and another Codex description."""
+    original = (
+        "# Historical grouped route config\n"
+        "routes:\n"
+        "  claude-analysis:\n"
+        "    agent: claude\n"
+        '    args: &sonnet_high_auto ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]\n'
+        '    description: "Phân tích kiến trúc, luồng code hoặc contract nhiều bước với chứng cứ file:line."\n'
+        "  claude-evaluator:\n"
+        "    agent: claude\n"
+        "    args: *sonnet_high_auto\n"
+        '    description: "Final Evaluation độc lập khi TaskGraph hoàn tất; đọc snapshot, đối chiếu toàn bộ requirements."\n'
+        "  codex-evaluator:\n"
+        "    agent: codex\n"
+        '    args: ["--sandbox", "read-only"]\n'
+        '    description: "Final Evaluation bằng Codex với profile read-only do user có thể sửa."\n'
+    )
+    route_file = tmp_path / "agent-routing.yaml"
+    route_file.write_text(original, encoding="utf-8")
+
+    result = asyncio.run(install_workspace(tmp_path))
+    migrated = route_file.read_text(encoding="utf-8")
+    assert result["removed_evaluator_routes"] == ["codex-evaluator", "claude-evaluator"]
+    assert result["retained_evaluator_routes"] == []
+    assert migrated == (
+        "# Historical grouped route config\n"
+        "routes:\n"
+        "  claude-analysis:\n"
+        "    agent: claude\n"
+        '    args: &sonnet_high_auto ["--model", "claude-sonnet-5-5", "--effort", "high", "--permission-mode", "auto"]\n'
+        '    description: "Phân tích kiến trúc, luồng code hoặc contract nhiều bước với chứng cứ file:line."\n'
+    )
+    assert asyncio.run(install_workspace(tmp_path))["removed_evaluator_routes"] == []
