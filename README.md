@@ -85,6 +85,7 @@ Ví dụ payload của `submit_workflow`:
     "repository": "backend",
     "route": "codex-balanced",
     "task_packet": {
+      "task_kind": "change",
       "objective": "Sửa retry HTTP 429, giữ nguyên public API",
       "scope": ["HTTP client", "tests"],
       "acceptance_criteria": ["Có regression test", "Không đổi public API"]
@@ -93,7 +94,18 @@ Ví dụ payload của `submit_workflow`:
 }
 ```
 
-`TaskPacket` yêu cầu `objective`, `scope` và `acceptance_criteria`. Có thể thêm `constraints`, `out_of_scope`, `context` và `known_unknowns`.
+`TaskPacket` yêu cầu `task_kind`, `objective`, `scope` và `acceptance_criteria`. Có thể thêm `constraints`, `out_of_scope`, `context` và `known_unknowns`.
+
+`task_kind` quyết định quyền ghi của Peer:
+
+| `task_kind` | Quyền của Peer |
+|---|---|
+| `analysis` | Chỉ đọc. Runtime tự thêm lệnh cấm ghi. |
+| `change` | Sửa code trong scope. |
+| `test` | Thêm, sửa và chạy test. Chỉ sửa code non-test khi `scope` cho phép. |
+| `docs` | Sửa tài liệu theo implementation đã xác minh. |
+
+Runtime tự dựng phần còn lại của prompt: user request gốc, requirement của node, requirement thuộc node khác, source được trích dẫn và báo cáo upstream đã ACCEPT. Các phần này nằm trong section riêng, tách khỏi `constraints`. Prompt kết thúc bằng Report format: Peer trả lời theo `AC1..ACn` và dòng cuối là `DEPENDENCY_REQUEST: none` hoặc dữ kiện còn thiếu. Graph lưu trước khi có `task_kind` vẫn chạy được, với prompt trung tính.
 
 - **`direct`:** Giao `single_task` hoặc `graph`. Graph nhiều node phải có `requirement_map` bao phủ mọi requirement. Chỉ đặt `depends_on` khi có dependency thực.
 - **`targeted_discovery` / `full_discovery`:** Giao `discovery` khi thiếu dữ kiện ảnh hưởng kế hoạch. Sau khi đọc captured source, gọi `continue_workflow` trên cùng `request_id` với assessment mới.
@@ -103,7 +115,7 @@ Ví dụ payload của `submit_workflow`:
 
 ## Review và hoàn tất
 
-Lead phải đối chiếu captured evidence với từng `acceptance_criteria`. Trạng thái Peer `settled` **không có nghĩa là** `ACCEPT`.
+Lead phải đối chiếu captured evidence với từng dòng `ACn`. Trạng thái Peer `settled` **không có nghĩa là** `ACCEPT`. Không ACCEPT node có `DEPENDENCY_REQUEST` khác `none`; chọn `replan`, `block` hoặc `retry` theo nguồn của dữ kiện còn thiếu.
 
 | Quyết định | Ý nghĩa |
 |---|---|

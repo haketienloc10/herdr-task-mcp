@@ -64,7 +64,7 @@ def test_graph_delegation_transfers_ninth_or_later_complete_source(tmp_path, mon
     store.bind_graph(started["graph_run_id"], request["request_id"],
                      request["revision"], ["B"], {"B": ["R1"]})
     asyncio.run(server._graph_execute(started["graph_run_id"], graph.nodes[0]))
-    prompt = render_task_prompt(seen["packet"])
+    prompt = render_task_prompt(seen["packet"], context=seen["context"])
     assert source in prompt
     assert request["sources"][9]["id"] in prompt
     assert "Unused context #0" not in prompt
@@ -110,7 +110,7 @@ def test_downstream_receives_full_accepted_upstream_report(tmp_path, monkeypatch
                             "reason": "Evidence verified", "node_id": "A"}],
     )
     asyncio.run(server._graph_execute(gid, graph.nodes[1]))
-    assert source in render_task_prompt(seen["packet"])
+    assert source in render_task_prompt(seen["packet"], context=seen["context"])
 
 
 def test_oversize_referenced_source_rejected_without_dispatch(tmp_path, monkeypatch):
@@ -132,7 +132,7 @@ def test_oversize_referenced_source_rejected_without_dispatch(tmp_path, monkeypa
             single_task=server.Node(
                 node_id="orders", repository="backend", route="codex-balanced",
                 task_packet=server.Packet(
-                    objective="Implement orders", scope=["src"],
+                    task_kind="change", objective="Implement orders", scope=["src"],
                     acceptance_criteria=["Matches the contract"],
                     constraints=["padding" * 2000],
                 ),

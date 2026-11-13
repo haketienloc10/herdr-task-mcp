@@ -433,7 +433,7 @@ def test_bound_start_graph_rolls_back_graph_if_binding_preflight_becomes_stale(
     payload = {"nodes": [{
         "node_id": "retry", "repository": "backend", "route": "codex-balanced",
         "task_packet": {
-            "objective": "Retry 429/503", "scope": ["src"],
+            "task_kind": "change", "objective": "Retry 429/503", "scope": ["src"],
             "acceptance_criteria": ["Tests pass"],
         },
     }]}
@@ -477,7 +477,7 @@ def test_bound_graph_create_rollback_if_callback_rejects_after_graph_insert(
     monkeypatch.setattr(requests, "_bind_graph_locked", deny_binding)
     payload = {"nodes": [{
         "node_id": "retry", "repository": "backend", "route": "codex-balanced",
-        "task_packet": {"objective": "Retry 429/503", "scope": ["src"],
+        "task_packet": {"task_kind": "change", "objective": "Retry 429/503", "scope": ["src"],
                         "acceptance_criteria": ["Tests pass"]},
     }]}
     with pytest.raises(Exception, match="synthetic binding validation failed"):

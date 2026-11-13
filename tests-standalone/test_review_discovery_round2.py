@@ -60,7 +60,8 @@ def test_discovery_only_sends_assessed_source_refs(tmp_path, monkeypatch):
     ))
     assert result["result"]["state"] == "blocked"
     prompt = render_task_prompt(
-        recorded["packet"], discovery_repositories=recorded["discovery_repositories"]
+        recorded["packet"], context=recorded["context"],
+        discovery_repositories=recorded["discovery_repositories"],
     )
     assert relevant_text in prompt
     assert source_ref in prompt
@@ -86,7 +87,8 @@ def test_discovery_can_run_without_optional_sources(tmp_path, monkeypatch):
         ["Find source of duplicate orders"],
     ))
     prompt = render_task_prompt(
-        sent["packet"], discovery_repositories=sent["discovery_repositories"]
+        sent["packet"], context=sent["context"],
+        discovery_repositories=sent["discovery_repositories"],
     )
     assert "Investigate duplicate orders" in prompt
     assert "Source source:" not in prompt

@@ -72,14 +72,14 @@ def _mcp_instructions() -> str:
 def test_installed_rules_keep_one_task_schema_and_guide_task_specific_criteria():
     installed = managed_rules(b"").decode("utf-8")
     assert "một schema `TaskPacket`" in installed
-    for task_kind in ("Analysis/review", "Coding", "Testing", "Documentation"):
-        assert f"- {task_kind}:" in installed
-    assert "không sửa file" in installed
-    assert "test đã chạy" in installed
-    assert "test chưa chạy" in installed
-    assert "không suy diễn pass khi chưa thực thi" in installed
-    assert "không bịa đặt tính năng" in installed
+    for task_kind in ("analysis", "change", "test", "docs"):
+        assert f"- `{task_kind}`:" in installed
+    assert "`analysis`: chỉ đọc" in installed
+    assert "khớp implementation đã xác minh" in installed
     assert "không áp checklist không liên quan" in installed
+    # Runtime-injected context must not be duplicated by the Lead.
+    assert "Không lặp lại các nội dung này" in installed
+    assert "Không ACCEPT node có giá trị khác `none`" in installed
 
 
 def test_installed_rules_are_the_single_lead_policy_source():

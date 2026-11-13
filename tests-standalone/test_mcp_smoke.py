@@ -448,7 +448,7 @@ from qiqi_delegate.server import (
     submit_workflow, workspace_info, Node, Packet, ReadinessAssessment, RequirementInput,
 )
 
-packet = Packet(objective='Read frontend', scope=['src'],
+packet = Packet(task_kind='analysis', objective='Read frontend', scope=['src'],
                 acceptance_criteria=['Describe entry point'])
 node = Node(node_id='front', repository='frontend',
             route='codex-balanced', task_packet=packet)
@@ -561,7 +561,7 @@ from qiqi_delegate.server import (
     ReadinessAssessment, RequirementInput,
 )
 
-p = Packet(objective="Inspect", scope=["src"],
+p = Packet(task_kind="analysis", objective="Inspect", scope=["src"],
            acceptance_criteria=["Report entry point"])
 assessment = ReadinessAssessment(
     requirements=[RequirementInput(id="R1", text="Inspect frontend",

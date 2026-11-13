@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from qiqi_delegate.core import build_task_packet
+from qiqi_delegate.core import PromptContext, build_task_packet, render_task_prompt
 from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_request import TaskRequestStore, copy_workspace_snapshot
 
@@ -53,16 +53,19 @@ def test_large_file_is_referenced_without_inlining(workspace):
     assert source["transfer_mode"] == "reference"
     assert source["size_bytes"] == len(content.encode("utf-8"))
     assert "content" not in source
-    lines = server._source_context_lines([source], [
-        {"id": "R1", "text": "Implement", "evidence_refs": [source["id"]]}
-    ])
-    assert source["sha256"] in lines[0]
-    assert "Specification section" not in lines[0]
-    packet = build_task_packet(
-        objective="Implement", scope=["backend"],
-        acceptance_criteria=["Tests"], constraints=lines,
+    context = PromptContext(
+        user_request="Implement as specified",
+        sources=server._referenced_sources([source], [
+            {"id": "R1", "text": "Implement", "evidence_refs": [source["id"]]}
+        ]),
     )
-    assert len(packet.to_json()) < 2000
+    packet = build_task_packet(
+        objective="Implement", scope=["backend"], acceptance_criteria=["Tests"],
+    )
+    prompt = render_task_prompt(packet, context=context)
+    assert source["sha256"] in prompt
+    assert "Specification section" not in prompt
+    assert len(packet.to_json()) + len(context.to_json()) < 2000
     assert "content" not in store.get(req["request_id"])["sources"][0]
 
 
@@ -106,7 +109,8 @@ def test_native_peer_gets_only_cited_snapshot(workspace, monkeypatch):
         return "native-agent", {}
 
     async def fake_prompt(name, prompt, adapter):
-        match = re.search(r"- Source source:[0-9a-f]+: (\S+) \(sha256=", prompt)
+        match = re.search(r"- Source source:[0-9a-f]+ \[workspace_file / reported\] "
+                          r"large\.md\n  Read-only snapshot: (\S+) \(sha256=", prompt)
         assert match is not None
         snapshot = Path(match.group(1))
         assert snapshot.read_text(encoding="utf-8") == content

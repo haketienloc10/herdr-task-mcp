@@ -52,13 +52,15 @@ Trường hợp đặc biệt:
 
 ### Lập TaskPacket
 
-- Mỗi TaskPacket phải tự đủ nghĩa với `objective`, `scope`, `acceptance_criteria`, và `constraints` hoặc `context` khi cần. Peer không đọc được hội thoại của Lead.
+- Mỗi TaskPacket phải tự đủ nghĩa với `task_kind`, `objective`, `scope`, `acceptance_criteria`, và `constraints` hoặc `context` khi cần. Peer không đọc được hội thoại của Lead.
+- Dùng một schema `TaskPacket` cho mọi loại việc. `task_kind` là bắt buộc và quyết định quyền ghi của Peer:
+  - `analysis`: chỉ đọc. Runtime tự thêm lệnh cấm ghi; Lead không cần ghi lại trong `constraints`.
+  - `change`: sửa code trong scope. Nêu hành vi, contract phải giữ và test liên quan.
+  - `test`: thêm/sửa/chạy test. Nêu test cases; chỉ sửa code non-test khi `scope` cho phép.
+  - `docs`: sửa tài liệu. Nội dung phải khớp implementation đã xác minh.
+- Runtime tự chèn user request gốc, requirement của node, requirement thuộc node khác, source được trích dẫn, báo cáo upstream đã ACCEPT, quy tắc evidence và Report format. Không lặp lại các nội dung này trong `objective`, `scope` hoặc `constraints`. `constraints` chỉ chứa ràng buộc riêng của task.
 - Source (spec, file trong workspace, kết quả Peer) là tùy chọn. Trong `submit_workflow`, tham chiếu source bằng `alias:<tên>`. Tách yêu cầu người dùng, claim từ tài liệu và evidence đã kiểm chứng.
-- Dùng một schema `TaskPacket` cho mọi loại việc. Chọn `acceptance_criteria` và `constraints` theo mục tiêu thực tế; không áp checklist không liên quan cho task đơn giản.
-  - Analysis/review: yêu cầu evidence `file:line` khi liên quan. Task chỉ đọc phải ghi rõ không sửa file trong `constraints`.
-  - Coding: nêu hành vi, phạm vi, contract phải giữ và test liên quan. Peer báo cáo file thay đổi, test đã chạy và phần chưa kiểm chứng.
-  - Testing: nêu test cases và quyền sửa/chạy test. Peer báo pass/fail và test chưa chạy; không suy diễn pass khi chưa thực thi.
-  - Documentation: nội dung phải khớp implementation đã xác minh; không bịa đặt tính năng.
+- Viết mỗi acceptance criterion thành một điều kiện kiểm chứng được. Runtime đánh số `AC1..ACn` theo thứ tự; Peer trả lời theo đúng số đó; không áp checklist không liên quan cho task đơn giản.
 
 ### Chia task
 
@@ -68,7 +70,12 @@ Trường hợp đặc biệt:
 
 ### Review và quyết định
 
-- Chỉ dùng captured response làm căn cứ review; không đọc Herdr terminal. Trạng thái `settled` không đồng nghĩa với ACCEPT. Trước ACCEPT, Lead đọc đủ `agent_response` của đúng attempt và đối chiếu từng acceptance criterion.
+- Chỉ dùng captured response làm căn cứ review; không đọc Herdr terminal. Trạng thái `settled` không đồng nghĩa với ACCEPT. Trước ACCEPT, Lead đọc đủ `agent_response` của đúng attempt và đối chiếu từng dòng `ACn` với evidence của nó.
+- Report của Peer kết thúc bằng `DEPENDENCY_REQUEST: ...`. Không ACCEPT node có giá trị khác `none`:
+  - Dữ kiện nằm ở repository khác: REPLAN, thêm node upstream hoặc Discovery, rồi đặt `depends_on`.
+  - Cần người dùng quyết định: BLOCK.
+  - Dữ kiện đã có trong context nhưng Peer bỏ sót: RETRY và chỉ rõ vị trí.
+- Report thiếu dòng `ACn` hoặc thiếu dòng `DEPENDENCY_REQUEST`: RETRY và yêu cầu bổ sung đúng phần thiếu.
 - Thiếu bằng chứng hoặc còn mâu thuẫn: RETRY với feedback cụ thể. Kế hoạch sai: REPLAN. Cần người dùng quyết định: BLOCK. Không retry vô hạn.
 - Khi tổng hợp kết quả, giữ phát hiện cụ thể, trích dẫn và giới hạn xác minh của Peer. Không thay bằng tóm tắt chung chung; không suy đoán contract mà Peer chưa kiểm chứng.
 """

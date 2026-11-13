@@ -60,7 +60,7 @@ def node(server, node_id="A"):
     return server.Node(
         node_id=node_id, repository="backend", route="codex-balanced",
         task_packet=server.Packet(
-            objective=f"Investigate and report {node_id}",
+            task_kind="analysis", objective=f"Investigate and report {node_id}",
             scope=["backend"], acceptance_criteria=["Verified report"],
         ),
     )
@@ -282,7 +282,7 @@ def test_discovery_preserved_and_requires_reassessment(tmp_path, monkeypatch):
     assert len(calls) == 2
     assert output["result_state"] == "settled"
     assert store.graph_binding(continued["graph_run_id"])["request_id"] == request_id
-    assert "backend/flow.py:20" in str(calls[1]["packet"].as_dict())
+    assert "backend/flow.py:20" in calls[1]["context"].to_json()
 
 
 def test_oversized_initial_context_refused_before_graph_dispatch(tmp_path, monkeypatch):
@@ -565,7 +565,7 @@ def test_adaptive_budget_pages_metadata_without_dropping_attempts(
     authored_nodes = [
         node(server, str(i)).model_copy(update={
             "task_packet": server.Packet(
-                objective="Inspect " + str(i), scope=["backend"],
+                task_kind="analysis", objective="Inspect " + str(i), scope=["backend"],
                 acceptance_criteria=["criterion-" + "Z" * 5000],
             ),
         })
@@ -627,7 +627,7 @@ def test_oversized_review_metadata_keeps_persisted_workflow_identity(
     # include this acceptance criterion. The first Peer already completed.
     big_node = node(server).model_copy(update={
         "task_packet": server.Packet(
-            objective="Investigate and report A", scope=["backend"],
+            task_kind="analysis", objective="Investigate and report A", scope=["backend"],
             acceptance_criteria=["Evidence requirement " + "X" * 72000],
         ),
     })
@@ -670,7 +670,7 @@ def test_auto_continue_returns_committed_decision_when_review_budget_exceeded(
     monkeypatch.setattr(runtime, "delegate", delegate)
     large_node = node(server, "B").model_copy(update={
         "task_packet": server.Packet(
-            objective="Inspect B", scope=["backend"],
+            task_kind="analysis", objective="Inspect B", scope=["backend"],
             acceptance_criteria=["Criterion " + "Y" * 72000],
         ),
     })
@@ -706,7 +706,7 @@ def test_continue_workflow_preserves_request_and_graph_on_large_review(
     existing = store.create("Investigate behavior")
     large_node = node(server).model_copy(update={
         "task_packet": server.Packet(
-            objective="Inspect A", scope=["backend"],
+            task_kind="analysis", objective="Inspect A", scope=["backend"],
             acceptance_criteria=["Criterion " + "Q" * 72000],
         ),
     })

@@ -189,6 +189,59 @@ def test_discovery_prompt_is_no_write_and_not_single_repo_bound():
     assert "Operate only inside the current Git root" in normal
 
 
+def test_prompt_permissions_follow_task_kind():
+    def prompt(kind):
+        return render_task_prompt(build_task_packet(
+            task_kind=kind, objective="Do it", scope=["src"],
+            acceptance_criteria=["First", "Second"],
+        ))
+
+    change = prompt("change")
+    assert "Do not change files" not in change
+    assert "Do NOT create, modify" not in change
+    assert "## Task kind: change" in change
+    analysis = prompt("analysis")
+    assert "## Task kind: analysis" in analysis
+    assert "Do NOT create, modify, delete or rename any file" in analysis
+    for text in (change, analysis):
+        assert "- AC1. First\n- AC2. Second" in text
+        assert text.rstrip().endswith(
+            "`DEPENDENCY_REQUEST: <missing fact> · <where it likely lives> · "
+            "<affected AC>`")
+    # Legacy packets (persisted before `kind`) keep a neutral prompt.
+    legacy = render_task_prompt(build_task_packet(
+        objective="Do it", scope=["src"], acceptance_criteria=["First"],
+    ))
+    assert "## Task kind" not in legacy
+    assert "Do not change files" not in legacy
+
+
+def test_kind_is_validated_and_omitted_for_legacy_fingerprints():
+    with pytest.raises(ValueError, match="task_kind must be one of"):
+        build_task_packet(task_kind="deploy", objective="x", scope=["s"],
+                          acceptance_criteria=["a"])
+    legacy = build_task_packet(objective="x", scope=["s"], acceptance_criteria=["a"])
+    assert "task_kind" not in legacy.as_dict()
+    typed = build_task_packet(task_kind="test", objective="x", scope=["s"],
+                              acceptance_criteria=["a"])
+    assert build_task_packet(**typed.as_dict()) == typed
+
+
+def test_boundary_lists_only_applicable_exceptions():
+    plain = render_task_prompt(build_task_packet(
+        task_kind="change", objective="x", scope=["s"], acceptance_criteria=["a"],
+    ))
+    assert "Work Item" not in plain
+    assert "source snapshots" not in plain
+    with_item = render_task_prompt(build_task_packet(
+        task_kind="change", objective="x", scope=["s"], acceptance_criteria=["a"],
+        context={"trusted_facts": [{
+            "fact": "work_item_path=/mnt/wi; id=W1; revision=2", "source": "lead",
+        }]},
+    ))
+    assert "The mounted Work Item at the explicit work_item_path locator" in with_item
+
+
 def test_discovery_keeps_yolo_and_constructs_add_dir_from_registry(tmp_path, monkeypatch):
     runtime, _ = workspace(tmp_path)
     import qiqi_delegate.runtime as mod
@@ -363,14 +416,19 @@ def test_graph_peer_prompt_carries_request_and_accepted_upstream(tmp_path, monke
     captured = {}
     async def fake_delegate(**kwargs):
         captured["packet"] = kwargs["packet"]
+        captured["context"] = kwargs["context"]
         return {"state": "settled"}
     monkeypatch.setattr(server.runtime, "delegate", fake_delegate)
     node = next(n for n in graph.nodes if n.node_id == "B")
     asyncio.run(server._graph_execute(gid, node))
-    prompt = render_task_prompt(captured["packet"])
-    assert "Original user request (verbatim): Inspect contract then implement API client" in prompt
-    assert "Requirements for this node: Implement client" in prompt
-    assert "Accepted upstream Peer report (A;" in prompt
+    packet = captured["packet"]
+    assert packet.constraints == ()  # bound context never leaks into Lead constraints
+    prompt = render_task_prompt(packet, context=captured["context"])
+    assert "> Inspect contract then implement API client" in prompt
+    assert "This node covers:\n- R2: Implement client" in prompt
+    assert ("Handled by other tasks; do not investigate or implement here:\n"
+            "- R1:") in prompt
+    assert "### Upstream node A" in prompt
     assert "backend/api.py:24" in prompt
 
 
@@ -382,7 +440,7 @@ def test_updated_request_requires_graph_reconciliation_with_revised_packets(tmp_
     old_payload = {"nodes": [{
         "node_id": "implement", "repository": "backend", "route": "codex-balanced",
         "task_packet": {
-            "objective": "Implement original retry", "scope": ["src"],
+            "task_kind": "change", "objective": "Implement original retry", "scope": ["src"],
             "acceptance_criteria": ["Tests pass"]
         }
     }]}
@@ -446,12 +504,13 @@ def test_mcp_direct_flow_without_handoff_binds_graph_and_reads_unbound_history(
     delegated = {}
     async def fake_delegate(**kwargs):
         delegated["packet"] = kwargs["packet"]
+        delegated["context"] = kwargs["context"]
         return {"state": "settled"}
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
     payload = {
         "node_id": "retry", "repository": "backend", "route": "codex-balanced",
         "task_packet": {
-            "objective": "Retry 429/503", "scope": ["src"],
+            "task_kind": "change", "objective": "Retry 429/503", "scope": ["src"],
             "acceptance_criteria": ["Tests pass"],
         },
     }
@@ -464,7 +523,9 @@ def test_mcp_direct_flow_without_handoff_binds_graph_and_reads_unbound_history(
     read = asyncio.run(server.get_graph(submitted["graph_run_id"]))
     assert read["task_request_binding"]["requirement_map"] == {"retry": ["R1"]}
     assert "task_readiness_policy" not in read
-    assert "Original user request" in render_task_prompt(delegated["packet"])
+    prompt = render_task_prompt(delegated["packet"], context=delegated["context"])
+    assert "User request (verbatim):\n> Retry 429/503 in backend" in prompt
+    assert "(task_kind: change)" in prompt
 
     # Graphs persisted before binding became mandatory stay readable.
     unbound = gr.start_graph(

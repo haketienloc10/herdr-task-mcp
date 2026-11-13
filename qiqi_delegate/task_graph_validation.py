@@ -68,6 +68,7 @@ def _task_packet_as_builder_input(packet: TaskPacket) -> dict[str, Any]:
         "context": _task_context_as_builder_input(packet.context),
         "constraints": _tuple_as_builder_list(packet.constraints),
         "known_unknowns": _tuple_as_builder_list(packet.known_unknowns),
+        "task_kind": packet.task_kind,
     }
 
 
