@@ -58,9 +58,19 @@ Trường hợp đặc biệt:
   - `change`: sửa code trong scope. Nêu hành vi, contract phải giữ và test liên quan.
   - `test`: thêm/sửa/chạy test. Nêu test cases; chỉ sửa code non-test khi `scope` cho phép.
   - `docs`: sửa tài liệu. Nội dung phải khớp implementation đã xác minh.
+- Nghĩa của `scope` theo `task_kind`: với `analysis`, scope là điểm xuất phát; Peer được đọc thêm trong repository khi một AC cần. Với `change`, `test`, `docs`, scope giới hạn phần Peer được sửa.
+- Mọi chiều mà `objective` nêu (môi trường, endpoint, biến thể, tenant…) phải có trong `scope` hoặc AC. Nếu chưa biết chiều đó nằm ở đâu, ghi vào `known_unknowns`.
 - Runtime tự chèn user request gốc, requirement của node, requirement thuộc node khác, source được trích dẫn, báo cáo upstream đã ACCEPT, quy tắc evidence và Report format. Không lặp lại các nội dung này trong `objective`, `scope` hoặc `constraints`. `constraints` chỉ chứa ràng buộc riêng của task.
 - Source (spec, file trong workspace, kết quả Peer) là tùy chọn. Trong `submit_workflow`, tham chiếu source bằng `alias:<tên>`. Tách yêu cầu người dùng, claim từ tài liệu và evidence đã kiểm chứng.
+- Phân loại `context`:
+  - `trusted_facts`: chỉ dùng cho evidence của Peer đã ACCEPT, hoặc code/config đã đọc trực tiếp kèm `path:line`. Peer dùng các fact này làm tiền đề và không kiểm tra lại.
+  - `claims_to_investigate`: dùng cho kết quả do người dùng hoặc tài liệu báo lại, kết quả âm tính ("không tìm thấy X"), và suy luận hoặc gợi ý của Lead.
 - Viết mỗi acceptance criterion thành một điều kiện kiểm chứng được. Runtime đánh số `AC1..ACn` theo thứ tự; Peer trả lời theo đúng số đó; không áp checklist không liên quan cho task đơn giản.
+  - Ít nhất một AC yêu cầu kết luận trực tiếp cho câu hỏi hoặc kết quả của `objective`.
+  - AC dùng đúng tên đối tượng mà `objective` dùng (endpoint, môi trường, module).
+  - Từ không có biên như "mọi" hoặc "tất cả" phải kèm biên, ví dụ có tính test/fixture hay không.
+- Nếu biết trước một phần kết quả có thể nằm ngoài repository (config deploy, DB, repository khác), ghi phần đó vào `known_unknowns`, kèm cách xử lý mong muốn. Prompt quy định: AC chỉ cần nêu cơ chế thì Peer ghi `UNVERIFIED`; `DEPENDENCY_REQUEST` chỉ dùng khi thiếu dữ kiện làm Peer không thể làm tiếp task.
+- Khi thu hẹp hoặc đổi câu hỏi của một node, cập nhật `requirement_map` qua REPLAN (`reconcile_graph`), không chỉ sửa `objective`. Mapping quyết định requirement và source được đưa vào prompt.
 
 ### Chia task
 
@@ -75,6 +85,8 @@ Trường hợp đặc biệt:
   - Dữ kiện nằm ở repository khác: REPLAN, thêm node upstream hoặc Discovery, rồi đặt `depends_on`.
   - Cần người dùng quyết định: BLOCK.
   - Dữ kiện đã có trong context nhưng Peer bỏ sót: RETRY và chỉ rõ vị trí.
+- AC `UNVERIFIED` chỉ được ACCEPT khi packet đã chấp nhận trước giới hạn đó trong AC hoặc `known_unknowns`. Nếu packet chưa chấp nhận, xử lý như thiếu dữ kiện: REPLAN (thêm node upstream hoặc Discovery) hoặc BLOCK. Không ACCEPT chỉ vì dòng cuối là `DEPENDENCY_REQUEST: none`.
+- Trước ACCEPT, đọc `Open questions`. Nếu Peer báo requirement của node bị `objective` bỏ sót hoặc mâu thuẫn, REPLAN để cập nhật `requirement_map` hoặc giao requirement đó cho node khác.
 - Report thiếu dòng `ACn` hoặc thiếu dòng `DEPENDENCY_REQUEST`: RETRY và yêu cầu bổ sung đúng phần thiếu.
 - Thiếu bằng chứng hoặc còn mâu thuẫn: RETRY với feedback cụ thể. Kế hoạch sai: REPLAN. Cần người dùng quyết định: BLOCK. Không retry vô hạn.
 - Khi tổng hợp kết quả, giữ phát hiện cụ thể, trích dẫn và giới hạn xác minh của Peer. Không thay bằng tóm tắt chung chung; không suy đoán contract mà Peer chưa kiểm chứng.

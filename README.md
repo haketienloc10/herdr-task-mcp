@@ -105,7 +105,7 @@ Ví dụ payload của `submit_workflow`:
 | `test` | Thêm, sửa và chạy test. Chỉ sửa code non-test khi `scope` cho phép. |
 | `docs` | Sửa tài liệu theo implementation đã xác minh. |
 
-Runtime tự dựng phần còn lại của prompt: user request gốc, requirement của node, requirement thuộc node khác, source được trích dẫn và báo cáo upstream đã ACCEPT. Các phần này nằm trong section riêng, tách khỏi `constraints`. Prompt kết thúc bằng Report format: Peer trả lời theo `AC1..ACn` và dòng cuối là `DEPENDENCY_REQUEST: none` hoặc dữ kiện còn thiếu. Graph lưu trước khi có `task_kind` vẫn chạy được, với prompt trung tính.
+Runtime tự dựng phần còn lại của prompt: user request gốc, requirement của node, requirement thuộc node khác, source được trích dẫn và báo cáo upstream đã ACCEPT. Các phần này nằm trong section riêng, tách khỏi `constraints`. Prompt kết thúc bằng Report format: Peer trả lời theo `AC1..ACn` và dòng cuối là `DEPENDENCY_REQUEST: none` hoặc dữ kiện còn thiếu. AC có evidence nằm ngoài vùng Peer được đọc thì ghi `UNVERIFIED`; `DEPENDENCY_REQUEST` chỉ dùng khi dữ kiện thiếu làm Peer không thể làm tiếp task. Với `analysis`, `scope` là điểm xuất phát; với các loại còn lại, `scope` giới hạn phần được sửa. Graph lưu trước khi có `task_kind` vẫn chạy được, với prompt trung tính.
 
 - **`direct`:** Giao `single_task` hoặc `graph`. Graph nhiều node phải có `requirement_map` bao phủ mọi requirement. Chỉ đặt `depends_on` khi có dependency thực.
 - **`targeted_discovery` / `full_discovery`:** Giao `discovery` khi thiếu dữ kiện ảnh hưởng kế hoạch. Sau khi đọc captured source, gọi `continue_workflow` trên cùng `request_id` với assessment mới.

@@ -362,16 +362,21 @@ _KIND_RULES = {
         "Read-only analysis.",
         "Do NOT create, modify, delete or rename any file; do not commit, "
         "install packages, run code generators, or run commands with side effects.",
+        "Scope lists starting points, not a fence: read further within the "
+        "repository boundary when an acceptance criterion needs it, and cite "
+        "what you read.",
     ),
     "change": (
         "Code change.",
-        "Modify files inside the current Git root as needed for the objective "
-        "and scope. Keep code and related tests consistent.",
+        "Scope bounds what you modify, together with the tests for that code; "
+        "keep code and related tests consistent. You may read outside scope to "
+        "understand callers and contracts.",
     ),
     "test": (
         "Testing.",
         "You may add, modify and run tests. Change non-test code only if the "
         "scope explicitly includes it.",
+        "You may read outside scope to understand the code under test.",
         "Report pass/fail exactly as executed; never infer a pass for a test "
         "that was not run.",
     ),
@@ -379,6 +384,7 @@ _KIND_RULES = {
         "Documentation.",
         "Edit documentation within scope. Document only behavior verified in "
         "the implementation; do not invent features.",
+        "You may read code outside scope to verify the documented behavior.",
     ),
 }
 
@@ -542,10 +548,11 @@ def render_task_prompt(
             "filesystem authorization. Do not dereference a sibling-repository path "
             "merely because it is named as provenance.",
             "Treat Lead-provided trusted facts and accepted upstream semantics as "
-            "execution premises for this assignment. If required upstream detail is "
-            "missing or materially insufficient, stop and report it as "
-            "DEPENDENCY_REQUEST (see Report format) instead of crossing the "
-            "repository boundary or inventing the contract.",
+            "execution premises for this assignment. Never cross the repository "
+            "boundary or invent a missing contract. If missing upstream detail "
+            "blocks the remaining work, stop and report it as DEPENDENCY_REQUEST; "
+            "if it affects only some acceptance criteria, mark those `UNVERIFIED` "
+            "and continue (see Report format).",
         ]
         if packet.context is not None and any(
             "work_item_path=" in item.fact for item in packet.context.trusted_facts
@@ -562,16 +569,28 @@ def render_task_prompt(
         boundary.append("Do not read or modify .qiqi/state.")
         sections.append("## Repository execution boundary\n\n" + _bullet_lines(boundary))
 
+    open_questions = "remaining uncertainty"
+    if context is not None and context.requirements:
+        # Objective is authored per turn; the requirement map can lag behind a
+        # replan. The Peer follows the objective but must surface the gap.
+        open_questions += (
+            ", including any requirement under \"This node covers\" that the "
+            "objective omits or contradicts (follow the objective)"
+        )
     sections.append(
         "## Report format\n\n"
         "End the final answer with:\n"
         "- One line per acceptance criterion, in order: "
         "`AC<n>: MET | PARTIAL | NOT_MET | UNVERIFIED — <evidence path:line; "
-        "label inference explicitly>`.\n"
+        "label inference explicitly>`. Use `UNVERIFIED` when the evidence lies "
+        "outside the repository boundary: complete the rest of the task and name the "
+        "mechanism or key and where it likely lives.\n"
         "- `Files changed:` repository-relative paths, or `none`.\n"
         "- `Tests run:` exact command and result, or `not run`.\n"
-        "- `Open questions:` remaining uncertainty, or `none`.\n"
-        "- Final line, exactly one of:\n"
+        f"- `Open questions:` {open_questions}, or `none`.\n"
+        "- Final line, exactly one of the following. Request a dependency only "
+        "when a missing fact blocks the remaining work of this task, not for "
+        "an acceptance criterion you can report as `UNVERIFIED`:\n"
         "  `DEPENDENCY_REQUEST: none`\n"
         "  `DEPENDENCY_REQUEST: <missing fact> · <where it likely lives> · "
         "<affected AC>`"

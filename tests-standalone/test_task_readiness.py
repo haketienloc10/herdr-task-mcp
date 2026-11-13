@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from qiqi_delegate.core import build_task_packet, render_task_prompt
+from qiqi_delegate.core import PromptContext, build_task_packet, render_task_prompt
 from qiqi_delegate.runtime import DelegateRuntime
 from qiqi_delegate.task_graph_runtime import GraphRuntime, task_graph_from_payload
 from qiqi_delegate.task_graph_store import GraphRuntimeStore
@@ -214,6 +214,33 @@ def test_prompt_permissions_follow_task_kind():
     ))
     assert "## Task kind" not in legacy
     assert "Do not change files" not in legacy
+
+
+def test_prompt_defines_scope_and_unverified_versus_dependency():
+    def prompt(kind, context=None):
+        return render_task_prompt(build_task_packet(
+            task_kind=kind, objective="Do it", scope=["src"],
+            acceptance_criteria=["First"],
+        ), context=context)
+
+    assert "Scope lists starting points, not a fence" in prompt("analysis")
+    change = prompt("change")
+    assert "Scope bounds what you modify" in change
+    assert "Modify files inside the current Git root" not in change
+    assert "You may read outside scope to understand the code under test" in prompt("test")
+    assert "You may read code outside scope to verify" in prompt("docs")
+    for kind in ("analysis", "change", "test", "docs"):
+        text = prompt(kind)
+        assert "Use `UNVERIFIED` when the evidence lies outside" in text
+        assert "if it affects only some acceptance criteria, mark those `UNVERIFIED`" in text
+        assert "Request a dependency only when a missing fact blocks" in text
+        assert "This node covers" not in text
+
+    bound = prompt("analysis", PromptContext(
+        user_request="Ask", requirements=(("R1", "Need"),),
+    ))
+    assert ("any requirement under \"This node covers\" that the objective "
+            "omits or contradicts") in bound
 
 
 def test_kind_is_validated_and_omitted_for_legacy_fingerprints():
