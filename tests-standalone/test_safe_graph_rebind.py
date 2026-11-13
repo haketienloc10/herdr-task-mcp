@@ -438,7 +438,7 @@ def test_bound_start_graph_rolls_back_graph_if_binding_preflight_becomes_stale(
         },
     }]}
     with pytest.raises(Exception, match="stale (task context|assessment/context|context sources)"):
-        asyncio.run(server.start_graph(
+        asyncio.run(server._start_graph(
             server.Graph.model_validate(payload),
             req["request_id"], ready["revision"], {"retry": ["R1"]},
         ))
@@ -481,7 +481,7 @@ def test_bound_graph_create_rollback_if_callback_rejects_after_graph_insert(
                         "acceptance_criteria": ["Tests pass"]},
     }]}
     with pytest.raises(Exception, match="synthetic binding validation failed"):
-        asyncio.run(server.start_graph(
+        asyncio.run(server._start_graph(
             server.Graph.model_validate(payload),
             req["request_id"], ready["revision"], {"retry": ["R1"]},
         ))

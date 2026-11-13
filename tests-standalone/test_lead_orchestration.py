@@ -128,14 +128,8 @@ def test_submit_workflow_compact_sources_and_exact_pagination(tmp_path, monkeypa
     assert "content" not in result["task_request"]["sources"][0]
     rid = result["task_request"]["request_id"]
     sid = result["source_aliases"]["spec"]
-    compact = asyncio.run(server.get_task_request_summary(rid))
-    assert len(str(compact)) < 5000
-    assert "content" not in compact["sources"][0]
-    assert "content" not in asyncio.run(
-        server.get_task_request(rid, include_content=False)
-    )["sources"][0]
-    full = asyncio.run(server.get_task_request(rid))
-    assert full["sources"][0]["content"] == content
+    assert len(str(result["task_request"])) < 5000
+    assert store.get(rid)["sources"][0]["content"] == content
     first = asyncio.run(server.get_task_source(rid, sid, 0, 12000))
     assert first["next_offset"] == 12000
     assert first["content"] == content[:12000]
@@ -182,6 +176,46 @@ def test_auto_dispatch_and_auto_continue_keep_explicit_lead_accept(tmp_path, mon
     ))
     assert completed["review_bundle"]["graph_state"] == "complete"
     assert len(calls) == 2
+
+
+def test_submit_decisions_continues_by_default_and_block_needs_no_audit_notes(
+    tmp_path, monkeypatch,
+):
+    server, runtime, _, gr = environment(tmp_path, monkeypatch)
+    calls, delegate = settled_delegate(runtime)
+    monkeypatch.setattr(runtime, "delegate", delegate)
+    criteria = server.ReadinessAssessment(
+        requirements=[
+            server.RequirementInput(id="R1", text="Analyze A",
+                                    evidence_refs=["request:current"]),
+            server.RequirementInput(id="R2", text="Analyze B",
+                                    evidence_refs=["request:current"]),
+        ],
+        blocking_unknowns=[], decision="direct", rationale="Two independent analyses",
+    )
+    submitted = asyncio.run(server.submit_workflow(
+        "Investigate two independent questions", criteria,
+        graph=server.Graph(nodes=[node(server, "A"), node(server, "B")]),
+        requirement_map={"A": ["R1"], "B": ["R2"]},
+    ))
+    gid = submitted["graph_run_id"]
+    # No auto_continue argument: the next wave is dispatched by default.
+    continued = asyncio.run(server.submit_decisions(
+        gid, [server.Decision(node_id="A", action="accept")],
+        submitted["review_bundle"]["revision"],
+    ))
+    assert len(calls) == 2
+    assert continued["review_bundle"]["reviews"][0]["node_id"] == "B"
+    # owner/return_checkpoint are optional audit notes, not a gate.
+    blocked = asyncio.run(server.submit_decisions(
+        gid, [server.Decision(node_id="B", action="block")],
+        continued["review_bundle"]["revision"],
+    ))
+    assert blocked["decision_outcomes"][0]["defer"] == {
+        "owner": None, "return_checkpoint": None,
+    }
+    assert len(calls) == 2
+    assert gr.get_graph(gid)["graph_state"] != "complete"
 
 
 def test_review_bundle_truncation_and_exact_chunk_validation(tmp_path, monkeypatch):
@@ -423,55 +457,6 @@ def test_replan_is_graph_wide_fail_closed_even_while_other_reviews_pending(
     assert dispatched == ["A", "B"]
 
 
-def test_legacy_source_null_fields_and_full_result_contract(tmp_path, monkeypatch):
-    server, _, store, _ = environment(tmp_path, monkeypatch)
-    (tmp_path / "backend" / "spec.md").write_text("Legacy requirements")
-    variants = [
-        ("inline", {"text": "note"}),
-        ("repo_file", {"repository": "backend", "path": "spec.md"}),
-        ("workspace_file", {"path": "notes.md"}),
-        ("peer_turn", {"turn_id": "old-turn"}),
-        ("accepted_graph_node", {"graph_run_id": "graph", "node_id": "A"}),
-    ]
-    all_optional = {
-        "text": None, "label": None, "repository": None, "path": None,
-        "turn_id": None, "graph_run_id": None, "node_id": None,
-    }
-    for kind, fields in variants:
-        transport = server.LegacyRequestSource.model_validate({
-            "kind": kind, **all_optional, **fields,
-        })
-        assert transport.model_dump(exclude_none=True) == {
-            "kind": kind, **fields,
-        }
-    legacy = server.LegacyRequestSource.model_validate({
-        "kind": "repo_file", **all_optional,
-        "repository": "backend", "path": "spec.md",
-    })
-    created = asyncio.run(server.prepare_task_request("Inspect spec", [legacy]))
-    rid = created["request_id"]
-    assert created["sources"][0]["content"] == "Legacy requirements"
-    assert asyncio.run(server.get_task_request(rid))["sources"][0][
-        "content"
-    ] == "Legacy requirements"
-    compact = asyncio.run(server.get_task_request_summary(rid))
-    assert "content" not in compact["sources"][0]
-    appended = asyncio.run(server.add_task_source(
-        rid, created["revision"],
-        server.LegacyRequestSource(
-            kind="inline", text="Another requirement", path=None,
-        ),
-    ))
-    assert len(appended["sources"]) == 2
-    assert appended["sources"][1]["content"] == "Another requirement"
-    assessed = asyncio.run(server.submit_context_assessment(
-        rid, appended["revision"],
-        assessment(server, refs=(appended["sources"][0]["id"],)),
-    ))
-    assert assessed["sources"][0]["content"] == "Legacy requirements"
-    assert store.get(rid)["revision"] == assessed["revision"]
-
-
 def test_medium_peer_response_fits_single_review_bundle_call(tmp_path, monkeypatch):
     server, runtime, _, _ = environment(tmp_path, monkeypatch)
     text = "Verified report: " + "A" * 12000
@@ -621,14 +606,15 @@ def test_adaptive_budget_pages_metadata_without_dropping_attempts(
     assert seen == [str(i) for i in range(5)]
 
 
-def test_installer_teaches_aggregate_review_budget_and_exact_pagination():
+def test_installer_teaches_exact_pagination_without_budget_mechanics():
     from qiqi_delegate.install import RULES
-    assert "max_total_chars" in RULES
-    assert "32000" in RULES
-    assert "max_chars_per_review" in RULES
     assert "get_review_evidence" in RULES
     assert "next_offset" in RULES
+    assert "next_review_offset" in RULES
     assert "expected_revision" in RULES
+    # The server owns the default review budget; Lead does not tune it.
+    assert "max_total_chars" not in RULES
+    assert "max_chars_per_review" not in RULES
 
 
 def test_oversized_review_metadata_keeps_persisted_workflow_identity(

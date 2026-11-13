@@ -90,19 +90,6 @@ class AcceptedGraphNodeSource(BaseModel):
     node_id: str
 
 
-class LegacyRequestSource(BaseModel):
-    """Old MCP source shape accepts irrelevant null keys, but not non-null extras."""
-    model_config = ConfigDict(extra="forbid")
-    kind: Literal["inline", "repo_file", "workspace_file", "peer_turn", "accepted_graph_node"]
-    text: str | None = None
-    label: str | None = None
-    repository: str | None = None
-    path: str | None = None
-    turn_id: str | None = None
-    graph_run_id: str | None = None
-    node_id: str | None = None
-
-
 RequestSource = Annotated[
     InlineSource | RepoFileSource | WorkspaceFileSource |
     PeerTurnSource | AcceptedGraphNodeSource,
@@ -137,11 +124,6 @@ class ReadinessAssessment(BaseModel):
     decision: Literal["direct", "targeted_discovery", "full_discovery", "blocked"]
     rationale: str
 
-class ReviewLocator(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    node_id: str
-    attempt_id: str
-
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str
@@ -153,11 +135,11 @@ class Decision(BaseModel):
     )
     owner: str | None = Field(
         default=None,
-        description="Required with action='block' or 'replan' to assign recovery owner.",
+        description="Optional audit note for action='block' or 'replan': recovery owner.",
     )
     return_checkpoint: str | None = Field(
         default=None,
-        description="Required with action='block' or 'replan' to define next review point.",
+        description="Optional audit note for action='block' or 'replan': next review point.",
     )
 
 runtime = DelegateRuntime(workspace_root())
@@ -169,68 +151,22 @@ graph_runtime = GraphRuntime(
 )
 mcp = MCPServer(
     "QiQi Delegate (standalone)",
+    # Full Lead policy lives in the installed workspace AGENTS.md (install.RULES).
+    # Keep this to the call sequence and safety invariants only.
     instructions=(
-        "Delegate repository-local tasks using a self-sufficient TaskPacket. "
-        "Pass the exact repository name from workspace repos.yaml. "
-        "Lead owns technical acceptance. Native result hooks are the only answer source. "
-        "No terminal scraping, Supervisor, or sibling repository reads. "
-        "Call workspace_info first; select a route using route_details description, "
-        "model and effort instead of always choosing the highest effort. "
-        "For new work prefer submit_workflow: atomically register request, sources, "
-        "evidence-linked assessment and direct single/multiple tasks, or a Discovery plan. "
-        "Use alias:<name> for source evidence references in submit_workflow only. "
-        "After Discovery use continue_workflow on the existing request_id to reassess "
-        "and dispatch without losing captured provenance. "
-        "Legacy prepare_task_request and submit_context_assessment remain available. "
-        "Set readiness decision direct for actionable requirements; this does not choose task count. "
-        "Use targeted/full Discovery only with blocking unknowns and a matching assessment. "
-        "A document or handoff is never required. "
-        "When the user supplies a Lead workspace file path, register it as "
-        "workspace_file: it is a reference staged for Peer reading, not inlined "
-        "into the TaskPacket. Cite its source ID in requirement evidence_refs. "
-        "For direct work use one submit_workflow call to dispatch the first wave, "
-        "inspect the bounded review bundle, then submit_decisions(auto_continue=True). "
-        "Use get_review_evidence for further exact response chunks before ACCEPT. "
-        "Keep start_graph, delegate_next and get_node_reviews for recovery or legacy flows. "
-        "A settled Peer response does not imply ACCEPT; Lead must explicitly accept it. "
-        "TaskGraph state complete requires explicit Lead ACCEPT for all nodes; "
-        "the completed graph is the terminal workflow result. "
-        "Use one TaskPacket schema for analysis, coding, testing and documentation; "
-        "tailor acceptance_criteria and constraints to the objective, including mixed tasks. "
-        "Before coding choose SINGLE_TASK (one Peer) or MULTI_TASK (multiple repo tasks); "
-        "readiness direct means actionable, never a single-task instruction. "
-        "MUST choose MULTI_TASK for independent coding behaviors, required upstream ACCEPT "
-        "checkpoints, or costly shared retries of separable work. "
-        "Keep one tightly coupled outcome and its tests together; do not split by module, layer or file. "
-        "For analysis split independent evidence questions; keep one end-to-end flow per Git root. "
-        "Each repo_task accesses only one Git root. Multi-root writing tasks, including "
-        "testing-only and documentation-only, require separate repo tasks per root. "
-        "For actionable multi-root analysis, delegate repo-local investigations and synthesize "
-        "captured evidence as Lead. If an unresolved cross-root fact blocks planning, "
-        "use matching targeted/full Discovery first; reassess readiness afterwards. "
-        "Discovery may read multiple registered roots only when assessment has blockers; "
-        "do not use delegate_discovery for readiness direct. "
-        "Review, testing-only and documentation-only need no functional decomposition. "
-        "For each split task provide objective, scope and acceptance_criteria; "
-        "use depends_on only for real dependencies, review nodes and REPLAN if dependencies change. "
-        "For analysis/discovery/review request only applicable evidence and explanations "
-        "(e.g. file:line, behavior/flow, contracts, failure paths or uncertainty); "
-        "simple lookups require only direct evidence, not a full system trace. "
-        "For read-only tasks explicitly prohibit file changes. "
-        "For coding require scoped changes, contract compatibility and relevant test evidence. "
-        "For testing specify cases, permitted test edits/execution, pass/fail results "
-        "and unrun cases; never imply an unrun test passed. "
-        "For documentation require implementation-grounded claims and accurate examples. "
-        "Avoid irrelevant criteria and verbose reports for simple tasks. "
-        "Before ACCEPT, read exact captured evidence via the review bundle and, "
-        "when truncated, get_review_evidence (or legacy get_node_reviews), "
-        "check evidence against the criteria and RETRY with targeted feedback if shallow. "
-        "In the final answer, preserve concrete findings and citations across Peer reports; "
-        "do not replace them with a generic high-level paraphrase. "
-        "If a Peer cannot start because Herdr is unavailable, review the runtime error "
-        "and do not inspect or implement in the target repository directly. "
-        "For block/replan decisions provide owner and return_checkpoint; "
-        "feedback and resume_session are retry-only."
+        "Lead delegates repository work to Peers; the workspace AGENTS.md holds the full Lead policy. "
+        "Standard flow: workspace_info -> submit_workflow (dispatches the first wave and "
+        "returns review_bundle) -> read evidence, calling get_review_evidence while "
+        "next_offset is set -> submit_decisions with the current revision (dispatches the "
+        "next wave) -> repeat until graph_state is complete. "
+        "After Discovery read captured sources with get_task_source, then call "
+        "continue_workflow on the same request_id. Use reconcile_graph for REPLAN and "
+        "delegate_next to re-dispatch runnable nodes after a dispatch error. "
+        "Invariants: Lead never reads, edits or runs commands in target repositories; "
+        "each task uses one Git root registered in repos.yaml; each TaskPacket is "
+        "self-sufficient; a settled Peer response does not imply ACCEPT; after "
+        "review_bundle_error, dispatch_error or continuation_error the workflow and "
+        "decisions are already persisted, so never resubmit them and follow next_step."
     ),
 )
 
@@ -292,10 +228,6 @@ def _compact_task_request(value: dict[str, Any]) -> dict[str, Any]:
             for source in value.get("sources", [])
         ],
     }
-
-
-def _to_packet(value: Packet):
-    return build_task_packet(**value.model_dump(exclude_none=True))
 
 
 def _check_graph_routes(authored) -> None:
@@ -373,7 +305,7 @@ def _contextual_packet(**fields: Any):
 async def workspace_info() -> dict[str, Any]:
     """List registered repository names, agent route names and selected Herdr session.
 
-    Call this before start_graph or delegate_repo_task. Pass exact route_names keys, never agent kinds.
+    Call this before submit_workflow. Pass exact route_names keys, never agent kinds.
     """
     repositories = runtime.repos()
     cfg = runtime._load_yaml("agent-routing.yaml")
@@ -427,32 +359,6 @@ async def workspace_info() -> dict[str, Any]:
 
 @mcp.tool()
 @_public_tool_errors
-async def prepare_task_request(
-    user_request: str,
-    sources: list[LegacyRequestSource] | None = None,
-) -> dict[str, Any]:
-    """Legacy source shape and full-content response remain unchanged."""
-    return task_requests.create(
-        user_request, [source.model_dump(exclude_none=True) for source in (sources or [])]
-    )
-
-
-@mcp.tool()
-@_public_tool_errors
-async def get_task_request(request_id: str, include_content: bool = True) -> dict[str, Any]:
-    """Legacy behavior: full sources unless compact is explicitly requested."""
-    return task_requests.get(request_id, include_content=include_content)
-
-
-@mcp.tool()
-@_public_tool_errors
-async def get_task_request_summary(request_id: str) -> dict[str, Any]:
-    """Compact task context metadata for new Lead clients."""
-    return task_requests.get(request_id, include_content=False)
-
-
-@mcp.tool()
-@_public_tool_errors
 async def get_task_source(
     request_id: str, source_id: str, offset: int = 0, max_chars: int = 12000,
 ) -> dict[str, Any]:
@@ -477,31 +383,8 @@ async def get_task_source(
     }
 
 
-@mcp.tool()
 @_public_tool_errors
-async def add_task_source(
-    request_id: str, expected_revision: int, source: LegacyRequestSource,
-) -> dict[str, Any]:
-    """Legacy append: preserve full response and optional null source keys."""
-    return task_requests.append(
-        request_id, expected_revision, source.model_dump(exclude_none=True),
-    )
-
-
-@mcp.tool()
-@_public_tool_errors
-async def submit_context_assessment(
-    request_id: str, expected_revision: int, assessment: ReadinessAssessment,
-) -> dict[str, Any]:
-    """Record evidence-linked readiness, not LLM self-confidence."""
-    return task_requests.assess(
-        request_id, expected_revision, assessment.model_dump(),
-    )
-
-
-@mcp.tool()
-@_public_tool_errors
-async def delegate_discovery(
+async def _delegate_discovery(
     request_id: str,
     repository_names: list[str],
     route: str,
@@ -714,7 +597,7 @@ async def get_review_bundle(
     if selected and not hydrated:
         raise ValueError(
             "one review's metadata exceeds max_total_chars; "
-            "increase max_total_chars (up to 64000) or inspect get_node_reviews"
+            "increase max_total_chars (up to 64000) or read get_review_evidence"
         )
     if _serialized_review_size(bundle()) > max_total_chars:
         raise ValueError(
@@ -917,7 +800,7 @@ async def _advance_assessed_workflow(
             return {"task_request": registered, "source_aliases": source_aliases,
                     "state": "blocked", "next_step": "user_decision"}
         try:
-            result = await delegate_discovery(
+            result = await _delegate_discovery(
                 request_id, discovery.repository_names, discovery.route,
                 discovery.questions, discovery.mode,
             )
@@ -951,7 +834,7 @@ async def _advance_assessed_workflow(
 
     current = task_requests.assert_ready(request_id, registered["revision"])
     _preflight_bound_packets(authored_graph, current, requirement_map)
-    started = await start_graph(
+    started = await _start_graph(
         selected_graph, request_id, registered["revision"], requirement_map,
     )
     answer = {
@@ -1053,101 +936,37 @@ async def continue_workflow(
     )
 
 
-@mcp.tool()
 @_public_tool_errors
-async def delegate_repo_task(
-    repository: Annotated[str, Field(description="Exact repos.yaml name")],
-    route: str,
-    objective: str,
-    scope: list[str],
-    acceptance_criteria: list[str],
-    out_of_scope: list[str] | None = None,
-    context: Context | None = None,
-    constraints: list[str] | None = None,
-    known_unknowns: list[str] | None = None,
-    session_id: str | None = None,
-    task_request_id: str | None = None,
-    task_request_revision: int | None = None,
-    requirement_refs: list[str] | None = None,
-) -> dict[str, Any]:
-    """START/RESUME Peer; no request_id means explicit legacy unassessed behavior."""
-    if task_request_id is not None:
-        if task_request_revision is None:
-            raise ValueError("task_request_revision is required with task_request_id")
-        current = task_requests.assert_ready(task_request_id, task_request_revision)
-        required = {r["id"] for r in current["assessment"]["requirements"]}
-        if not requirement_refs or any(r not in required for r in requirement_refs):
-            raise ValueError("delegate_repo_task needs valid requirement_refs")
-        selected_requirements = [
-            r for r in current["assessment"]["requirements"]
-            if r["id"] in requirement_refs
-        ]
-        constraints = list(constraints or []) + [
-            "Original user request (verbatim): " + current["user_request"],
-            "Resolved requirements: " + " | ".join(r["text"] for r in selected_requirements),
-        ]
-        constraints.extend(
-            _source_context_lines(current["sources"], selected_requirements)
-        )
-    elif task_request_revision is not None or requirement_refs is not None:
-        raise ValueError("task_request_id is required for readiness metadata")
-    packet = _contextual_packet(
-        objective=objective, scope=scope, acceptance_criteria=acceptance_criteria,
-        out_of_scope=out_of_scope, constraints=constraints, known_unknowns=known_unknowns,
-        context=context.model_dump() if context else None,
-    )
-    return await runtime.delegate(
-        repository=repository, route=route, packet=packet,
-        session_id=session_id,
-        workspace_sources=(
-            _workspace_source_refs(current["sources"], selected_requirements)
-            if task_request_id is not None else ()
-        ),
-    )
-
-@mcp.tool()
-@_public_tool_errors
-async def start_graph(
+async def _start_graph(
     graph: Graph,
-    task_request_id: str | None = None,
-    task_request_revision: int | None = None,
-    requirement_map: dict[str, list[str]] | None = None,
+    task_request_id: str,
+    task_request_revision: int,
+    requirement_map: dict[str, list[str]],
 ) -> dict[str, Any]:
-    """Validate DAG; bound runs require direct readiness and requirement mapping."""
+    """Validate DAG; every new graph is bound to a direct-ready task request."""
     authored = task_graph_from_payload(graph.model_dump(exclude_none=True))
     _check_graph_routes(authored)
-    if task_request_id is not None:
-        if task_request_revision is None:
-            raise ValueError("task_request_revision is required with task_request_id")
-        current = task_requests.assert_ready(task_request_id, task_request_revision)
-        if requirement_map is None:
-            raise ValueError("bound graph requires requirement_map")
-        task_requests._check_map(
-            current, [node.node_id for node in authored.nodes], requirement_map,
-        )
-    elif task_request_revision is not None or requirement_map is not None:
-        raise ValueError("task_request_id is required for context-bound graph")
-    if task_request_id is not None:
-        _preflight_bound_packets(authored, current, requirement_map)
+    current = task_requests.assert_ready(task_request_id, task_request_revision)
+    task_requests._check_map(
+        current, [node.node_id for node in authored.nodes], requirement_map,
+    )
+    _preflight_bound_packets(authored, current, requirement_map)
+
     def bind_created_graph(conn, graph_run_id):
-        if task_request_id is not None:
-            task_requests.bind_graph(
-                graph_run_id, task_request_id, current["revision"],
-                [node.node_id for node in authored.nodes], requirement_map,
-                connection=conn,
-            )
+        task_requests.bind_graph(
+            graph_run_id, task_request_id, current["revision"],
+            [node.node_id for node in authored.nodes], requirement_map,
+            connection=conn,
+        )
 
     # Both the persisted graph and its readiness guard commit atomically.
     # If revision/source validation fails after the preflight, the graph and
     # all newly created node states are rolled back instead of left unbound.
     result = graph_runtime.start_graph(
         authored, repository_names=runtime.repos().keys(),
-        on_created=bind_created_graph if task_request_id is not None else None,
+        on_created=bind_created_graph,
     )
-    if task_request_id is not None:
-        result["task_request_binding"] = task_requests.graph_binding(result["graph_run_id"])
-    else:
-        result["task_readiness_policy"] = "legacy_unassessed"
+    result["task_request_binding"] = task_requests.graph_binding(result["graph_run_id"])
     return result
 
 @mcp.tool()
@@ -1182,17 +1001,6 @@ async def rebind_graph(
         graph_run_id, expected_graph_revision, expected_request_revision,
     )
 
-
-@mcp.tool()
-@_public_tool_errors
-async def get_node_reviews(graph_run_id: str,
-                           reviews: Annotated[list[ReviewLocator], Field(min_length=1, max_length=8)],
-                           expected_revision: int | None = None) -> dict[str, Any]:
-    """Load at most eight exact review locators in a single bounded call."""
-    locators = [(item.node_id, item.attempt_id) for item in reviews]
-    return graph_runtime.get_node_reviews(
-        graph_run_id, locators, expected_revision=expected_revision
-    )
 
 async def _graph_execute(
     graph_run_id: str, node: GraphNode, session_id: str | None = None,
@@ -1260,11 +1068,13 @@ async def delegate_next(graph_run_id: str) -> dict[str, Any]:
 @_public_tool_errors
 async def submit_decisions(graph_run_id: str, decisions: list[Decision],
                            expected_revision: int,
-                           auto_continue: bool = False) -> dict[str, Any]:
+                           auto_continue: bool = True) -> dict[str, Any]:
     """Record Lead decisions after semantic review of exact captured Peer reports.
 
-    For action='block' or 'replan', set owner and return_checkpoint.
-    Only action='retry' permits feedback or resume_session.
+    By default dispatches the next runnable wave and returns its review_bundle;
+    auto_continue=False only records the decisions.
+    Only action='retry' permits feedback or resume_session; owner and
+    return_checkpoint are optional audit notes for 'block'/'replan'.
     Never ACCEPT a failed runtime attempt without captured Peer evidence.
     """
     parsed = decisions_from_payload([
@@ -1286,8 +1096,10 @@ async def submit_decisions(graph_run_id: str, decisions: list[Decision],
         reason = f"Lead decision: {decision.action}"
         if decision.feedback:
             reason += "; feedback=" + " | ".join(decision.feedback)
-        if decision.action in {"replan", "block"}:
-            reason += f"; owner={decision.owner}; return_checkpoint={decision.return_checkpoint}"
+        if decision.owner is not None:
+            reason += f"; owner={decision.owner}"
+        if decision.return_checkpoint is not None:
+            reason += f"; return_checkpoint={decision.return_checkpoint}"
         dispositions.append({
             "turn_id": turn_id, "action": decision.action, "reason": reason,
             "node_id": decision.node_id,

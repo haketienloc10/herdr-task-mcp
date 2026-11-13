@@ -444,19 +444,24 @@ def test_tool_errors_include_registry_reason_and_repair_action(tmp_path):
     script = """
 import asyncio
 from mcp.server.mcpserver.exceptions import ToolError
-from qiqi_delegate.server import start_graph, delegate_repo_task, Graph, Node, Packet
+from qiqi_delegate.server import (
+    submit_workflow, workspace_info, Node, Packet, ReadinessAssessment, RequirementInput,
+)
 
 packet = Packet(objective='Read frontend', scope=['src'],
                 acceptance_criteria=['Describe entry point'])
-graph = Graph(nodes=[Node(node_id='front', repository='frontend',
-                          route='codex-balanced', task_packet=packet)])
+node = Node(node_id='front', repository='frontend',
+            route='codex-balanced', task_packet=packet)
+assessment = ReadinessAssessment(
+    requirements=[RequirementInput(id='R1', text='Read frontend',
+                                   evidence_refs=['request:current'])],
+    blocking_unknowns=[], decision='direct', rationale='Actionable',
+)
 async def verify():
     for label, invocation in (
-        ('graph', lambda: start_graph(graph)),
-        ('direct', lambda: delegate_repo_task(
-            repository='frontend', route='codex-balanced',
-            objective='Read frontend', scope=['src'],
-            acceptance_criteria=['Describe entry point'])),
+        ('workflow', lambda: submit_workflow(
+            'Read frontend', assessment, single_task=node, auto_dispatch=False)),
+        ('info', lambda: workspace_info()),
     ):
         try:
             await invocation()
@@ -551,27 +556,40 @@ def test_workspace_info_prevents_unknown_routes_before_graph_persistence(tmp_pat
     script = """
 import asyncio
 from mcp.server.mcpserver.exceptions import ToolError
-from qiqi_delegate.server import workspace_info, start_graph, Graph, Node, Packet
+from qiqi_delegate.server import (
+    workspace_info, submit_workflow, get_graph, Node, Packet,
+    ReadinessAssessment, RequirementInput,
+)
 
 p = Packet(objective="Inspect", scope=["src"],
            acceptance_criteria=["Report entry point"])
-def graph(route):
-    return Graph(nodes=[Node(node_id="F1", repository="frontend",
-                             route=route, task_packet=p)])
+assessment = ReadinessAssessment(
+    requirements=[RequirementInput(id="R1", text="Inspect frontend",
+                                   evidence_refs=["request:current"])],
+    blocking_unknowns=[], decision="direct", rationale="Actionable",
+)
+def submit(route):
+    return submit_workflow(
+        "Inspect frontend", assessment, auto_dispatch=False,
+        single_task=Node(node_id="F1", repository="frontend",
+                         route=route, task_packet=p),
+    )
 async def main():
     info = await workspace_info()
     assert info["repositories"] == ["frontend"], info
     assert info["routes"] == {"codex-balanced": "codex"}, info
     assert info["herdr_session"] == "qiqi-delegate", info
     try:
-        await start_graph(graph("explore"))
+        await submit("explore")
     except ToolError as exc:
         assert "unknown route: explore" in str(exc), str(exc)
     else:
-        raise AssertionError("start_graph accepted nonexistent route")
-    result = await start_graph(graph("codex-balanced"))
-    assert result["revision"] == 0, result
-    assert result["runnable_nodes"] == ["F1"], result
+        raise AssertionError("submit_workflow accepted nonexistent route")
+    result = await submit("codex-balanced")
+    assert result["state"] == "ready", result
+    graph = await get_graph(result["graph_run_id"])
+    assert graph["revision"] == 0, graph
+    assert graph["runnable_nodes"] == ["F1"], graph
 asyncio.run(main())
 """
     env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path),
@@ -764,9 +782,8 @@ def test_removed_mcp_tools_are_not_public(tmp_path, monkeypatch):
     """Review batching is the only public review entry point; recovery is not MCP."""
     monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(tmp_path))
     from qiqi_delegate import server
-    assert not hasattr(server, "get_node_review")
-    assert not hasattr(server, "release_write_claim")
-    assert hasattr(server, "get_node_reviews")
+    for removed in ("get_node_review", "release_write_claim", *REMOVED_LEGACY_TOOLS):
+        assert not hasattr(server, removed), removed
     assert hasattr(server, "submit_decisions")
 
 
@@ -844,7 +861,20 @@ def test_native_ambiguous_capture_flows_into_graph(tmp_path, monkeypatch):
 
 
 
-def test_retired_evaluator_tools_are_not_registered_over_mcp(tmp_path):
+PUBLIC_LEAD_TOOLS = {
+    "workspace_info", "submit_workflow", "continue_workflow", "get_task_source",
+    "get_review_bundle", "get_review_evidence", "submit_decisions",
+    "reconcile_graph", "delegate_next", "get_graph", "get_graph_definition",
+    "rebind_graph",
+}
+REMOVED_LEGACY_TOOLS = (
+    "prepare_task_request", "get_task_request", "get_task_request_summary",
+    "add_task_source", "submit_context_assessment", "delegate_discovery",
+    "delegate_repo_task", "start_graph", "get_node_reviews",
+)
+
+
+def test_mcp_tool_registry_exposes_only_the_lead_workflow(tmp_path):
     """Complete the MCP handshake before asking for tools/list over live stdio."""
     env = dict(os.environ, QIQI_WORKSPACE_ROOT=str(tmp_path))
     initialize = {
@@ -910,7 +940,7 @@ def test_retired_evaluator_tools_are_not_registered_over_mcp(tmp_path):
     response = asyncio.run(query_tools())
     assert "result" in response, response
     names = {tool["name"] for tool in response["result"]["tools"]}
-    assert {"submit_workflow", "start_graph", "submit_decisions"} <= names
+    assert names == PUBLIC_LEAD_TOOLS
     assert not names.intersection({
         "start_final_evaluation",
         "get_final_evaluation",

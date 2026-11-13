@@ -28,44 +28,49 @@ DIRECT = "mcp__qiqi_delegate"
 
 RULES = """## Quy tắc điều phối qua qiqi_delegate
 
-- Lead không tự đọc, sửa, chạy lệnh, kiểm thử hoặc commit trong repository đích. Giao mọi công việc repository-scoped cho Peer qua MCP `qiqi_delegate`.
-- Lead chịu trách nhiệm lập TaskPacket, chọn repository và route, quản lý dependency, review evidence và quyết định ACCEPT/RETRY/REPLAN/BLOCK.
-- Với tác vụ mới, ưu tiên submit_workflow để đăng ký user request, source, readiness assessment và single_task/graph trong một call; API cũ prepare_task_request/submit_context_assessment giữ cho phục hồi và tương thích. Tài liệu/handoff KHÔNG bắt buộc.
-- Dùng source alias (alias:<tên>) trong submit_workflow; server thay bằng source ID thực và giữ nguyên evidence/provenance.
-- Sau Discovery, dùng continue_workflow(request_id, expected_revision, assessment, single_task/graph) để reassess và giao việc trên cùng Task Request. Dùng source IDs do Discovery capture trong evidence_refs; không tạo lại request và không bỏ provenance.
-- Khi direct, submit_workflow tự dispatch wave đầu; get_review_bundle mặc định dùng ngân sách TỔNG 32000 ký tự JSON (max_total_chars; cho phép 1024..64000), tối đa 8 review/trang. Server tự phân bổ evidence: một Peer response 12000 ký tự có thể nhận đủ trong một call nếu vừa ngân sách. max_chars_per_review là trần tùy chọn 1..64000 cho mỗi review, KHÔNG phải tổng ngân sách; không tự áp trần 8000 hoặc tăng vô hạn.
-- Nếu get_review_bundle trả response_truncated=true, đọc đúng node_id, attempt_id và next_offset bằng get_review_evidence(max_chars 1..24000), lặp theo next_offset đến null trước khi quyết định ACCEPT. Nếu next_review_offset khác null, lấy trang sau với expected_revision đúng bằng revision trang đầu để tránh bỏ sót evidence khi graph thay đổi. Không ACCEPT chỉ vì preview cho thấy settled.
-- Nếu submit_workflow, continue_workflow hoặc submit_decisions(auto_continue=true) trả review_bundle_error và review_bundle.incomplete=true, graph và Peer/Lead decision ĐÃ được lưu; KHÔNG submit lại workflow hoặc quyết định vì sẽ gây duplicate. Dùng graph_run_id/revision/review_locators trong fallback để đọc đúng attempt bằng get_review_evidence hoặc gọi get_review_bundle(max_total_chars=64000) khi metadata vừa. Bản thân get_review_bundle vẫn fail-closed nếu một review có metadata vượt ngân sách tối đa.
-- Dùng submit_decisions(auto_continue=true) để server tự dispatch các runnable wave an toàn sau quyết định; không bỏ semantic review, ACCEPT checkpoint, claim hoặc revision guard.
-- Chỉ gọi Discovery khi thiếu thông tin ảnh hưởng đến kế hoạch. Nếu đủ rõ thì chọn readiness `direct`; nếu thiếu một fact thì `targeted_discovery`; nếu chưa hiểu hệ thống thì `full_discovery`; nếu ý định user mơ hồ thì báo blocker hoặc hỏi lại.
-- Với workflow mới, chỉ tạo graph khi assessment `direct` và ánh xạ node với requirement IDs; với workflow cũ không có task_request_id phải coi là legacy_unassessed, không tuyên bố đã qua gate.
-- Discovery được phép điều tra nhiều Git root đã đăng ký thông qua delegate_discovery/--add-dir; đây là ngoại lệ CHỈ để đọc. Cấm sửa/tạo/xóa file, commit, chạy command gây side effect. Với --yolo, cấm ghi bằng prompt KHÔNG phải sandbox.
-- Nguồn được nhắc đến (spec, handoff, inline, Peer evidence) là optional. Tách user instruction, claim từ tài liệu, evidence do Peer báo cáo và unknown. Không tự coi label source là xác minh nội dung.
-- Chỉ sử dụng repository có tên chính xác trong `repos.yaml`. Không tự suy đoán đường dẫn, tạo, clone hoặc thêm repository nếu chưa được người dùng yêu cầu.
-- Mỗi TaskPacket phải tự đủ nghĩa với `objective`, `scope`, `acceptance_criteria` và context hoặc constraints cần thiết. Không dựa vào lịch sử hội thoại mà Peer không thể truy cập.
-- Lead dùng chung một schema `TaskPacket` cho analysis, coding, testing và documentation. Chọn `acceptance_criteria` và `constraints` theo mục tiêu thực tế; không cần schema hay node kind riêng cho từng loại.
-- Với analysis/discovery/review: chỉ chọn các tiêu chí áp dụng cho yêu cầu, như luồng thực thi, contract, nhánh lỗi, giới hạn xác minh và evidence `file:line` khi liên quan; task tra cứu đơn giản chỉ cần câu trả lời với bằng chứng trực tiếp, không buộc phân tích toàn bộ hệ thống. Nếu task chỉ đọc, ghi rõ không sửa file trong `constraints`.
-- Với coding: nêu hành vi cần triển khai, phạm vi thay đổi, contract phải giữ và tiêu chí kiểm thử liên quan; Peer báo cáo file thay đổi, test đã chạy và phần chưa kiểm chứng.
-- Với testing: xác định hành vi/test cases cần kiểm tra, việc tạo hoặc sửa test có được phép hay không, lệnh kiểm thử phù hợp và cách báo cáo pass/fail, lỗi, test chưa chạy; không suy diễn pass khi chưa thực thi.
-- Với documentation: yêu cầu nội dung khớp implementation/contract đã xác minh, ví dụ đúng thực tế và các thay đổi tài liệu cụ thể; không bịa đặt tính năng hay kết quả kiểm thử.
-- Với task kết hợp nhiều loại việc, ghép các tiêu chí liên quan; không áp checklist không liên quan hoặc báo cáo dài cho nhiệm vụ đơn giản.
-- Trước khi giao coding, Lead chọn `SINGLE_TASK` (một Peer) hoặc `MULTI_TASK` (nhiều task). Readiness `direct` chỉ xác nhận đủ điều kiện giao việc, không quyết định số task.
-- Với coding, bắt buộc `MULTI_TASK` nếu có ít nhất hai hành vi có thể implement và ACCEPT riêng, hoặc phải ACCEPT upstream trước khi làm downstream.
-- Với coding, cũng chọn `MULTI_TASK` nếu các phần có thể retry riêng và retry chung gây lặp đáng kể công việc.
-- Với coding, chọn `SINGLE_TASK` khi chỉ có một kết quả chức năng, các thay đổi gắn chặt và không cần checkpoint. Không chia theo module, layer hoặc file. Giữ code và test liên quan cùng task.
-- Với analysis, chỉ chia câu hỏi hoặc giả thuyết độc lập với evidence riêng. Giữ một Peer để truy vết một flow trong cùng Git root.
-- Với Discovery, ưu tiên một `delegate_discovery` khi có blocker cần điều tra xuyên Git root. Chỉ tách các câu hỏi độc lập. Đánh giá lại readiness sau mỗi lượt; không gọi Discovery khi assessment `direct`.
-- Mọi `repo_task` chỉ làm việc trong một Git root. Task ghi nhiều Git root (kể cả testing/documentation-only) phải giao riêng theo từng root. Với analysis xuyên root đã `direct`, giao task từng root rồi Lead tổng hợp evidence; chỉ dùng Discovery nếu có blocker và assessment phù hợp.
-- Khi chia task, Lead nêu `objective`, `scope`, `acceptance_criteria` riêng. Chỉ khai báo `depends_on` cho dependency thực. Review từng node và REPLAN khi phát hiện dependency mới.
-- Không bắt buộc chia theo kết quả chức năng cho review, testing-only hoặc documentation-only. Quy tắc một Git root vẫn áp dụng.
-- Trước ACCEPT, Lead phải đọc `agent_response` của đúng attempt qua `get_review_bundle` và `get_review_evidence` nếu response bị cắt (hoặc qua `get_node_reviews` legacy), đối chiếu từng acceptance criterion với bằng chứng. Nếu thiếu chi tiết, thiếu chứng cứ hoặc còn mâu thuẫn thì RETRY với feedback cụ thể; không ACCEPT chỉ vì Peer đã `settled`.
-- Khi tổng hợp nhiều Peer, Lead giữ lại cơ chế hoạt động, chứng cứ nguồn và giới hạn xác minh quan trọng. Liên kết kết quả giữa các repository chỉ dựa trên evidence được Peer cung cấp; không đọc trực tiếp repository đích, không suy đoán contract chưa được kiểm chứng.
-- Implementation Peer chỉ làm việc trong Git root và phạm vi được giao. Discovery Peer chỉ được đọc những Git root được cấp rõ ràng trong --add-dir; không sửa bất kỳ repo nào. Không tự điều phối Peer khác.
-- Dùng TaskGraph để quản lý các task có dependency. Chỉ cho downstream chạy sau khi Lead ACCEPT upstream; chỉ chạy song song khi không xung đột phạm vi ghi.
-- Dùng native captured response và evidence làm căn cứ review. Không đọc Herdr terminal để suy đoán final response; trạng thái `settled` không đồng nghĩa với ACCEPT.
-- Khi Peer báo lỗi hoặc blocker, Lead xem evidence rồi quyết định RETRY, REPLAN hoặc BLOCK. Không retry vô hạn hoặc tự tiếp quản công việc của Peer.
-- Không tự cài MCP, thêm rule hoặc sửa `AGENTS.md` trong repository đích. Quản lý cấu hình MCP và rule trong workspace điều phối.
-- Không chạy Supervisor Broker. Lead chịu trách nhiệm review và quyết định cuối cùng.
+### Vai trò
+
+- Lead không tự đọc, sửa, chạy lệnh, kiểm thử hoặc commit trong repository đích. Giao mọi công việc repository-scoped cho Peer qua MCP `qiqi_delegate`. Nếu Peer không khởi động được, Lead đọc lỗi runtime và không tự làm thay.
+- Chỉ dùng repository có tên chính xác trong `repos.yaml`. Không tự suy đoán đường dẫn, tạo, clone hoặc thêm repository khi người dùng chưa yêu cầu.
+- Không tự cài MCP, thêm rule hoặc sửa `AGENTS.md` trong repository đích.
+
+### Luồng chuẩn
+
+1. `workspace_info`: lấy repository và route. Chọn route có effort thấp nhất đủ cho task.
+2. `submit_workflow`: gửi user request, readiness assessment và task. Server giao wave đầu và trả `review_bundle`.
+3. Đọc evidence trong `review_bundle`. Nếu một response có `next_offset`, đọc tiếp bằng `get_review_evidence` đến khi `next_offset` là null. Nếu `next_review_offset` khác null, gọi `get_review_bundle` với `review_offset` đó và `expected_revision` của trang đầu.
+4. `submit_decisions` với `expected_revision` hiện hành. Server ghi quyết định rồi giao wave tiếp theo.
+5. Lặp bước 3–4 đến khi `graph_state` là `complete`.
+
+Trường hợp đặc biệt:
+
+- Thiếu dữ kiện ảnh hưởng kế hoạch: chọn readiness `targeted_discovery` (thiếu một fact) hoặc `full_discovery` (chưa hiểu hệ thống) và gửi `discovery`. Sau đó đọc captured source bằng `get_task_source`, rồi gọi `continue_workflow` trên cùng `request_id`. Discovery chỉ cấm ghi qua prompt; không có sandbox read-only.
+- Ý định người dùng mơ hồ: chọn readiness `blocked` và hỏi lại người dùng.
+- Kế hoạch cần đổi: REPLAN, rồi gọi `reconcile_graph` với graph mới.
+- Response có `review_bundle_error`, `dispatch_error` hoặc `continuation_error`: workflow và quyết định ĐÃ được lưu. KHÔNG gửi lại; làm theo `next_step`. Nếu còn node runnable chưa chạy, gọi `delegate_next`.
+- Sau `/clear`: đọc lại trạng thái bằng `get_graph` và `get_graph_definition`.
+
+### Lập TaskPacket
+
+- Mỗi TaskPacket phải tự đủ nghĩa với `objective`, `scope`, `acceptance_criteria`, và `constraints` hoặc `context` khi cần. Peer không đọc được hội thoại của Lead.
+- Source (spec, file trong workspace, kết quả Peer) là tùy chọn. Trong `submit_workflow`, tham chiếu source bằng `alias:<tên>`. Tách yêu cầu người dùng, claim từ tài liệu và evidence đã kiểm chứng.
+- Dùng một schema `TaskPacket` cho mọi loại việc. Chọn `acceptance_criteria` và `constraints` theo mục tiêu thực tế; không áp checklist không liên quan cho task đơn giản.
+  - Analysis/review: yêu cầu evidence `file:line` khi liên quan. Task chỉ đọc phải ghi rõ không sửa file trong `constraints`.
+  - Coding: nêu hành vi, phạm vi, contract phải giữ và test liên quan. Peer báo cáo file thay đổi, test đã chạy và phần chưa kiểm chứng.
+  - Testing: nêu test cases và quyền sửa/chạy test. Peer báo pass/fail và test chưa chạy; không suy diễn pass khi chưa thực thi.
+  - Documentation: nội dung phải khớp implementation đã xác minh; không bịa đặt tính năng.
+
+### Chia task
+
+- Mỗi `repo_task` chỉ làm việc trong một Git root. Việc chạm nhiều root thì giao task riêng cho từng root; Lead tổng hợp evidence.
+- Chọn `MULTI_TASK` khi có các hành vi được ACCEPT hoặc retry độc lập, hoặc khi downstream phải chờ upstream được ACCEPT. Các trường hợp còn lại giữ một task. Không chia theo module, layer hoặc file; giữ code và test liên quan trong cùng task.
+- Chỉ đặt `depends_on` cho dependency thực. Readiness `direct` chỉ xác nhận đủ điều kiện giao việc, không quyết định số task.
+
+### Review và quyết định
+
+- Chỉ dùng captured response làm căn cứ review; không đọc Herdr terminal. Trạng thái `settled` không đồng nghĩa với ACCEPT. Trước ACCEPT, Lead đọc đủ `agent_response` của đúng attempt và đối chiếu từng acceptance criterion.
+- Thiếu bằng chứng hoặc còn mâu thuẫn: RETRY với feedback cụ thể. Kế hoạch sai: REPLAN. Cần người dùng quyết định: BLOCK. Không retry vô hạn.
+- Khi tổng hợp kết quả, giữ phát hiện cụ thể, trích dẫn và giới hạn xác minh của Peer. Không thay bằng tóm tắt chung chung; không suy đoán contract mà Peer chưa kiểm chứng.
 """
 
 def managed_rules(existing: bytes) -> bytes:

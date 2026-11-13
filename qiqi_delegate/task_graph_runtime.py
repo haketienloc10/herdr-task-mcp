@@ -370,13 +370,6 @@ def decisions_from_payload(payload: Any) -> tuple[ReviewDecision, ...]:
             decision.get("return_checkpoint"),
             f"{label}.return_checkpoint",
         )
-        if action in {"replan", "block"} and (
-            owner is None or return_checkpoint is None
-        ):
-            raise ValueError(
-                f"graph {label} action={action!r} requires owner and return_checkpoint"
-            )
-
         decisions.append(
             ReviewDecision(
                 node_id=decision["node_id"],

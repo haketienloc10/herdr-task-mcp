@@ -51,7 +51,7 @@ def test_full_source_context_blocks_discovery_before_peer_launch(tmp_path, monke
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
     with pytest.raises(ToolError, match="no free context source slot"):
-        asyncio.run(server.delegate_discovery(
+        asyncio.run(server._delegate_discovery(
             request_id, ["backend"], "codex-balanced",
             ["Trace idempotency with file:line"],
         ))
@@ -76,7 +76,7 @@ def test_fifteenth_source_reserves_one_slot_for_native_capture(tmp_path, monkeyp
         }
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    result = asyncio.run(server.delegate_discovery(
+    result = asyncio.run(server._delegate_discovery(
         request_id, ["backend"], "codex-balanced",
         ["Trace idempotency with file:line"],
     ))
@@ -137,7 +137,7 @@ def test_attachment_failure_still_returns_captured_response(tmp_path, monkeypatc
             RuntimeError("stale task context revision")
         ),
     )
-    result = asyncio.run(server.delegate_discovery(
+    result = asyncio.run(server._delegate_discovery(
         request_id, ["backend"], "codex-balanced", ["Inspect error"],
     ))
     assert result["result"]["agent_response"] == body

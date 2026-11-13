@@ -54,7 +54,7 @@ def test_discovery_only_sends_assessed_source_refs(tmp_path, monkeypatch):
         return {"state": "blocked", "turn_id": "fake", "agent_response": None}
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    result = asyncio.run(server.delegate_discovery(
+    result = asyncio.run(server._delegate_discovery(
         ready["request_id"], ["backend", "frontend"], "codex-balanced",
         ["Inspect idempotency and cite file:line"],
     ))
@@ -81,7 +81,7 @@ def test_discovery_can_run_without_optional_sources(tmp_path, monkeypatch):
         return {"state": "blocked", "agent_response": None}
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    asyncio.run(server.delegate_discovery(
+    asyncio.run(server._delegate_discovery(
         request["request_id"], ["backend"], "codex-balanced",
         ["Find source of duplicate orders"],
     ))
@@ -115,7 +115,7 @@ def test_oversized_native_discovery_output_is_persisted_in_full(
                 "agent_response": response}
 
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    result = asyncio.run(server.delegate_discovery(
+    result = asyncio.run(server._delegate_discovery(
         request["request_id"], ["backend"], "codex-balanced",
         ["Trace retry handling with file:line"],
     ))

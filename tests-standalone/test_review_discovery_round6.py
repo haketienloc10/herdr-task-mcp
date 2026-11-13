@@ -76,7 +76,7 @@ def test_cancelled_discovery_preserves_prebound_native_turn(tmp_path, monkeypatc
 
     monkeypatch.setattr(runtime, "delegate", cancel_after_persist)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(server.delegate_discovery(
+        asyncio.run(server._delegate_discovery(
             rid, ["backend"], "codex-balanced", ["Trace payments"],
         ))
 

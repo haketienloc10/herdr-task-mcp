@@ -430,7 +430,9 @@ def test_updated_request_requires_graph_reconciliation_with_revised_packets(tmp_
 
 
 
-def test_mcp_direct_flow_without_handoff_and_explicit_legacy(tmp_path, monkeypatch):
+def test_mcp_direct_flow_without_handoff_binds_graph_and_reads_unbound_history(
+    tmp_path, monkeypatch,
+):
     runtime, store = workspace(tmp_path)
     monkeypatch.setenv("QIQI_WORKSPACE_ROOT", str(runtime.root))
     import importlib
@@ -441,48 +443,36 @@ def test_mcp_direct_flow_without_handoff_and_explicit_legacy(tmp_path, monkeypat
     monkeypatch.setattr(server, "task_requests", store)
     monkeypatch.setattr(server, "graph_runtime", gr)
 
-    request = asyncio.run(server.prepare_task_request("Retry 429/503 in backend"))
-    assert request["sources"] == []
-    ready = asyncio.run(server.submit_context_assessment(
-        request["request_id"], 1,
-        server.ReadinessAssessment.model_validate(assessment()),
-    ))
-    payload = {"nodes": [{
-        "node_id": "retry", "repository": "backend", "route": "codex-balanced",
-        "task_packet": {
-            "objective": "Retry 429/503", "scope": ["src"],
-            "acceptance_criteria": ["Tests pass"],
-        }
-    }]}
-    bound = asyncio.run(server.start_graph(
-        server.Graph.model_validate(payload),
-        request["request_id"], ready["revision"], {"retry": ["R1"]},
-    ))
-    assert bound["task_request_binding"]["request_id"] == request["request_id"]
-    read = asyncio.run(server.get_graph(bound["graph_run_id"]))
-    assert read["task_request_binding"]["requirement_map"] == {"retry": ["R1"]}
-    legacy = asyncio.run(server.start_graph(server.Graph.model_validate(payload)))
-    assert legacy["task_readiness_policy"] == "legacy_unassessed"
-    assert asyncio.run(server.get_graph(legacy["graph_run_id"]))[
-        "task_readiness_policy"] == "legacy_unassessed"
-
     delegated = {}
     async def fake_delegate(**kwargs):
         delegated["packet"] = kwargs["packet"]
         return {"state": "settled"}
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    asyncio.run(server.delegate_repo_task(
-        "backend", "codex-balanced", "Retry", ["src"], ["Tests pass"],
-        task_request_id=request["request_id"],
-        task_request_revision=ready["revision"], requirement_refs=["R1"],
+    payload = {
+        "node_id": "retry", "repository": "backend", "route": "codex-balanced",
+        "task_packet": {
+            "objective": "Retry 429/503", "scope": ["src"],
+            "acceptance_criteria": ["Tests pass"],
+        },
+    }
+    submitted = asyncio.run(server.submit_workflow(
+        "Retry 429/503 in backend",
+        server.ReadinessAssessment.model_validate(assessment()),
+        single_task=server.Node.model_validate(payload),
     ))
+    assert submitted["task_request"]["sources"] == []
+    read = asyncio.run(server.get_graph(submitted["graph_run_id"]))
+    assert read["task_request_binding"]["requirement_map"] == {"retry": ["R1"]}
+    assert "task_readiness_policy" not in read
     assert "Original user request" in render_task_prompt(delegated["packet"])
-    with pytest.raises(Exception, match="requirement_refs"):
-        asyncio.run(server.delegate_repo_task(
-            "backend", "codex-balanced", "Retry", ["src"], ["Tests pass"],
-            task_request_id=request["request_id"],
-            task_request_revision=ready["revision"],
-        ))
+
+    # Graphs persisted before binding became mandatory stay readable.
+    unbound = gr.start_graph(
+        task_graph_from_payload({"nodes": [payload]}),
+        repository_names=runtime.repos().keys(),
+    )
+    assert asyncio.run(server.get_graph(unbound["graph_run_id"]))[
+        "task_readiness_policy"] == "legacy_unassessed"
 
 
 def test_mcp_discovery_roundtrip_resets_readiness(tmp_path, monkeypatch):
@@ -506,7 +496,7 @@ def test_mcp_discovery_roundtrip_resets_readiness(tmp_path, monkeypatch):
         return {"state": "settled", "turn_id": "discovery-turn",
                 "agent_response": "Idempotency is missing at backend/order.py:30"}
     monkeypatch.setattr(runtime, "delegate", fake_delegate)
-    result = asyncio.run(server.delegate_discovery(
+    result = asyncio.run(server._delegate_discovery(
         request["request_id"], ["backend", "frontend"],
         "codex-balanced", ["Inspect idempotency"],
     ))

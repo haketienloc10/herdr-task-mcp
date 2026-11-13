@@ -55,9 +55,13 @@ Chọn route trong `../qiqi-control/agent-routing.yaml`. Installer mặc định
 
 Gọi `workspace_info` để kiểm tra repository và route. Ưu tiên workflow cấp cao:
 
-1. `submit_workflow`: lưu `user_request`, đánh giá readiness và giao wave đầu.
-2. `get_review_bundle`: đọc kết quả Peer và `revision` hiện hành.
-3. `submit_decisions`: chọn `accept`, `retry`, `replan` hoặc `block`. Đặt `auto_continue=true` để chạy wave tiếp theo.
+1. `submit_workflow`: lưu `user_request`, đánh giá readiness, giao wave đầu và trả `review_bundle`.
+2. Đọc kết quả Peer trong `review_bundle`. Nếu response bị cắt, đọc tiếp bằng `get_review_evidence`.
+3. `submit_decisions`: chọn `accept`, `retry`, `replan` hoặc `block`. Server mặc định chạy wave tiếp theo. Đặt `auto_continue=false` nếu chỉ muốn ghi quyết định.
+
+Quy tắc đầy đủ cho Lead nằm trong khối được installer quản lý trong `AGENTS.md`. Đây là nguồn chính sách duy nhất; MCP instructions chỉ tóm tắt luồng gọi và các invariant an toàn.
+
+MCP server chỉ công bố 12 tool cho luồng chuẩn và phục hồi. Các tool cũ (`prepare_task_request`, `get_task_request`, `get_task_request_summary`, `add_task_source`, `submit_context_assessment`, `delegate_discovery`, `delegate_repo_task`, `start_graph`, `get_node_reviews`) đã bị xoá. Mọi graph mới đều gắn với một task request qua `submit_workflow` hoặc `continue_workflow`. Graph cũ chưa gắn request vẫn đọc được và được đánh dấu `legacy_unassessed`.
 
 Ví dụ payload của `submit_workflow`:
 

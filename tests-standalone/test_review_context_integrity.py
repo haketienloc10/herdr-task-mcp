@@ -51,23 +51,6 @@ def _request(store, source_content):
     return assessed
 
 
-def test_direct_delegation_transfers_ninth_or_later_complete_source(tmp_path, monkeypatch):
-    server, _, store, _, seen = _server(tmp_path, monkeypatch)
-    source = "a" * 7000 + " CRITICAL_TAIL_CONTRACT: POST /orders"
-    request = _request(store, source)
-    asyncio.run(server.delegate_repo_task(
-        "backend", "codex-balanced", "Implement orders", ["src"],
-        ["Matches the contract"],
-        task_request_id=request["request_id"],
-        task_request_revision=request["revision"],
-        requirement_refs=["R1"],
-    ))
-    prompt = render_task_prompt(seen["packet"])
-    assert source in prompt
-    assert request["sources"][9]["id"] in prompt
-    assert "Unused context #0" not in prompt
-
-
 def test_graph_delegation_transfers_ninth_or_later_complete_source(tmp_path, monkeypatch):
     server, runtime, store, gr, seen = _server(tmp_path, monkeypatch)
     source = "b" * 7000 + " CRITICAL_TAIL_FIELD: order_id"
@@ -133,15 +116,31 @@ def test_downstream_receives_full_accepted_upstream_report(tmp_path, monkeypatch
 def test_oversize_referenced_source_rejected_without_dispatch(tmp_path, monkeypatch):
     server, _, store, _, seen = _server(tmp_path, monkeypatch)
     request = _request(store, "Z" * 99_000 + " REQUIRED_AT_END")
+    relevant_id = request["sources"][9]["id"]
     # Public MCP decorators convert validation errors into actionable ToolError.
     with pytest.raises(ToolError, match="Nothing was truncated"):
-        asyncio.run(server.delegate_repo_task(
-            "backend", "codex-balanced", "Implement orders", ["src"],
-            ["Matches the contract"], constraints=["padding" * 2000],
-            task_request_id=request["request_id"],
-            task_request_revision=request["revision"], requirement_refs=["R1"],
+        asyncio.run(server.continue_workflow(
+            request["request_id"], request["revision"],
+            server.ReadinessAssessment(
+                requirements=[server.RequirementInput(
+                    id="R1", text="Implement captured order contract",
+                    evidence_refs=[relevant_id],
+                )],
+                blocking_unknowns=[], decision="direct",
+                rationale="The provided contract is actionable",
+            ),
+            single_task=server.Node(
+                node_id="orders", repository="backend", route="codex-balanced",
+                task_packet=server.Packet(
+                    objective="Implement orders", scope=["src"],
+                    acceptance_criteria=["Matches the contract"],
+                    constraints=["padding" * 2000],
+                ),
+            ),
         ))
     assert "packet" not in seen
+    # Preflight fails before the request gets a fresh assessment revision.
+    assert store.get(request["request_id"])["revision"] == request["revision"]
 
 
 def test_oversize_accepted_upstream_rejected_without_dispatch(tmp_path, monkeypatch):
