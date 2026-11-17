@@ -356,8 +356,64 @@ def _existing_herdr_session(codex: str, claude: str) -> str | None:
     return _validate_herdr_session(old_codex or old_claude)
 
 
+MANAGED_ENV = ("QIQI_WORKSPACE_ROOT", "QIQI_HERDR_SESSION")
+
+
+def default_tmp_dir() -> Path:
+    """Stable per-user parent for Peer result dirs; users trust it once."""
+    return Path.home() / ".qiqi" / "tmp"
+
+
+def _custom_env(env: object, config_name: str) -> dict[str, str]:
+    """User-added env keys survive reinstall; installer-owned keys are rewritten."""
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise ValueError(f"{config_name} qiqi_delegate env must be a table/object")
+    custom = {k: v for k, v in env.items() if k not in MANAGED_ENV}
+    if not all(isinstance(v, str) for v in custom.values()):
+        raise ValueError(f"{config_name} qiqi_delegate env values must be strings")
+    return custom
+
+
+def _codex_custom_env(existing: str) -> dict[str, str]:
+    _strip_own_section(existing)  # validates markers
+    if MCP_START not in existing:
+        return {}
+    managed = existing.split(MCP_START, 1)[1].split(MCP_END, 1)[0]
+    try:
+        cfg = tomllib.loads(managed)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(".codex/config.toml managed block has invalid TOML") from exc
+    return _custom_env(cfg.get("mcp_servers", {}).get(SERVER, {}).get("env"),
+                       ".codex/config.toml")
+
+
+def _claude_custom_env(existing: str) -> dict[str, str]:
+    try:
+        cfg = json.loads(existing) if existing.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(".mcp.json contains invalid JSON") from exc
+    server = cfg.get("mcpServers", {}).get(SERVER) if isinstance(cfg, dict) else None
+    if not isinstance(server, dict):
+        return {}
+    return _custom_env(server.get("env"), ".mcp.json")
+
+
+def _server_env(root: Path, herdr_session: str | None,
+                custom: dict[str, str], tmp_dir: Path | None) -> dict[str, str]:
+    env = {"QIQI_WORKSPACE_ROOT": str(root)}
+    if herdr_session:
+        env["QIQI_HERDR_SESSION"] = herdr_session
+    env.update(custom)
+    env.setdefault("TMPDIR", str(tmp_dir or default_tmp_dir()))
+    return env
+
+
 def codex_config(existing: str, python: Path, root: Path,
-                 herdr_session: str | None = None) -> str:
+                 herdr_session: str | None = None,
+                 tmp_dir: Path | None = None) -> str:
+    env = _server_env(root, herdr_session, _codex_custom_env(existing), tmp_dir)
     original = _strip_own_section(existing)
     try:
         parsed = tomllib.loads(original)
@@ -408,15 +464,17 @@ def codex_config(existing: str, python: Path, root: Path,
         'command = ' + json.dumps(str(python)),
         'args = ["-m", "qiqi_delegate.server"]',
         "[mcp_servers.qiqi_delegate.env]",
-        'QIQI_WORKSPACE_ROOT = ' + json.dumps(str(root)),
-        *(['QIQI_HERDR_SESSION = ' + json.dumps(herdr_session)]
-          if herdr_session else []),
+        *((key if re.fullmatch(r"[A-Za-z0-9_-]+", key)
+           else json.dumps(key, ensure_ascii=False))
+          + " = " + json.dumps(value, ensure_ascii=False)
+          for key, value in env.items()),
         MCP_END,
     ])
     return original.rstrip("\r\n") + ("\n\n" if original.strip() else "") + block + "\n"
 
 def claude_config(existing: str, python: Path, root: Path,
-                  herdr_session: str | None = None) -> str:
+                  herdr_session: str | None = None,
+                  tmp_dir: Path | None = None) -> str:
     try:
         config = json.loads(existing) if existing.strip() else {}
     except json.JSONDecodeError as exc:
@@ -433,10 +491,7 @@ def claude_config(existing: str, python: Path, root: Path,
     servers[SERVER] = {
         "command": str(python),
         "args": ["-m", "qiqi_delegate.server"],
-        "env": {
-            "QIQI_WORKSPACE_ROOT": str(root),
-            **({"QIQI_HERDR_SESSION": herdr_session} if herdr_session else {}),
-        },
+        "env": _server_env(root, herdr_session, _claude_custom_env(existing), tmp_dir),
     }
     config["mcpServers"] = servers
     return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
@@ -848,7 +903,8 @@ def migrate_legacy_evaluator_routes(existing: str) -> tuple[str, list[str], list
     return existing, removed, remaining
 
 async def install_workspace(root: Path, python: Path | None = None,
-                            herdr_session: str | None = None) -> dict:
+                            herdr_session: str | None = None,
+                            tmp_dir: Path | None = None) -> dict:
     root = root.resolve(strict=True)
     # sys.executable commonly points at <venv>/bin/python, itself a symlink
     # to a base interpreter (notably for uv-managed CPython). Resolving that
@@ -886,8 +942,14 @@ async def install_workspace(root: Path, python: Path | None = None,
     )
     a_new = managed_rules(a_old)
     lead_new = managed_claude_rules(lead_old)
-    c_new = codex_config(c_old, python, root, herdr_session=herdr_session)
-    m_new = claude_config(m_old, python, root, herdr_session=herdr_session)
+    c_new = codex_config(c_old, python, root, herdr_session=herdr_session, tmp_dir=tmp_dir)
+    m_new = claude_config(m_old, python, root, herdr_session=herdr_session, tmp_dir=tmp_dir)
+    # tempfile silently falls back to /tmp when TMPDIR is missing, which
+    # brings back the per-turn trust prompt; create every configured TMPDIR.
+    tmp_dirs = sorted({
+        env.get("TMPDIR", str(tmp_dir or default_tmp_dir()))
+        for env in (_codex_custom_env(c_old), _claude_custom_env(m_old))
+    })
     files = {
         agents: a_new,
         claude_rules: lead_new,
@@ -901,10 +963,14 @@ async def install_workspace(root: Path, python: Path | None = None,
         path = root / name
         if not path.exists():
             files[path] = value.encode("utf-8")
+    for directory in tmp_dirs:
+        if os.path.isabs(directory):
+            Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
     _commit_workspace_files(root, files)
     return {"workspace": str(root), "mcp": SERVER,
             "agents_marker": START, "python": str(python),
             "herdr_session": herdr_session,
+            "tmpdirs_to_trust": tmp_dirs,
             "removed_evaluator_routes": removed_routes,
             "retained_evaluator_routes": retained_routes}
 
@@ -917,9 +983,16 @@ def main():
         "--herdr-session",
         help="Target an existing named Herdr session in project MCP configs",
     )
+    parser.add_argument(
+        "--tmp-dir", type=Path,
+        help="Default TMPDIR for the MCP server when the config has none "
+             "(default: ~/.qiqi/tmp). Trust it once in Claude.",
+    )
     args = parser.parse_args()
+    tmp_dir = args.tmp_dir.expanduser().absolute() if args.tmp_dir else None
     print(json.dumps(
-        asyncio.run(install_workspace(args.workspace, herdr_session=args.herdr_session)),
+        asyncio.run(install_workspace(args.workspace, herdr_session=args.herdr_session,
+                                      tmp_dir=tmp_dir)),
         ensure_ascii=False, indent=2
     ))
 

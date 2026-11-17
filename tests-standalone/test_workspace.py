@@ -17,6 +17,13 @@ from qiqi_delegate.install import (
 )
 from qiqi_delegate.runtime import DelegateRuntime
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path_factory, monkeypatch):
+    # The installer creates ~/.qiqi/tmp; keep it out of the real home directory.
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
 def setup_git(path: Path):
     path.mkdir()
     subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
@@ -630,6 +637,50 @@ def test_installer_sets_named_herdr_session_in_project_configs(tmp_path: Path):
     assert retained["herdr_session"] == "qiqi-delegate"
     assert (tmp_path / "AGENTS.md").read_bytes() == before
     assert "qiqi-delegate" in (tmp_path / ".codex" / "config.toml").read_text()
+
+
+def test_installer_defaults_tmpdir_to_per_user_dir(tmp_path: Path, isolated_home: Path):
+    info = asyncio.run(install_workspace(tmp_path))
+
+    expected = isolated_home / ".qiqi" / "tmp"
+    codex = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text())
+    claude = json.loads((tmp_path / ".mcp.json").read_text())
+    assert codex["mcp_servers"]["qiqi_delegate"]["env"]["TMPDIR"] == str(expected)
+    assert claude["mcpServers"]["qiqi_delegate"]["env"]["TMPDIR"] == str(expected)
+    assert expected.is_dir()
+    assert info["tmpdirs_to_trust"] == [str(expected)]
+
+
+def test_installer_preserves_user_env_on_reinstall(tmp_path: Path, isolated_home: Path):
+    asyncio.run(install_workspace(tmp_path, herdr_session="qiqi-delegate"))
+    default_line = f"TMPDIR = {json.dumps(str(isolated_home / '.qiqi' / 'tmp'))}\n"
+    custom_tmp = tmp_path / "custom-tmp"
+
+    claude_path = tmp_path / ".mcp.json"
+    claude = json.loads(claude_path.read_text())
+    claude["mcpServers"]["qiqi_delegate"]["env"].update(
+        {"TMPDIR": str(custom_tmp), "EXTRA_FLAG": "1"})
+    claude_path.write_text(json.dumps(claude))
+    codex_path = tmp_path / ".codex" / "config.toml"
+    codex_text = codex_path.read_text()
+    assert codex_text.count(default_line) == 1
+    codex_text = codex_text.replace(
+        default_line,
+        f"TMPDIR = {json.dumps(str(custom_tmp))}\nEXTRA_FLAG = \"1\"\n",
+    )
+    codex_path.write_text(codex_text)
+
+    info = asyncio.run(install_workspace(tmp_path))
+
+    claude_env = json.loads(claude_path.read_text())["mcpServers"]["qiqi_delegate"]["env"]
+    codex_env = tomllib.loads(codex_path.read_text())["mcp_servers"]["qiqi_delegate"]["env"]
+    for env in (claude_env, codex_env):
+        assert env["TMPDIR"] == str(custom_tmp)
+        assert env["EXTRA_FLAG"] == "1"
+        assert env["QIQI_HERDR_SESSION"] == "qiqi-delegate"
+        assert env["QIQI_WORKSPACE_ROOT"] == str(tmp_path)
+    assert custom_tmp.is_dir()
+    assert info["tmpdirs_to_trust"] == [str(custom_tmp)]
 
 
 @pytest.mark.parametrize("invalid", ["", ".", "..", "../escape", "bad name", "a" * 65])

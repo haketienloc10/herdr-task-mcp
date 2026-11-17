@@ -35,6 +35,10 @@ Installer giữ nội dung ngoài vùng quản lý và không sửa repository n
 
 Nếu cần Herdr session riêng, thêm `--herdr-session dev-session` vào lệnh installer.
 
+Installer đặt `TMPDIR` của MCP server là `~/.qiqi/tmp` và tạo thư mục này. Peer nhận thư mục kết quả của mỗi turn bên dưới đường dẫn đó. Trust thư mục này một lần trong Claude trên mỗi máy; installer không tự trust. Output của installer liệt kê đường dẫn cần trust trong `tmpdirs_to_trust`. Đổi đường dẫn mặc định bằng `--tmp-dir <path>`.
+
+Installer giữ các biến `env` do người dùng thêm vào `qiqi_delegate` trong `.mcp.json` và `.codex/config.toml`, kể cả `TMPDIR` đã đặt sẵn. Installer chỉ ghi lại `QIQI_WORKSPACE_ROOT` và `QIQI_HERDR_SESSION`.
+
 ## Cấu hình
 
 Khai báo Git root trong `../qiqi-control/repos.yaml`:
