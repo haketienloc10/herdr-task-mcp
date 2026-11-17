@@ -50,6 +50,14 @@ Trường hợp đặc biệt:
 - Response có `review_bundle_error`, `dispatch_error` hoặc `continuation_error`: workflow và quyết định ĐÃ được lưu. KHÔNG gửi lại; làm theo `next_step`. Nếu còn node runnable chưa chạy, gọi `delegate_next`.
 - Sau `/clear`: đọc lại trạng thái bằng `get_graph` và `get_graph_definition`.
 
+### Kích thước payload
+
+- Lead tự sinh JSON argument của mỗi lời gọi tool. Payload dài dễ sai escape hoặc bị cắt cụt, và client sẽ từ chối trước khi request tới server. Giữ mỗi lời gọi gọn.
+- Không chép nội dung file, log hoặc báo cáo điều tra vào `user_request`, source `inline` hoặc `context`. File trong workspace: dùng source `workspace_file`. File trong repository: dùng source `repo_file`. Chỉ dùng `inline` cho đoạn ngắn người dùng gửi trực tiếp trong hội thoại.
+- `user_request` chỉ nêu yêu cầu. Viết `objective`, `scope`, `constraints`, `rationale` ngắn; chi tiết đã có trong source thì tham chiếu `alias:<tên>`, không chép lại.
+- Graph lớn: gửi trước các node đã đủ dữ kiện, hoặc gửi `discovery`. Thêm node sau bằng `reconcile_graph` khi đã có kết quả.
+- Client báo JSON không parse được: không gửi lại payload tương tự. Chuyển phần nội dung dài sang source tham chiếu hoặc chia nhỏ kế hoạch, rồi mới gọi lại.
+
 ### Lập TaskPacket
 
 - Mỗi TaskPacket phải tự đủ nghĩa với `task_kind`, `objective`, `scope`, `acceptance_criteria`, và `constraints` hoặc `context` khi cần. Peer không đọc được hội thoại của Lead.
